@@ -112,7 +112,7 @@ uv run ty check src/hosting/
 
 1. Go to **EC2 > Launch Instance**
 2. Name: `openpi-inference`
-3. AMI: search for **Ubuntu 22.04** (select the 64-bit x86 version)
+3. AMI: search for **Ubuntu 24.04** (select the 64-bit x86 version)
 4. Instance type: **g6e.xlarge** (1x L40S GPU, 4 vCPUs, 32 GB RAM)
 5. Key pair: select or create one for SSH access
 6. Network settings: create or select a security group that allows:
@@ -124,16 +124,21 @@ uv run ty check src/hosting/
 **Option B: AWS CLI**
 
 ```bash
+# Find the latest Ubuntu 24.04 AMI for your region
+AMI_ID=$(aws ec2 describe-images \
+  --owners 099720109477 \
+  --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*" \
+  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+  --output text)
+
 aws ec2 run-instances \
-  --image-id ami-0c02fb55956c7d316 \
+  --image-id $AMI_ID \
   --instance-type g6e.xlarge \
   --key-name your-keypair \
   --security-group-ids sg-xxxxxxxx \
   --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":100,"VolumeType":"gp3"}}]' \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=openpi-inference}]'
 ```
-
-The AMI ID above is for Ubuntu 22.04 in us-east-1. Find your region's AMI in the console or with `aws ec2 describe-images`.
 
 ### 2. Install dependencies on the instance
 
