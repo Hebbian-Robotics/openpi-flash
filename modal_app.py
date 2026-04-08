@@ -68,7 +68,6 @@ model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_
     volumes={"/model-cache": model_weights_volume},
     scaledown_window=300,
     enable_memory_snapshot=True,
-    experimental_options={"enable_gpu_snapshot": True},
 )
 @modal.concurrent(max_inputs=1)
 class OpenPIInference:
