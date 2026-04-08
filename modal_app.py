@@ -48,13 +48,14 @@ openpi_image = (
     .env(
         {
             "OPENPI_DATA_HOME": "/model-cache",
-            "PYTHONPATH": "/app/openpi-src:/app/hosting-src",
+            "PYTHONPATH": "/app/openpi-src:/app/openpi-client-src:/app/hosting-src",
             "VIRTUAL_ENV": "/build/openpi/.venv",
             "PATH": "/build/openpi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
     )
     .add_local_dir("src", "/app/hosting-src")
     .add_local_dir("../openpi/src", "/app/openpi-src")
+    .add_local_dir("../openpi/packages/openpi-client/src", "/app/openpi-client-src")
 )
 
 model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_missing=True)
