@@ -42,22 +42,22 @@ def main() -> None:
 
     # Connect WebSocket.
     print(f"\nConnecting to {host}:{port} ...")
-    connect_start = time.time()
+    connect_start = time.monotonic()
     policy = _websocket_client_policy.WebsocketClientPolicy(host=host, port=port)
-    print(f"Connected in {1000 * (time.time() - connect_start):.0f}ms")
+    print(f"Connected in {1000 * (time.monotonic() - connect_start):.0f}ms")
     print(f"Server metadata: {policy.get_server_metadata()}")
 
     # Warmup (first inference includes JAX compilation, not representative).
     print("\nWarmup (1 inference, includes JAX compilation) ...")
-    warmup_start = time.time()
+    warmup_start = time.monotonic()
     policy.infer(_random_observation_aloha())
-    print(f"Warmup done in {1000 * (time.time() - warmup_start):.0f}ms")
+    print(f"Warmup done in {1000 * (time.monotonic() - warmup_start):.0f}ms")
 
     # Actual test inference.
     print("\nRunning inference ...")
-    start = time.time()
+    start = time.monotonic()
     action = policy.infer(_random_observation_aloha())
-    client_ms = 1000 * (time.time() - start)
+    client_ms = 1000 * (time.monotonic() - start)
 
     print(f"\nAction shape: {action['actions'].shape}")
     print()
