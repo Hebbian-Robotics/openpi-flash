@@ -6,7 +6,7 @@ import logging
 import websockets.asyncio.server as _server
 
 from hosting.config import CustomerId
-from hosting.config import ServiceConfig
+from hosting.config import HasAuth
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def pop_customer_id(connection: _server.ServerConnection) -> CustomerId | None:
     return _authenticated_connections.pop(id(connection), None)
 
 
-def create_request_handler(service_config: ServiceConfig):
+def create_request_handler(service_config: HasAuth):
     """Create a process_request callback that checks API keys and handles health checks.
 
     Returns a function compatible with websockets' process_request parameter.

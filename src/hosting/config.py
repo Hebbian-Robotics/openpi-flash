@@ -3,7 +3,7 @@
 import json
 import os
 import pathlib
-from typing import Annotated, NewType
+from typing import Annotated, NewType, Protocol, runtime_checkable
 
 from openpi.training import config as _openpi_config
 from pydantic import BaseModel
@@ -13,6 +13,18 @@ from pydantic import field_validator
 ApiKey = NewType("ApiKey", str)
 CustomerId = NewType("CustomerId", str)
 ModelVersion = NewType("ModelVersion", str)
+
+
+@runtime_checkable
+class HasAuth(Protocol):
+    """Minimal interface consumed by create_request_handler and HostedPolicyServer.
+
+    Both ServiceConfig and VlashServiceConfig satisfy this protocol.
+    """
+
+    customers: list  # list[CustomerConfig]
+
+    def lookup_api_key(self, api_key: str) -> "CustomerConfig | None": ...
 
 
 class CustomerConfig(BaseModel):

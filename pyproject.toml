@@ -19,8 +19,8 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "ruff",
-    "ty",
+    "ruff>=0.15.9",
+    "ty>=0.0.29",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -28,3 +28,8 @@ packages = ["src/hosting"]
 
 [tool.ruff]
 extend = "../openpi/pyproject.toml"
+
+[tool.ty.environment]
+# vlash is not installed in the hosting venv — it's added via PYTHONPATH
+# in the Docker container. Point ty at it so it can resolve vlash.* imports.
+extra-paths = ["../vlash"]
