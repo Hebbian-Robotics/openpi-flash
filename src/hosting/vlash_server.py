@@ -18,24 +18,49 @@ Protocol:
 """
 
 import asyncio
-from copy import copy
 import http
 import logging
 import time
 import traceback
-from typing import Protocol
 import uuid
+from copy import copy
+from typing import Protocol, TypedDict
 
 import numpy as np
-from openpi_client import msgpack_numpy
 import torch
-from vlash.utils import prepare_observation_for_inference
 import websockets.asyncio.server as _server
 import websockets.frames
+from openpi_client import msgpack_numpy
+from vlash.utils import prepare_observation_for_inference
 
-from hosting.vlash_config import VlashServiceConfig
+from hosting.vlash_config import PolicyType, VlashServiceConfig
 
 logger = logging.getLogger(__name__)
+
+OBSERVATION_STATE_KEY = "observation.state"
+
+
+class PolicyMetadata(TypedDict):
+    """Metadata sent to clients on WebSocket connection."""
+
+    policy_type: PolicyType
+    model_version: str
+    n_action_steps: int
+
+
+class VlashServerTiming(TypedDict):
+    """Server-side timing breakdown for a single inference request."""
+
+    infer_ms: float
+    wait_ms: float
+
+
+class InferenceResponse(TypedDict):
+    """Response payload sent to clients after inference."""
+
+    actions: np.ndarray
+    precomputed: bool
+    server_timing: VlashServerTiming
 
 
 class VlashPolicy(Protocol):
@@ -52,12 +77,12 @@ class VlashPolicyServer:
         policy: VlashPolicy,
         device: torch.device,
         service_config: VlashServiceConfig,
-        metadata: dict | None = None,
+        metadata: PolicyMetadata | None = None,
     ) -> None:
         self._policy = policy
         self._device = device
         self._config = service_config
-        self._metadata = metadata or {}
+        self._metadata: PolicyMetadata | dict = metadata or {}
         self._semaphore = asyncio.Semaphore(service_config.max_concurrent_requests)
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
@@ -98,7 +123,7 @@ class VlashPolicyServer:
         observation = copy(observation)
 
         if future_state is not None:
-            observation["observation.state"] = future_state
+            observation[OBSERVATION_STATE_KEY] = future_state
 
         start = time.monotonic()
         with torch.inference_mode():
@@ -132,7 +157,7 @@ class VlashPolicyServer:
                 observation = msgpack_numpy.unpackb(await websocket.recv())
 
                 # Concurrency check.
-                if not self._semaphore._value:  # noqa: SLF001
+                if not self._semaphore._value:
                     logger.warning("Server busy, rejecting request (request_id=%s)", request_id)
                     await websocket.close(
                         code=websockets.frames.CloseCode.TRY_AGAIN_LATER,
@@ -160,13 +185,13 @@ class VlashPolicyServer:
 
                 wait_ms = (time.monotonic() - request_start) * 1000
 
-                response = {
+                response: InferenceResponse = {
                     "actions": action_chunk,
                     "precomputed": precomputed,
-                    "server_timing": {
-                        "infer_ms": round(inference_time_ms, 1),
-                        "wait_ms": round(wait_ms, 1),
-                    },
+                    "server_timing": VlashServerTiming(
+                        infer_ms=round(inference_time_ms, 1),
+                        wait_ms=round(wait_ms, 1),
+                    ),
                 }
 
                 logger.info(
@@ -195,7 +220,9 @@ class VlashPolicyServer:
                 raise
 
 
-def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
+def _health_check(
+    connection: _server.ServerConnection, request: _server.Request
+) -> _server.Response | None:
     if request.path == "/healthz":
         return connection.respond(http.HTTPStatus.OK, "OK\n")
     return None

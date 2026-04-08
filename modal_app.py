@@ -8,6 +8,8 @@ Usage:
     modal deploy modal_app.py   # production
 """
 
+from typing import Any
+
 import modal
 
 app = modal.App("openpi-inference")
@@ -18,29 +20,41 @@ openpi_image = (
         add_python="3.11",
     )
     .apt_install("git", "git-lfs", "build-essential", "clang")
-    # Install openpi dependencies using its lockfile.
     .pip_install("uv")
-    .copy_local_dir("../openpi", "/build/openpi", ignore=[".git", "__pycache__", "*.pyc"])
-    .run_commands(
-        "cd /build/openpi && uv venv --python 3.11 /opt/venv",
-        "cd /build/openpi && GIT_LFS_SKIP_SMUDGE=1 /opt/venv/bin/python -m uv pip install .",
+    # Layer 1: Copy only dependency metadata (changes rarely).
+    .add_local_file("../openpi/pyproject.toml", "/build/openpi/pyproject.toml", copy=True)
+    .add_local_file("../openpi/uv.lock", "/build/openpi/uv.lock", copy=True)
+    .add_local_file(
+        "../openpi/packages/openpi-client/pyproject.toml",
+        "/build/openpi/packages/openpi-client/pyproject.toml",
+        copy=True,
     )
-    # Apply transformers_replace patch for PyTorch model support.
+    # Layer 2: Install dependencies only (cached unless pyproject.toml/uv.lock change).
+    # Source is mounted via PYTHONPATH at runtime, so no need to install the project itself.
     .run_commands(
-        'TRANSFORMERS_DIR=$(/opt/venv/bin/python -c "import transformers; print(transformers.__file__)" | xargs dirname) && '
-        "cp -r /build/openpi/src/openpi/models_pytorch/transformers_replace/* $TRANSFORMERS_DIR/"
+        "cd /build/openpi && GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-install-project --no-install-workspace",
+        "cd /build/openpi && uv pip install gsutil starlette pydantic",
     )
-    # Install hosting dependencies.
-    .run_commands("/opt/venv/bin/python -m uv pip install starlette pydantic")
-    .copy_local_dir("src", "/app/hosting-src")
-    .copy_local_dir("../openpi/src", "/app/openpi-src")
+    # Layer 3: Copy transformers_replace patch source and apply it.
+    .add_local_dir(
+        "../openpi/src/openpi/models_pytorch/transformers_replace",
+        "/build/transformers_replace",
+        copy=True,
+    )
+    .run_commands(
+        'TRANSFORMERS_DIR=$(/build/openpi/.venv/bin/python -c "import transformers; print(transformers.__file__)" | xargs dirname) && '
+        "cp -r /build/transformers_replace/* $TRANSFORMERS_DIR/"
+    )
     .env(
         {
+            "OPENPI_DATA_HOME": "/model-cache",
             "PYTHONPATH": "/app/openpi-src:/app/hosting-src",
-            "VIRTUAL_ENV": "/opt/venv",
-            "PATH": "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "VIRTUAL_ENV": "/build/openpi/.venv",
+            "PATH": "/build/openpi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         }
     )
+    .add_local_dir("src", "/app/hosting-src")
+    .add_local_dir("../openpi/src", "/app/openpi-src")
 )
 
 model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_missing=True)
@@ -48,19 +62,22 @@ model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_
 
 @app.cls(
     image=openpi_image,
-    gpu="L4",
+    gpu="L40S",
+    region="ap",
     volumes={"/model-cache": model_weights_volume},
-    container_idle_timeout=300,
-    allow_concurrent_inputs=1,
+    scaledown_window=300,
+    enable_memory_snapshot=True,
+    experimental_options={"enable_gpu_snapshot": True},
 )
+@modal.concurrent(max_inputs=1)
 class OpenPIInference:
     model_config_name: str = modal.parameter(default="pi05_aloha")
     checkpoint_dir: str = modal.parameter(default="gs://openpi-assets/checkpoints/pi05_base")
     model_version: str = modal.parameter(default="pi05_v1")
-    default_prompt: str | None = modal.parameter(default=None)
+    default_prompt: str = modal.parameter(default="")
 
-    @modal.enter()
-    def load_model(self):
+    @modal.enter(snap=True)
+    def load_model(self) -> None:
         import logging
 
         from openpi.policies import policy_config as _policy_config
@@ -79,13 +96,13 @@ class OpenPIInference:
         self._policy = _policy_config.create_trained_policy(
             train_config,
             self.checkpoint_dir,
-            default_prompt=self.default_prompt,
+            default_prompt=self.default_prompt or None,
         )
         self._metadata = train_config.policy_metadata
         logger.info("Model loaded successfully")
 
     @modal.asgi_app()
-    def serve(self):
+    def serve(self) -> Any:
         from hosting.modal_asgi import create_openpi_asgi_app
 
         return create_openpi_asgi_app(

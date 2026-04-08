@@ -6,9 +6,10 @@ requires-python = ">=3.11"
 dependencies = [
     "openpi",
     "openpi-client",
-    "pydantic>=2.0",
-    "modal>=0.73",
-    "starlette>=0.37",
+    "pydantic>=2.12.5",
+    "modal>=1.4.1",
+    "starlette>=1.0.0",
+    "gsutil>=5.36",
 ]
 
 [tool.uv.sources]
@@ -21,7 +22,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.9",
+    "ruff>=0.15.9", # 
     "ty>=0.0.29",
 ]
 
@@ -29,7 +30,40 @@ dev = [
 packages = ["src/hosting"]
 
 [tool.ruff]
-extend = "../openpi/pyproject.toml"
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "ANN",
+    "PTH",
+    "RET",
+    "SIM",
+    "TID",
+    "RUF",
+]
+ignore = ["E501", "B008", "C901", "RET504", "ANN401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.rules]
+division-by-zero = "error"
+deprecated = "error"
+unused-ignore-comment = "error"
+possibly-unresolved-reference = "error"
+
+[tool.ty.src]
+# test_modal.py uses runtime sys.path manipulation that ty cannot resolve.
+exclude = ["test_modal.py"]
 
 [tool.ty.environment]
 # vlash is not installed in the hosting venv — it's added via PYTHONPATH

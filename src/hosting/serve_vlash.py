@@ -15,7 +15,7 @@ from vlash.policies.factory import get_policy_class
 from vlash.run import warmup_compiled_policy
 
 from hosting.vlash_config import load_vlash_config
-from hosting.vlash_server import VlashPolicyServer
+from hosting.vlash_server import PolicyMetadata, VlashPolicyServer
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,11 @@ def main() -> None:
         warmup_compiled_policy(policy, config.task)
 
     # Build metadata sent to client on connection.
-    policy_metadata = {
-        "policy_type": config.policy_type,
-        "model_version": config.model_version,
-        "n_action_steps": policy.config.n_action_steps,
-    }
+    policy_metadata = PolicyMetadata(
+        policy_type=config.policy_type,
+        model_version=config.model_version,
+        n_action_steps=policy.config.n_action_steps,
+    )
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)

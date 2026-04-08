@@ -8,18 +8,24 @@ import asyncio
 import logging
 import time
 import traceback
+from typing import TypedDict
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import PlainTextResponse
-from starlette.routing import Route
-from starlette.routing import WebSocketRoute
-from starlette.websockets import WebSocket
-from starlette.websockets import WebSocketDisconnect
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
+
+
+class OpenPIServerTiming(TypedDict, total=False):
+    """Server-side timing for OpenPI inference requests."""
+
+    infer_ms: float
+    prev_total_ms: float
 
 
 def create_openpi_asgi_app(
@@ -52,11 +58,10 @@ def create_openpi_asgi_app(
                 action = await asyncio.to_thread(policy.infer, observation)
                 infer_time = time.monotonic() - infer_time
 
-                action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
-                }
+                timing = OpenPIServerTiming(infer_ms=infer_time * 1000)
                 if prev_total_time is not None:
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    timing["prev_total_ms"] = prev_total_time * 1000
+                action["server_timing"] = timing
 
                 await websocket.send_bytes(packer.pack(action))
                 prev_total_time = time.monotonic() - start_time

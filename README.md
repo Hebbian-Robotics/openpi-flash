@@ -25,7 +25,7 @@ uv venv --python 3.11
 uv sync
 ```
 
-This installs the hosting service and pulls in `openpi` and `openpi-client` as editable path dependencies from the sibling directory.
+This installs the hosting service and pulls in `openpi` and `openpi-client` (from `openpi/packages/openpi-client`) as editable path dependencies from the sibling `openpi` directory.
 
 ## Configuration
 
@@ -68,7 +68,7 @@ docker run --rm --gpus=all \
 Or with Docker Compose:
 
 ```bash
-docker compose up --build
+docker compose --profile openpi up --build
 ```
 
 ## Running on Modal
@@ -78,13 +78,13 @@ docker compose up --build
 ### Prerequisites
 
 ```bash
-modal setup  # one-time auth
+uv run modal setup  # one-time auth
 ```
 
 ### Development (hot-reload)
 
 ```bash
-modal serve modal_app.py
+uv run modal serve modal_app.py
 ```
 
 This starts a dev server with a temporary URL. Modal prints the URL — it looks like:
@@ -96,7 +96,7 @@ https://<your-workspace>--openpi-inference-openpiinference-serve-dev.modal.run
 ### Production deploy
 
 ```bash
-modal deploy modal_app.py
+uv run modal deploy modal_app.py
 ```
 
 This creates a persistent URL that stays up and scales automatically.
@@ -107,12 +107,13 @@ Pass Modal parameters to change the model config:
 
 ```bash
 # Different model config
-modal deploy modal_app.py \
+uv run modal deploy modal_app.py \
   --model-config-name pi0_aloha_sim \
   --checkpoint-dir gs://openpi-assets/checkpoints/pi0_aloha_sim
 
-# With a default prompt
-modal deploy modal_app.py \
+# With a model version and default prompt
+uv run modal deploy modal_app.py \
+  --model-version pi0_sim_v2 \
   --default-prompt "pick up the cube"
 ```
 
@@ -122,7 +123,7 @@ Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()`:
 
 ```python
 @app.cls(
-    gpu="A10G",  # or "L4", "A100", "H100"
+    gpu="A10G",  # or "L4", "L40S", "A100", "H100"
     ...
 )
 ```
@@ -131,10 +132,10 @@ Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()`:
 
 The first cold start downloads model weights and caches them to a Modal Volume (`openpi-model-weights`). Subsequent cold starts load from the volume, which is much faster.
 
-To pre-populate the volume or inspect its contents:
+The volume is created automatically on the first deploy. To inspect its contents afterwards:
 
 ```bash
-modal volume ls openpi-model-weights
+uv run modal volume ls openpi-model-weights
 ```
 
 ## Connecting
@@ -355,3 +356,55 @@ client -> WebSocket -> WebsocketPolicyServer -> Policy.infer() -> response
 ```
 
 The server reuses openpi's `create_trained_policy()` and `Policy.infer()` directly. No openpi code is modified. Both JAX and PyTorch checkpoints are supported (auto-detected).
+
+## VLASH inference (alternative backend)
+
+The hosting service also supports [VLASH](https://github.com/kstonekuan/vlash) policies as an alternative to openpi. VLASH uses async chunk pre-computation: after the first request, the server pre-computes the next action chunk in the background so subsequent responses are near-instant.
+
+### Configuration
+
+Copy [`config.vlash.example.json`](config.vlash.example.json) and edit it:
+
+```bash
+cp config.vlash.example.json config.vlash.json
+# Edit config.vlash.json: set your model and checkpoint
+```
+
+| Field | Description |
+|-------|-------------|
+| `policy_type` | VLASH policy type (`pi0` or `pi05`) |
+| `pretrained_path` | HuggingFace hub name or local path to checkpoint |
+| `model_version` | Arbitrary string included in logs and responses |
+| `task` | Language prompt / task description |
+| `robot_type` | Robot type string for observation preprocessing |
+| `compile_model` | Whether to warmup `torch.compile` on startup (default: false) |
+| `port` | Server port (default: 8000) |
+| `max_concurrent_requests` | Max simultaneous inferences (default: 1) |
+
+### Running locally
+
+```bash
+INFERENCE_CONFIG_PATH=config.vlash.json uv run python -m hosting.serve_vlash
+```
+
+### Running with Docker
+
+```bash
+# Build (from this directory)
+docker build .. -t vlash-hosted -f Dockerfile.vlash
+
+# Run
+docker run --rm --gpus=all \
+  -v ./config.vlash.json:/config/config.json:ro \
+  -e INFERENCE_CONFIG_PATH=/config/config.json \
+  -p 8000:8000 \
+  vlash-hosted
+```
+
+Or with Docker Compose:
+
+```bash
+docker compose --profile vlash up --build
+```
+
+Note: the openpi service uses the `openpi` profile (`docker compose --profile openpi up --build`).

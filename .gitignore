@@ -1,0 +1,29 @@
+# OS
+.DS_Store
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pytype/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local configuration
+.env
+.env.*
+!.env.example
+config.json
+config.vlash.json

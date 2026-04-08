@@ -3,16 +3,18 @@
 import json
 import os
 import pathlib
+from typing import Literal
 
 from pydantic import BaseModel
-from pydantic import field_validator
+
+PolicyType = Literal["pi0", "pi05"]
 
 
 class VlashServiceConfig(BaseModel):
     """Top-level configuration for the VLASH hosted inference service."""
 
     # VLASH model settings.
-    policy_type: str  # "pi0" or "pi05"
+    policy_type: PolicyType
     pretrained_path: str  # HuggingFace hub name or local path to checkpoint
     model_version: str
     task: str | None = None  # Language prompt / task description
@@ -23,13 +25,6 @@ class VlashServiceConfig(BaseModel):
     port: int = 8000
     max_concurrent_requests: int = 1
 
-    @field_validator("policy_type")
-    @classmethod
-    def validate_policy_type(cls, value: str) -> str:
-        if value not in ("pi0", "pi05"):
-            raise ValueError(f"policy_type must be 'pi0' or 'pi05', got '{value}'")
-        return value
-
 
 def load_vlash_config(config_path: str | None = None) -> VlashServiceConfig:
     """Load and parse VLASH service config from a JSON file.
@@ -38,10 +33,12 @@ def load_vlash_config(config_path: str | None = None) -> VlashServiceConfig:
     """
     config_path = config_path or os.environ.get("INFERENCE_CONFIG_PATH")
     if not config_path:
-        raise ValueError("No config path provided. Set INFERENCE_CONFIG_PATH env var or pass config_path argument.")
+        raise ValueError(
+            "No config path provided. Set INFERENCE_CONFIG_PATH env var or pass config_path argument."
+        )
     path = pathlib.Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
-    with open(path) as f:
+    with path.open() as f:
         data = json.load(f)
     return VlashServiceConfig(**data)
