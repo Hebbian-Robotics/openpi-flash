@@ -76,7 +76,7 @@ class OpenPIInference:
     model_version: str = modal.parameter(default="pi05_v1")
     default_prompt: str = modal.parameter(default="")
 
-    @modal.enter(snap=True)
+    @modal.enter(snap=False)
     def load_model(self) -> None:
         import logging
 
