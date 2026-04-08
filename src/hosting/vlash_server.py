@@ -1,12 +1,11 @@
 """VLASH hosted inference server with async chunk pre-computation.
 
-Serves VLASH policies over WebSocket with the same auth and logging as the
-OpenPI server, but with a VLASH-specific protocol that preserves the async
+Serves VLASH policies over WebSocket with a protocol that preserves the async
 inference pipeline: the server pre-computes the next action chunk while the
 client executes the current one.
 
 Protocol:
-    1. Client connects with Bearer auth.
+    1. Client connects (no auth required).
     2. Server sends metadata (msgpack): policy_type, n_action_steps, etc.
     3. Client sends observation (msgpack dict of numpy arrays).
     4. Server returns action chunk + timing metadata.
@@ -20,6 +19,7 @@ Protocol:
 
 import asyncio
 from copy import copy
+import http
 import logging
 import time
 import traceback
@@ -33,9 +33,6 @@ from vlash.utils import prepare_observation_for_inference
 import websockets.asyncio.server as _server
 import websockets.frames
 
-from hosting.auth import create_request_handler
-from hosting.auth import pop_customer_id
-from hosting.config import CustomerId
 from hosting.vlash_config import VlashServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -48,12 +45,7 @@ class VlashPolicy(Protocol):
 
 
 class VlashPolicyServer:
-    """WebSocket server for VLASH policies with async chunk pre-computation.
-
-    Each connection maintains its own inference pipeline state: the last
-    returned chunk (for future-state conditioning) and a pre-computed next
-    chunk future.
-    """
+    """WebSocket server for VLASH policies with async chunk pre-computation."""
 
     def __init__(
         self,
@@ -73,14 +65,13 @@ class VlashPolicyServer:
         asyncio.run(self._run())
 
     async def _run(self) -> None:
-        process_request = create_request_handler(self._config)
         async with _server.serve(
             self._handler,
             "0.0.0.0",
             self._config.port,
             compression=None,
             max_size=None,
-            process_request=process_request,
+            process_request=_health_check,
         ) as server:
             logger.info(
                 "VLASH server listening on port %d (model_version=%s, max_concurrent=%d)",
@@ -124,13 +115,8 @@ class VlashPolicyServer:
         return action_chunk_numpy, inference_time_ms
 
     async def _handler(self, websocket: _server.ServerConnection) -> None:
-        customer_id: CustomerId = pop_customer_id(websocket) or CustomerId("unknown")
         connection_id = str(uuid.uuid4())[:8]
-
-        logger.info(
-            "Connection opened",
-            extra={"customer_id": customer_id, "connection_id": connection_id},
-        )
+        logger.info("Connection opened (connection_id=%s)", connection_id)
 
         packer = msgpack_numpy.Packer()
         await websocket.send(packer.pack(self._metadata))
@@ -147,10 +133,7 @@ class VlashPolicyServer:
 
                 # Concurrency check.
                 if not self._semaphore._value:  # noqa: SLF001
-                    logger.warning(
-                        "Server busy, rejecting request",
-                        extra={"customer_id": customer_id, "request_id": request_id},
-                    )
+                    logger.warning("Server busy, rejecting request (request_id=%s)", request_id)
                     await websocket.close(
                         code=websockets.frames.CloseCode.TRY_AGAIN_LATER,
                         reason="Server busy — max concurrent requests reached.",
@@ -170,8 +153,6 @@ class VlashPolicyServer:
                         precomputed = False
 
                     # Start pre-computing the next chunk in the background.
-                    # Use future-state conditioning: the last action of the current
-                    # chunk predicts where the robot will be when this chunk finishes.
                     future_state = action_chunk[-1]
                     precomputed_future = asyncio.create_task(
                         asyncio.to_thread(self._run_inference, observation, future_state)
@@ -186,46 +167,35 @@ class VlashPolicyServer:
                         "infer_ms": round(inference_time_ms, 1),
                         "wait_ms": round(wait_ms, 1),
                     },
-                    "hosting": {
-                        "customer_id": customer_id,
-                        "request_id": request_id,
-                        "model_version": self._config.model_version,
-                    },
                 }
 
                 logger.info(
-                    "Inference complete",
-                    extra={
-                        "customer_id": customer_id,
-                        "request_id": request_id,
-                        "model_version": self._config.model_version,
-                        "infer_ms": round(inference_time_ms, 1),
-                        "precomputed": precomputed,
-                    },
+                    "Inference complete (request_id=%s, infer_ms=%.1f, precomputed=%s)",
+                    request_id,
+                    inference_time_ms,
+                    precomputed,
                 )
 
                 await websocket.send(packer.pack(response))
 
             except websockets.ConnectionClosed:
-                logger.info(
-                    "Connection closed",
-                    extra={"customer_id": customer_id, "connection_id": connection_id},
-                )
-                # Cancel any pending pre-computation.
+                logger.info("Connection closed (connection_id=%s)", connection_id)
                 if precomputed_future is not None and not precomputed_future.done():
                     precomputed_future.cancel()
                 break
             except Exception:
-                logger.exception(
-                    "Error during inference",
-                    extra={"customer_id": customer_id, "connection_id": connection_id},
-                )
+                logger.exception("Error during inference (connection_id=%s)", connection_id)
                 await websocket.send(traceback.format_exc())
                 await websocket.close(
                     code=websockets.frames.CloseCode.INTERNAL_ERROR,
                     reason="Internal server error. Traceback included in previous frame.",
                 )
-                # Cancel any pending pre-computation.
                 if precomputed_future is not None and not precomputed_future.done():
                     precomputed_future.cancel()
                 raise
+
+
+def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
+    if request.path == "/healthz":
+        return connection.respond(http.HTTPStatus.OK, "OK\n")
+    return None

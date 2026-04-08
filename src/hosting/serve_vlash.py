@@ -14,7 +14,6 @@ import torch
 from vlash.policies.factory import get_policy_class
 from vlash.run import warmup_compiled_policy
 
-from hosting.serve import setup_logging
 from hosting.vlash_config import load_vlash_config
 from hosting.vlash_server import VlashPolicyServer
 
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def main() -> None:
-    setup_logging()
+    logging.basicConfig(level=logging.INFO)
 
     config = load_vlash_config()
     logger.info(

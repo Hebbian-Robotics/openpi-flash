@@ -6,11 +6,5 @@
   "robot_type": "so100",
   "compile_model": false,
   "port": 8000,
-  "max_concurrent_requests": 1,
-  "customers": [
-    {
-      "customer_id": "acme",
-      "api_key": "change-me-to-a-real-secret"
-    }
-  ]
+  "max_concurrent_requests": 1
 }

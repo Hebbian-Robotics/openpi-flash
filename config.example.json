@@ -4,11 +4,5 @@
   "model_version": "pi05_v1",
   "default_prompt": null,
   "port": 8000,
-  "max_concurrent_requests": 1,
-  "customers": [
-    {
-      "customer_id": "acme",
-      "api_key": "change-me-to-a-real-secret"
-    }
-  ]
+  "max_concurrent_requests": 1
 }

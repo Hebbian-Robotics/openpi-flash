@@ -1,6 +1,6 @@
 # openpi-hosting
 
-Hosted inference service for [openpi](https://github.com/Physical-Intelligence/openpi). Wraps openpi's policy inference in a WebSocket server with customer authentication, concurrency control, request tagging, and structured JSON logging.
+Hosted inference service for [openpi](https://github.com/Physical-Intelligence/openpi). Wraps openpi's policy inference in a WebSocket server with concurrency control and health checks. Supports deployment on AWS EC2 (Docker) or [Modal](https://modal.com).
 
 ## Prerequisites
 
@@ -33,7 +33,7 @@ Copy [`config.example.json`](config.example.json) and edit it:
 
 ```bash
 cp config.example.json config.json
-# Edit config.json: set your model, checkpoint, and API key
+# Edit config.json: set your model and checkpoint
 ```
 
 | Field | Description |
@@ -44,7 +44,6 @@ cp config.example.json config.json
 | `default_prompt` | Optional default text prompt if not provided per-request |
 | `port` | Server port (default: 8000) |
 | `max_concurrent_requests` | Max simultaneous inferences (default: 1) |
-| `customers` | List of `{customer_id, api_key}` objects |
 
 ## Running locally
 
@@ -72,28 +71,100 @@ Or with Docker Compose:
 docker compose up --build
 ```
 
+## Running on Modal
+
+[Modal](https://modal.com) provides serverless GPU infrastructure — no EC2 instances to manage. The model loads on container startup and scales to zero when idle.
+
+### Prerequisites
+
+```bash
+modal setup  # one-time auth
+```
+
+### Development (hot-reload)
+
+```bash
+modal serve modal_app.py
+```
+
+This starts a dev server with a temporary URL. Modal prints the URL — it looks like:
+
+```
+https://<your-workspace>--openpi-inference-openpiinference-serve-dev.modal.run
+```
+
+### Production deploy
+
+```bash
+modal deploy modal_app.py
+```
+
+This creates a persistent URL that stays up and scales automatically.
+
+### Customizing the model
+
+Pass Modal parameters to change the model config:
+
+```bash
+# Different model config
+modal deploy modal_app.py \
+  --model-config-name pi0_aloha_sim \
+  --checkpoint-dir gs://openpi-assets/checkpoints/pi0_aloha_sim
+
+# With a default prompt
+modal deploy modal_app.py \
+  --default-prompt "pick up the cube"
+```
+
+### Changing the GPU
+
+Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()`:
+
+```python
+@app.cls(
+    gpu="A10G",  # or "L4", "A100", "H100"
+    ...
+)
+```
+
+### Model weight caching
+
+The first cold start downloads model weights and caches them to a Modal Volume (`openpi-model-weights`). Subsequent cold starts load from the volume, which is much faster.
+
+To pre-populate the volume or inspect its contents:
+
+```bash
+modal volume ls openpi-model-weights
+```
+
 ## Connecting
 
-Use the standard `openpi-client` with an `Authorization` header:
+Use the standard `openpi-client`:
 
 ```python
 from openpi_client import websocket_client_policy as wcp
 
+# For EC2/Docker:
+client = wcp.WebsocketClientPolicy(host="localhost", port=8000)
+
+# For Modal (use the URL printed by modal serve/deploy):
 client = wcp.WebsocketClientPolicy(
-    host="localhost",
-    port=8000,
-    extra_headers={"Authorization": "Bearer your-secret-key"},
+    host="your-workspace--openpi-inference-openpiinference-serve.modal.run",
+    port=443,
 )
 
 action = client.infer(observation)
-# action["hosting"] contains: customer_id, request_id, model_version
 # action["server_timing"] contains: infer_ms
 ```
 
 ## Health check
 
 ```bash
+# EC2/Docker
 curl http://localhost:8000/healthz
+
+# Modal
+curl https://<modal-url>/healthz
 ```
 
 ## Linting and typechecking
@@ -178,7 +249,7 @@ docker build .. -t openpi-hosted -f Dockerfile
 
 # Create your config
 cp config.example.json config.json
-# Edit config.json: set your model, API key, etc.
+# Edit config.json: set your model, etc.
 
 # Run
 docker run -d --restart unless-stopped --gpus=all \
@@ -273,39 +344,14 @@ If you prefer AWS-managed TLS:
 4. Attach an ACM certificate for your domain
 5. Point your domain's DNS to the ALB
 
-### 7. CloudWatch logging
-
-The `compose.yml` is preconfigured with the `awslogs` driver. Ensure the instance has an IAM role with `logs:CreateLogGroup` and `logs:PutLogEvents` permissions. Logs appear in the `/openpi/inference` log group.
-
-To use the default Docker logging instead (and view logs with `docker compose logs`), remove the `logging:` block from `compose.yml`.
-
-### 8. Monitoring
-
-Basic health monitoring with a CloudWatch alarm:
-
-```bash
-# Create a simple uptime check (requires Route 53 health check or external monitor)
-# Or use the /healthz endpoint with your preferred monitoring tool:
-curl -sf https://your-domain.com/healthz || echo "DOWN"
-```
-
-For inference latency monitoring, the structured JSON logs include `infer_ms` on every request, which CloudWatch Logs Insights can query:
-
-```
-fields @timestamp, customer_id, infer_ms
-| filter message = "Inference complete"
-| stats avg(infer_ms), max(infer_ms), count() by bin(5m)
-```
-
 ## Architecture
 
 ```
-client -> WebSocket -> HostedPolicyServer -> Policy.infer() -> response
+client -> WebSocket -> WebsocketPolicyServer -> Policy.infer() -> response
                          |
-                         +-- auth (API key check on upgrade)
-                         +-- concurrency gate (semaphore, rejects when busy)
-                         +-- request tagging (customer_id, request_id, model_version)
-                         +-- structured JSON logging (stdout -> CloudWatch)
+                         +-- /healthz endpoint (HTTP 200)
+                         +-- server_timing (infer_ms, prev_total_ms)
+                         +-- msgpack binary protocol
 ```
 
-The server reuses openpi's `create_trained_policy()` and `Policy.infer()` directly. No openpi code is modified.
+The server reuses openpi's `create_trained_policy()` and `Policy.infer()` directly. No openpi code is modified. Both JAX and PyTorch checkpoints are supported (auto-detected).
