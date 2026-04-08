@@ -1,0 +1,25 @@
+services:
+  inference:
+    build:
+      context: ..
+      dockerfile: hosting/Dockerfile
+    environment:
+      - INFERENCE_CONFIG_PATH=/config/config.json
+    volumes:
+      - ./config.json:/config/config.json:ro
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: us-east-1
+        awslogs-group: /openpi/inference
+        awslogs-create-group: "true"

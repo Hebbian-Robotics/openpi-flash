@@ -1,0 +1,14 @@
+{
+  "model_config_name": "pi05_aloha",
+  "checkpoint_dir": "gs://openpi-assets/checkpoints/pi05_base",
+  "model_version": "pi05_v1",
+  "default_prompt": null,
+  "port": 8000,
+  "max_concurrent_requests": 1,
+  "customers": [
+    {
+      "customer_id": "acme",
+      "api_key": "change-me-to-a-real-secret"
+    }
+  ]
+}
