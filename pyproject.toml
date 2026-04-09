@@ -10,7 +10,7 @@ dependencies = [
     "modal>=1.4.1",
     "starlette>=1.0.0",
     "gsutil>=5.36",
-    "quic-portal>=0.1.0",
+    "quic-portal>=0.1.13",
 ]
 
 [tool.uv]
@@ -29,7 +29,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.9", # 
+    "ruff>=0.15.10", # 
     "ty>=0.0.29",
 ]
 

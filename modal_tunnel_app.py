@@ -155,6 +155,22 @@ def serve_tunnel(
             "Applied PyTorch inference workarounds (disabled torch.compile and selective precision)"
         )
 
+    # Log container location for debugging network latency.
+    import json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen("https://ipinfo.io/json", timeout=5) as resp:
+            ip_info = json.loads(resp.read())
+        location_msg = (
+            f"Container location: {ip_info.get('city')}, {ip_info.get('region')} "
+            f"({ip_info.get('country')}) — IP: {ip_info.get('ip')}, org: {ip_info.get('org')}"
+        )
+        print(location_msg)
+        logger.info(location_msg)
+    except Exception as e:
+        logger.warning("Could not determine container location: %s", e)
+
     policy = _policy_config.create_trained_policy(
         train_config,
         checkpoint_dir,
@@ -176,6 +192,22 @@ def serve_tunnel(
     with modal.forward(WEBSOCKET_PORT, unencrypted=True) as tunnel:
         host, port = tunnel.tcp_socket
         logger.info(f"Tunnel available at {host}:{port}")
+
+        # Resolve relay location for debugging.
+        import socket
+
+        try:
+            relay_ip = socket.gethostbyname(host)
+            with urllib.request.urlopen(f"https://ipinfo.io/{relay_ip}/json", timeout=5) as resp:
+                relay_info = json.loads(resp.read())
+            relay_msg = (
+                f"Relay location: {relay_info.get('city')}, {relay_info.get('region')} "
+                f"({relay_info.get('country')}) — IP: {relay_ip}, org: {relay_info.get('org')}"
+            )
+            print(relay_msg)
+            logger.info(relay_msg)
+        except Exception as e:
+            print(f"Could not resolve relay location: {e}")
 
         # Store address in Modal Dict for client discovery.
         tunnel_dict["address"] = (host, port)

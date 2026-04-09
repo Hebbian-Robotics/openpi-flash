@@ -118,6 +118,22 @@ class OpenPIInference:
         logging.basicConfig(level=logging.INFO)
         logger = logging.getLogger(__name__)
 
+        # Log container location for debugging network latency.
+        import json
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen("https://ipinfo.io/json", timeout=5) as resp:
+                ip_info = json.loads(resp.read())
+            location_msg = (
+                f"Container location: {ip_info.get('city')}, {ip_info.get('region')} "
+                f"({ip_info.get('country')}) — IP: {ip_info.get('ip')}, org: {ip_info.get('org')}"
+            )
+            print(location_msg)
+            logger.info(location_msg)
+        except Exception as e:
+            logger.warning("Could not determine container location: %s", e)
+
         logger.info(
             "Loading model: config=%s, checkpoint=%s",
             self.model_config_name,
