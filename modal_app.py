@@ -59,6 +59,8 @@ openpi_image = (
     .env(
         {
             "OPENPI_DATA_HOME": "/model-cache",
+            "TORCHINDUCTOR_CACHE_DIR": "/model-cache/torch_inductor_cache",
+            "TORCHINDUCTOR_FX_GRAPH_CACHE": "1",
             "PYTHONPATH": "/app/openpi-src:/app/openpi-client-src:/app/hosting-src",
             "VIRTUAL_ENV": "/build/openpi/.venv",
             "PATH": "/build/openpi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -174,6 +176,10 @@ class OpenPIInference:
         self._policy.infer(dummy_observation)
         compile_elapsed = time.monotonic() - compile_start
         print(f"Compilation done in {compile_elapsed:.1f}s")
+
+        # Persist inductor cache so subsequent cold starts skip compilation.
+        model_weights_volume.commit()
+        print("Inductor cache committed to volume")
 
     @modal.asgi_app()
     def serve(self) -> Any:
