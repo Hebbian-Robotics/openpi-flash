@@ -19,7 +19,17 @@ openpi_image = (
         "nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04",
         add_python="3.11",
     )
-    .apt_install("git", "git-lfs", "build-essential", "clang")
+    .apt_install(
+        "git",
+        "git-lfs",
+        "build-essential",
+        "clang",
+        "libgl1-mesa-glx",
+        "libglib2.0-0",
+        "libsm6",
+        "libxrender1",
+        "libxext6",
+    )
     .pip_install("uv")
     # Layer 1: Copy only dependency metadata (changes rarely).
     .add_local_file("../openpi/pyproject.toml", "/build/openpi/pyproject.toml", copy=True)
@@ -78,8 +88,30 @@ class OpenPIInference:
 
     @modal.enter(snap=False)
     def load_model(self) -> None:
+        import dataclasses
         import logging
+        import shutil
+        import sys
+        from pathlib import Path
 
+        # Apply transformers patches before any model imports.
+        # The build-time cp may be cached by Modal, so re-apply at runtime.
+        import transformers
+
+        transformers_dir = str(transformers.__path__[0])
+        patch_source = "/app/openpi-src/openpi/models_pytorch/transformers_replace"
+        shutil.copytree(patch_source, transformers_dir, dirs_exist_ok=True)
+
+        # Delete stale .pyc bytecode caches so Python recompiles from the patched .py files.
+        for pycache_dir in Path(transformers_dir, "models").glob("*/__pycache__"):
+            shutil.rmtree(pycache_dir)
+
+        # Evict cached transformers submodules so Python reloads from the patched files.
+        patched_modules = [key for key in sys.modules if key.startswith("transformers.models.")]
+        for mod_name in patched_modules:
+            del sys.modules[mod_name]
+
+        from openpi.models import pi0_config as _pi0_config
         from openpi.policies import policy_config as _policy_config
         from openpi.training import config as _config
 
@@ -93,6 +125,28 @@ class OpenPIInference:
         )
 
         train_config = _config.get_config(self.model_config_name)
+
+        # Workaround for PyTorch checkpoints:
+        # 1. Disable torch.compile — max-autotune crashes on mixed fp32/bf16 matmuls.
+        # 2. Skip to_bfloat16_for_selected_params — it keeps layernorm weights in
+        #    float32 while the patched siglip casts hidden states to bfloat16, causing
+        #    dtype mismatches. The checkpoint is already in the correct precision.
+        is_pytorch = (Path(self.checkpoint_dir) / "model.safetensors").exists()
+        if isinstance(train_config.model, _pi0_config.Pi0Config) and is_pytorch:
+            train_config = dataclasses.replace(
+                train_config,
+                model=dataclasses.replace(train_config.model, pytorch_compile_mode=None),
+            )
+
+            from openpi.models_pytorch import gemma_pytorch
+
+            gemma_pytorch.PaliGemmaWithExpertModel.to_bfloat16_for_selected_params = (
+                lambda self, *a, **kw: None
+            )
+            logger.info(
+                "Applied PyTorch inference workarounds (disabled torch.compile and selective precision)"
+            )
+
         self._policy = _policy_config.create_trained_policy(
             train_config,
             self.checkpoint_dir,

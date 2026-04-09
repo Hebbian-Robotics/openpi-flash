@@ -130,25 +130,39 @@ Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()`:
 
 ### Low-latency mode (experimental)
 
-The default `modal_app.py` serves through Modal's ASGI layer (Starlette). For potentially lower latency, `modal_tunnel_app.py` uses `@modal.web_server` to run openpi's native `WebsocketPolicyServer` directly, bypassing the ASGI layer.
+The default `modal_app.py` serves through Modal's ASGI layer (Starlette). For potentially lower latency, `modal_tunnel_app.py` uses a direct TCP tunnel to run openpi's native `WebsocketPolicyServer`, bypassing the ASGI layer.
 
 ```bash
-# Development
-uv run modal serve modal_tunnel_app.py
-
-# Production (persistent URL)
+# Deploy the function (registers it, but doesn't start a container)
 uv run modal deploy modal_tunnel_app.py
+
+# Start the server (spins up the container and creates the tunnel)
+uv run modal run modal_tunnel_app.py
 ```
+
+The tunnel address is stored in a Modal Dict (`openpi-tunnel-info`) so clients can discover it automatically.
 
 ### Testing
 
-A smoke test script is included that sends a random ALOHA observation and reports timing:
+#### ASGI mode (`modal_app.py`)
 
 ```bash
 uv run python test_modal.py wss://<your-modal-url>
 ```
 
-The test runs a health check (waits for cold start), a warmup inference (JAX compilation), and one timed inference with a full timing breakdown.
+#### Tunnel mode (`modal_tunnel_app.py`)
+
+Start the server in one terminal, then run the test in another:
+
+```bash
+# Terminal 1: start the server
+uvx modal run modal_tunnel_app.py
+
+# Terminal 2: run the test (reads tunnel address from Modal Dict, no URL needed)
+uv run python test_modal_tunnel.py
+```
+
+Both tests send a random ALOHA observation, run a warmup inference, then report a full timing breakdown.
 
 ### Model weight caching
 

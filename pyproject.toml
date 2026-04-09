@@ -2,7 +2,7 @@
 name = "openpi-hosting"
 version = "0.1.0"
 description = "Hosted inference service for openpi"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "openpi",
     "openpi-client",
@@ -10,6 +10,13 @@ dependencies = [
     "modal>=1.4.1",
     "starlette>=1.0.0",
     "gsutil>=5.36",
+    "quic-portal>=0.1.0",
+]
+
+[tool.uv]
+override-dependencies = [
+    "jax[cuda12]==0.5.3; sys_platform == 'linux'",
+    "jax==0.5.3; sys_platform != 'linux'",
 ]
 
 [tool.uv.sources]
@@ -63,7 +70,7 @@ possibly-unresolved-reference = "error"
 
 [tool.ty.src]
 # test_modal.py uses runtime sys.path manipulation that ty cannot resolve.
-exclude = ["test_modal.py"]
+exclude = ["test_modal.py", "test_modal_tunnel.py", "test_modal_quic.py"]
 
 [tool.ty.environment]
 # vlash is not installed in the hosting venv — it's added via PYTHONPATH

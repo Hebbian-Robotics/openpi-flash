@@ -17,7 +17,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 WORKDIR /app
 
 # System dependencies.
-RUN apt-get update && apt-get install -y git git-lfs linux-headers-generic build-essential clang
+RUN apt-get update && apt-get install -y git git-lfs linux-headers-generic build-essential clang libgl1-mesa-glx libglib2.0-0 libsm6 libxrender1 libxext6
 
 # Copy from the cache instead of linking since it's a mounted volume.
 ENV UV_LINK_MODE=copy

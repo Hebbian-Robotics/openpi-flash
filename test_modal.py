@@ -1,6 +1,6 @@
-"""Quick smoke test for the Modal deployment.
+"""Quick smoke test for the Modal ASGI deployment.
 
-Sends a random ALOHA observation to the server and prints timing breakdown.
+Sends random ALOHA observations to the server and prints benchmark results.
 
 Usage:
     uv run python test_modal.py wss://your-modal-url
@@ -11,6 +11,8 @@ import time
 
 import requests
 from openpi_client import websocket_client_policy as _websocket_client_policy
+
+from hosting.benchmark import run_benchmark
 
 # Reuse the random observation generator from the original repo.
 sys.path.insert(0, "../openpi/examples/simple_client")
@@ -42,39 +44,11 @@ def main() -> None:
 
     # Connect WebSocket.
     print(f"\nConnecting to {host}:{port} ...")
-    connect_start = time.monotonic()
     policy = _websocket_client_policy.WebsocketClientPolicy(host=host, port=port)
-    print(f"Connected in {1000 * (time.monotonic() - connect_start):.0f}ms")
     print(f"Server metadata: {policy.get_server_metadata()}")
 
-    # Warmup (first inference includes JAX compilation, not representative).
-    print("\nWarmup (1 inference, includes JAX compilation) ...")
-    warmup_start = time.monotonic()
-    policy.infer(_random_observation_aloha())
-    print(f"Warmup done in {1000 * (time.monotonic() - warmup_start):.0f}ms")
-
-    # Actual test inference.
-    print("\nRunning inference ...")
-    start = time.monotonic()
-    action = policy.infer(_random_observation_aloha())
-    client_ms = 1000 * (time.monotonic() - start)
-
-    print(f"\nAction shape: {action['actions'].shape}")
-    print()
-    print("Timing breakdown:")
-    print(f"  Client round trip:  {client_ms:.0f}ms  (total time measured on this machine)")
-    for key, value in action.get("policy_timing", {}).items():
-        print(f"  Policy {key}:  {value:.0f}ms  (model forward pass on GPU)")
-    for key, value in action.get("server_timing", {}).items():
-        if key == "infer_ms":
-            print(f"  Server {key}:   {value:.0f}ms  (policy.infer on server, includes pre/post processing)")
-        elif key == "prev_total_ms":
-            print(f"  Server {key}: {value:.0f}ms  (server's total time for previous request)")
-    if "server_timing" in action and "policy_timing" in action:
-        server_ms = action["server_timing"].get("infer_ms", 0)
-        policy_ms = action["policy_timing"].get("infer_ms", 0)
-        print(f"\n  Network overhead:   {client_ms - server_ms:.0f}ms  (client round trip - server infer)")
-        print(f"  Server overhead:    {server_ms - policy_ms:.0f}ms  (server infer - model forward pass)")
+    result = run_benchmark(policy, _random_observation_aloha)
+    result.print_summary()
 
 
 if __name__ == "__main__":

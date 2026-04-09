@@ -18,6 +18,12 @@ uv run modal serve modal_app.py
 
 # Modal production (persistent URL, auto-scales)
 uv run modal deploy modal_app.py
+
+# Modal tunnel (direct TCP, lower latency)
+uv run modal run modal_tunnel_app.py
+
+# Modal QUIC portal (experimental, lowest latency via UDP/QUIC + NAT traversal)
+uv run modal run modal_quic_app.py
 ```
 
 ## Testing
@@ -25,6 +31,12 @@ uv run modal deploy modal_app.py
 ```bash
 # Smoke test against a running instance
 uv run python test_modal.py wss://your-modal-url
+
+# Smoke test tunnel variant
+uv run python test_modal_tunnel.py
+
+# Smoke test QUIC portal variant (no URL needed — discovery via Modal Dict)
+uv run python test_modal_quic.py
 ```
 
 ## Code Quality
