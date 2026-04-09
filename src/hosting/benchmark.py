@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -65,7 +66,7 @@ class BenchmarkResult:
 
 def run_benchmark(
     policy: InferablePolicy,
-    make_observation: Any,
+    make_observation: Callable[[], dict[str, Any]],
     *,
     num_warmup: int = 1,
     num_iterations: int = 5,

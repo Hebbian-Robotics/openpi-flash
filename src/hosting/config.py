@@ -3,9 +3,31 @@
 import json
 import os
 import pathlib
+from typing import TypeVar
 
 from openpi.training import config as _openpi_config
 from pydantic import BaseModel, field_validator
+
+_T = TypeVar("_T", bound=BaseModel)
+
+
+def load_json_config(config_cls: type[_T], config_path: str | None = None) -> _T:
+    """Load and parse a Pydantic config from a JSON file.
+
+    Uses INFERENCE_CONFIG_PATH env var if config_path is not provided.
+    Returns a validated config instance or raises on invalid input.
+    """
+    config_path = config_path or os.environ.get("INFERENCE_CONFIG_PATH")
+    if not config_path:
+        raise ValueError(
+            "No config path provided. Set INFERENCE_CONFIG_PATH env var or pass config_path argument."
+        )
+    path = pathlib.Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    with path.open() as f:
+        data = json.load(f)
+    return config_cls(**data)
 
 
 class ServiceConfig(BaseModel):
@@ -35,19 +57,5 @@ class ServiceConfig(BaseModel):
 
 
 def load_config(config_path: str | None = None) -> ServiceConfig:
-    """Load and parse service config from a JSON file.
-
-    Uses INFERENCE_CONFIG_PATH env var if config_path is not provided.
-    Returns a validated ServiceConfig or raises on invalid input.
-    """
-    config_path = config_path or os.environ.get("INFERENCE_CONFIG_PATH")
-    if not config_path:
-        raise ValueError(
-            "No config path provided. Set INFERENCE_CONFIG_PATH env var or pass config_path argument."
-        )
-    path = pathlib.Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
-    with path.open() as f:
-        data = json.load(f)
-    return ServiceConfig(**data)
+    """Load and parse service config from a JSON file."""
+    return load_json_config(ServiceConfig, config_path)

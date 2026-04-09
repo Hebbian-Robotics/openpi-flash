@@ -1,11 +1,10 @@
 """VLASH-specific service configuration for the hosted inference server."""
 
-import json
-import os
-import pathlib
 from typing import Literal
 
 from pydantic import BaseModel
+
+from hosting.config import load_json_config
 
 PolicyType = Literal["pi0", "pi05"]
 
@@ -27,18 +26,5 @@ class VlashServiceConfig(BaseModel):
 
 
 def load_vlash_config(config_path: str | None = None) -> VlashServiceConfig:
-    """Load and parse VLASH service config from a JSON file.
-
-    Uses INFERENCE_CONFIG_PATH env var if config_path is not provided.
-    """
-    config_path = config_path or os.environ.get("INFERENCE_CONFIG_PATH")
-    if not config_path:
-        raise ValueError(
-            "No config path provided. Set INFERENCE_CONFIG_PATH env var or pass config_path argument."
-        )
-    path = pathlib.Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
-    with path.open() as f:
-        data = json.load(f)
-    return VlashServiceConfig(**data)
+    """Load and parse VLASH service config from a JSON file."""
+    return load_json_config(VlashServiceConfig, config_path)

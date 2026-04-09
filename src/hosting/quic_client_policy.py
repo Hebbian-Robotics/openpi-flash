@@ -12,18 +12,15 @@ if connectivity issues arise.
 import contextlib
 import logging
 import time
-from typing import Any
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 from typing_extensions import override
 
-logger = logging.getLogger(__name__)
+from hosting.quic_protocol import PortalDictLike, QuicMessageType
 
-# Must match the prefixes in quic_server.py.
-_MSG_TYPE_DATA = b"\x00"
-_MSG_TYPE_ERROR = b"\x01"
+logger = logging.getLogger(__name__)
 
 
 class QuicClientPolicy(_base_policy.BasePolicy):
@@ -34,9 +31,10 @@ class QuicClientPolicy(_base_policy.BasePolicy):
 
     def __init__(
         self,
-        portal_dict: Any,
+        portal_dict: PortalDictLike,
         local_port: int = 5556,
         transport_options: QuicTransportOptions | None = None,
+        max_connect_attempts: int = 30,
     ) -> None:
         self._portal_dict = portal_dict
         self._local_port = local_port
@@ -44,6 +42,7 @@ class QuicClientPolicy(_base_policy.BasePolicy):
             initial_window=1024 * 1024,
             keep_alive_interval_secs=2,
         )
+        self._max_connect_attempts = max_connect_attempts
         self._packer = msgpack_numpy.Packer()
         self._portal, self._server_metadata = self._wait_for_server()
 
@@ -51,9 +50,11 @@ class QuicClientPolicy(_base_policy.BasePolicy):
         return self._server_metadata
 
     def _wait_for_server(self) -> tuple[Portal, dict]:
-        """Connect to the QUIC server, retrying until it's available."""
-        logger.info("Connecting to QUIC portal server...")
-        while True:
+        """Connect to the QUIC server, retrying until it's available or max attempts reached."""
+        logger.info(
+            "Connecting to QUIC portal server (max %d attempts)...", self._max_connect_attempts
+        )
+        for attempt in range(1, self._max_connect_attempts + 1):
             try:
                 portal = Portal.create_client(
                     dict=self._portal_dict,
@@ -64,12 +65,16 @@ class QuicClientPolicy(_base_policy.BasePolicy):
                 # First message from server is metadata.
                 raw_metadata = portal.recv(timeout_ms=30_000)
                 if raw_metadata is None:
-                    logger.warning("Timeout waiting for server metadata, retrying...")
+                    logger.warning(
+                        "Timeout waiting for server metadata, retrying... (%d/%d)",
+                        attempt,
+                        self._max_connect_attempts,
+                    )
                     portal.close()
                     time.sleep(2)
                     continue
 
-                if len(raw_metadata) < 1 or raw_metadata[0:1] != _MSG_TYPE_DATA:
+                if len(raw_metadata) < 1 or raw_metadata[0:1] != QuicMessageType.DATA.value:
                     raise RuntimeError(
                         f"Expected data message for metadata, got prefix: {raw_metadata[0:1]!r}"
                     )
@@ -79,13 +84,21 @@ class QuicClientPolicy(_base_policy.BasePolicy):
                 return portal, metadata
 
             except PortalError:
-                logger.info("Server not ready, retrying in 5s...")
+                logger.info(
+                    "Server not ready, retrying in 5s... (%d/%d)",
+                    attempt,
+                    self._max_connect_attempts,
+                )
                 time.sleep(5)
+
+        raise ConnectionError(
+            f"Failed to connect to QUIC server after {self._max_connect_attempts} attempts"
+        )
 
     @override
     def infer(self, obs: dict) -> dict:
         data = self._packer.pack(obs)
-        self._portal.send(_MSG_TYPE_DATA + data)
+        self._portal.send(QuicMessageType.DATA.value + data)
 
         response = self._portal.recv()
         if response is None:
@@ -97,10 +110,10 @@ class QuicClientPolicy(_base_policy.BasePolicy):
         message_type = response[0:1]
         message_body = response[1:]
 
-        if message_type == _MSG_TYPE_ERROR:
+        if message_type == QuicMessageType.ERROR.value:
             raise RuntimeError(f"Error in inference server:\n{message_body.decode('utf-8')}")
 
-        if message_type != _MSG_TYPE_DATA:
+        if message_type != QuicMessageType.DATA.value:
             raise RuntimeError(f"Unexpected message type from server: {message_type!r}")
 
         return msgpack_numpy.unpackb(message_body)

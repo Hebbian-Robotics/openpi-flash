@@ -77,12 +77,12 @@ class VlashPolicyServer:
         policy: VlashPolicy,
         device: torch.device,
         service_config: VlashServiceConfig,
-        metadata: PolicyMetadata | None = None,
+        metadata: PolicyMetadata,
     ) -> None:
         self._policy = policy
         self._device = device
         self._config = service_config
-        self._metadata: PolicyMetadata | dict = metadata or {}
+        self._metadata = metadata
         self._semaphore = asyncio.Semaphore(service_config.max_concurrent_requests)
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
@@ -157,7 +157,7 @@ class VlashPolicyServer:
                 observation = msgpack_numpy.unpackb(await websocket.recv())
 
                 # Concurrency check.
-                if not self._semaphore._value:
+                if self._semaphore.locked():
                     logger.warning("Server busy, rejecting request (request_id=%s)", request_id)
                     await websocket.close(
                         code=websockets.frames.CloseCode.TRY_AGAIN_LATER,

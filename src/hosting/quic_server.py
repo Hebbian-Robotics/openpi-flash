@@ -12,18 +12,14 @@ import contextlib
 import logging
 import time
 import traceback
-from typing import Any
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 
-logger = logging.getLogger(__name__)
+from hosting.quic_protocol import PortalDictLike, QuicMessageType
 
-# Message type prefixes to distinguish data from errors over raw QUIC bytes.
-# WebSocket has text vs binary frame types; QUIC portal only has raw bytes.
-_MSG_TYPE_DATA = b"\x00"
-_MSG_TYPE_ERROR = b"\x01"
+logger = logging.getLogger(__name__)
 
 # Timeout for recv() so the server can periodically check connection health.
 _RECV_TIMEOUT_MS = 30_000
@@ -31,12 +27,12 @@ _RECV_TIMEOUT_MS = 30_000
 
 def _send_data(portal: Portal, data: bytes) -> None:
     """Send a msgpack-encoded data message with the data type prefix."""
-    portal.send(_MSG_TYPE_DATA + data)
+    portal.send(QuicMessageType.DATA.value + data)
 
 
 def _send_error(portal: Portal, error_message: str) -> None:
     """Send an error message with the error type prefix."""
-    portal.send(_MSG_TYPE_ERROR + error_message.encode("utf-8"))
+    portal.send(QuicMessageType.ERROR.value + error_message.encode("utf-8"))
 
 
 class QuicPolicyServer:
@@ -56,7 +52,7 @@ class QuicPolicyServer:
     def __init__(
         self,
         policy: _base_policy.BasePolicy,
-        portal_dict: Any,
+        portal_dict: PortalDictLike,
         metadata: dict | None = None,
         local_port: int = 5555,
         transport_options: QuicTransportOptions | None = None,
@@ -120,7 +116,7 @@ class QuicPolicyServer:
                 message_type = raw_message[0:1]
                 message_body = raw_message[1:]
 
-                if message_type != _MSG_TYPE_DATA:
+                if message_type != QuicMessageType.DATA.value:
                     logger.warning("Received unexpected message type: %r", message_type)
                     continue
 
@@ -130,13 +126,12 @@ class QuicPolicyServer:
                 action = self._policy.infer(observation)
                 infer_time = time.monotonic() - infer_time
 
-                action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
-                }
+                timing: dict[str, float] = {"infer_ms": infer_time * 1000}
                 if prev_total_time is not None:
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    timing["prev_total_ms"] = prev_total_time * 1000
 
-                _send_data(portal, packer.pack(action))
+                response = {**action, "server_timing": timing}
+                _send_data(portal, packer.pack(response))
                 prev_total_time = time.monotonic() - start_time
 
             except PortalError:

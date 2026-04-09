@@ -61,9 +61,9 @@ def create_openpi_asgi_app(
                 timing = OpenPIServerTiming(infer_ms=infer_time * 1000)
                 if prev_total_time is not None:
                     timing["prev_total_ms"] = prev_total_time * 1000
-                action["server_timing"] = timing
 
-                await websocket.send_bytes(packer.pack(action))
+                response = {**action, "server_timing": timing}
+                await websocket.send_bytes(packer.pack(response))
                 prev_total_time = time.monotonic() - start_time
 
             except WebSocketDisconnect:
