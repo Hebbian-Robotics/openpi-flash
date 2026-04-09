@@ -128,9 +128,30 @@ Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()`:
 )
 ```
 
-### Low-latency mode (experimental)
+### Converting checkpoints to PyTorch
 
-The default `modal_app.py` serves through Modal's ASGI layer (Starlette). For potentially lower latency, `modal_tunnel_app.py` uses a direct TCP tunnel to run openpi's native `WebsocketPolicyServer`, bypassing the ASGI layer.
+The default deployment uses PyTorch checkpoints for inference. To convert a JAX checkpoint to PyTorch format on Modal:
+
+```bash
+# Convert the default pi05_base checkpoint
+uv run modal run convert_checkpoint_modal.py
+
+# Convert a different checkpoint
+uv run modal run convert_checkpoint_modal.py \
+  --checkpoint-dir gs://openpi-assets/checkpoints/pi05_droid \
+  --config-name pi05_droid \
+  --output-name pi05_droid_pytorch
+```
+
+The converted checkpoint is saved to the `openpi-model-weights` Modal Volume. Verify with:
+
+```bash
+uv run modal volume ls openpi-model-weights/pi05_base_pytorch
+```
+
+### Low-latency mode (tunnel)
+
+The default `modal_app.py` serves through Modal's ASGI layer (Starlette). For lower latency, `modal_tunnel_app.py` uses a direct TCP tunnel to run openpi's native `WebsocketPolicyServer`, bypassing the ASGI layer.
 
 ```bash
 # Deploy the function (registers it, but doesn't start a container)
@@ -142,7 +163,19 @@ uv run modal run modal_tunnel_app.py
 
 The tunnel address is stored in a Modal Dict (`openpi-tunnel-info`) so clients can discover it automatically.
 
+### QUIC portal mode (experimental)
+
+`modal_quic_app.py` uses [quic-portal](https://github.com/nicois/quic-portal) for direct peer-to-peer QUIC transport with automatic NAT traversal via STUN + UDP hole punching. This avoids TCP head-of-line blocking for potentially lower latency than the tunnel mode.
+
+```bash
+uv run modal run modal_quic_app.py
+```
+
+Connection is coordinated through a shared Modal Dict (`openpi-quic-info`) — no URL or port to manage. Note: NAT traversal only works with "easy" NATs. Fall back to the tunnel mode if connectivity issues arise.
+
 ### Testing
+
+All test scripts run a warmup inference followed by 5 timed iterations, reporting per-iteration timing and a summary with mean/min/max.
 
 #### ASGI mode (`modal_app.py`)
 
@@ -152,23 +185,21 @@ uv run python test_modal.py wss://<your-modal-url>
 
 #### Tunnel mode (`modal_tunnel_app.py`)
 
-Start the server in one terminal, then run the test in another:
-
 ```bash
-# Terminal 1: start the server
-uvx modal run modal_tunnel_app.py
-
-# Terminal 2: run the test (reads tunnel address from Modal Dict, no URL needed)
 uv run python test_modal_tunnel.py
 ```
 
-Both tests send a random ALOHA observation, run a warmup inference, then report a full timing breakdown.
+#### QUIC portal mode (`modal_quic_app.py`)
+
+```bash
+uv run python test_modal_quic.py
+```
 
 ### Model weight caching
 
-The first cold start downloads model weights and caches them to a Modal Volume (`openpi-model-weights`). Subsequent cold starts load from the volume, which is much faster.
+The first cold start downloads model weights and caches them to a Modal Volume (`openpi-model-weights`). Subsequent cold starts load from the volume, which is much faster. For PyTorch inference, convert the checkpoint first (see [Converting checkpoints to PyTorch](#converting-checkpoints-to-pytorch)).
 
-The volume is created automatically on the first deploy. To inspect its contents afterwards:
+The volume is created automatically on the first deploy. To inspect its contents:
 
 ```bash
 uv run modal volume ls openpi-model-weights
@@ -330,7 +361,7 @@ docker tag openpi-hosted:latest $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/open
 docker push $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/openpi-hosting:latest
 ```
 
-The image is large (several GB due to CUDA + PyTorch + JAX). The initial push takes a while but subsequent pushes only upload changed layers.
+The image is large (several GB due to CUDA + model dependencies). The initial push takes a while but subsequent pushes only upload changed layers.
 
 To restore on a new instance, pull instead of building:
 
