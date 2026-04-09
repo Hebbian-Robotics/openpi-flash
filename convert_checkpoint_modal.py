@@ -149,6 +149,21 @@ def convert_checkpoint(
         model_config=model_config,
     )
 
+    # Apply selective mixed precision: keep layernorms and vision embeddings in float32,
+    # everything else in bfloat16. The conversion script saves uniform bfloat16, but the
+    # runtime expects mixed precision via to_bfloat16_for_selected_params. Saving with
+    # correct dtypes allows torch.compile to work without mixed fp32/bf16 matmul crashes.
+    import openpi.models_pytorch.pi0_pytorch as _pi0_pytorch
+    import safetensors.torch as _safetensors_torch
+
+    model_path = output_path / "model.safetensors"
+    logger.info("Applying selective mixed precision to %s", model_path)
+    pi0_model = _pi0_pytorch.PI0Pytorch(model_config)
+    _safetensors_torch.load_model(pi0_model, str(model_path))
+    pi0_model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+    _safetensors_torch.save_model(pi0_model, str(model_path))
+    logger.info("Mixed precision applied and checkpoint re-saved")
+
     # The conversion script copies assets from checkpoint_dir/../assets, which is
     # wrong for checkpoints downloaded via maybe_download. Copy assets from the
     # actual checkpoint directory into the output.

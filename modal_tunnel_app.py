@@ -93,7 +93,6 @@ def serve_tunnel(
     checkpoint_dir: str = "/model-cache/pi05_base_pytorch",
     default_prompt: str = "",
 ) -> None:
-    import logging
     import shutil
 
     # Apply transformers patches before any model imports.
@@ -123,36 +122,20 @@ def serve_tunnel(
     from openpi.serving.websocket_policy_server import WebsocketPolicyServer
     from openpi.training import config as _config
 
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-
     # Load model.
-    logger.info("Loading model: config=%s, checkpoint=%s", model_config_name, checkpoint_dir)
+    print(f"Loading model: config={model_config_name}, checkpoint={checkpoint_dir}")
     train_config = _config.get_config(model_config_name)
 
-    # Workaround for PyTorch checkpoints:
-    # 1. Disable torch.compile — max-autotune crashes on mixed fp32/bf16 matmuls.
-    # 2. Skip to_bfloat16_for_selected_params — it keeps layernorm weights in
-    #    float32 while the patched siglip casts hidden states to bfloat16, causing
-    #    dtype mismatches. The checkpoint is already in the correct precision.
+    # Use default compile mode — reliable, compiles in ~2.5 min, gives ~76ms
+    # policy forward vs ~160ms eager.
     import dataclasses
 
     from openpi.models import pi0_config as _pi0_config
 
-    is_pytorch = (Path(checkpoint_dir) / "model.safetensors").exists()
-    if isinstance(train_config.model, _pi0_config.Pi0Config) and is_pytorch:
+    if isinstance(train_config.model, _pi0_config.Pi0Config):
         train_config = dataclasses.replace(
             train_config,
-            model=dataclasses.replace(train_config.model, pytorch_compile_mode=None),
-        )
-
-        from openpi.models_pytorch import gemma_pytorch
-
-        gemma_pytorch.PaliGemmaWithExpertModel.to_bfloat16_for_selected_params = (
-            lambda self, *a, **kw: None
-        )
-        logger.info(
-            "Applied PyTorch inference workarounds (disabled torch.compile and selective precision)"
+            model=dataclasses.replace(train_config.model, pytorch_compile_mode="default"),
         )
 
     # Log container location for debugging network latency.
@@ -162,21 +145,41 @@ def serve_tunnel(
     try:
         with urllib.request.urlopen("https://ipinfo.io/json", timeout=5) as resp:
             ip_info = json.loads(resp.read())
-        location_msg = (
+        print(
             f"Container location: {ip_info.get('city')}, {ip_info.get('region')} "
             f"({ip_info.get('country')}) — IP: {ip_info.get('ip')}, org: {ip_info.get('org')}"
         )
-        print(location_msg)
-        logger.info(location_msg)
     except Exception as e:
-        logger.warning("Could not determine container location: %s", e)
+        print(f"Could not determine container location: {e}")
 
+    import time
+
+    load_start = time.monotonic()
     policy = _policy_config.create_trained_policy(
         train_config,
         checkpoint_dir,
         default_prompt=default_prompt or None,
     )
-    logger.info("Model loaded successfully")
+    load_elapsed = time.monotonic() - load_start
+    print(f"Model loaded in {load_elapsed:.1f}s")
+
+    import numpy as np
+
+    dummy_observation = {
+        "state": np.ones((14,)),
+        "images": {
+            "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            "cam_left_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            "cam_right_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+        },
+        "prompt": "do something",
+    }
+    print("Compiling model (warmup inference) ...")
+    compile_start = time.monotonic()
+    policy.infer(dummy_observation)
+    compile_elapsed = time.monotonic() - compile_start
+    print(f"Compilation done in {compile_elapsed:.1f}s")
 
     # Start WebSocket server in a background thread.
     server = WebsocketPolicyServer(
@@ -191,8 +194,6 @@ def serve_tunnel(
     # Expose via direct tunnel (bypasses Modal's web endpoint proxy).
     with modal.forward(WEBSOCKET_PORT, unencrypted=True) as tunnel:
         host, port = tunnel.tcp_socket
-        logger.info(f"Tunnel available at {host}:{port}")
-
         # Resolve relay location for debugging.
         import socket
 
@@ -200,12 +201,10 @@ def serve_tunnel(
             relay_ip = socket.gethostbyname(host)
             with urllib.request.urlopen(f"https://ipinfo.io/{relay_ip}/json", timeout=5) as resp:
                 relay_info = json.loads(resp.read())
-            relay_msg = (
+            print(
                 f"Relay location: {relay_info.get('city')}, {relay_info.get('region')} "
                 f"({relay_info.get('country')}) — IP: {relay_ip}, org: {relay_info.get('org')}"
             )
-            print(relay_msg)
-            logger.info(relay_msg)
         except Exception as e:
             print(f"Could not resolve relay location: {e}")
 

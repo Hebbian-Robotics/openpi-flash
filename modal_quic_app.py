@@ -67,7 +67,8 @@ openpi_image = (
     )
     .run_commands(
         'TRANSFORMERS_DIR=$(/build/openpi/.venv/bin/python -c "import transformers; print(transformers.__file__)" | xargs dirname) && '
-        "cp -r /build/transformers_replace/* $TRANSFORMERS_DIR/"
+        "cp -r /build/transformers_replace/* $TRANSFORMERS_DIR/ && "
+        "echo 'transformers patched successfully'"
     )
     .env(
         {
@@ -100,8 +101,6 @@ def serve_quic(
     checkpoint_dir: str = "/model-cache/pi05_base_pytorch",
     default_prompt: str = "",
 ) -> None:
-    import dataclasses
-    import logging
     import shutil
     import sys
     from pathlib import Path
@@ -115,6 +114,8 @@ def serve_quic(
     shutil.copytree(patch_source, transformers_dir, dirs_exist_ok=True)
 
     # Delete stale .pyc bytecode caches so Python recompiles from the patched .py files.
+    # shutil.copytree preserves source timestamps, which can be older than the .pyc
+    # files generated during the image build, causing Python to use the stale bytecache.
     for pycache_dir in Path(transformers_dir, "models").glob("*/__pycache__"):
         shutil.rmtree(pycache_dir)
 
@@ -123,62 +124,73 @@ def serve_quic(
     for mod_name in patched_modules:
         del sys.modules[mod_name]
 
-    from openpi.models import pi0_config as _pi0_config
+    # Log container location for debugging network latency.
+    import json
+    import urllib.request
+
     from openpi.policies import policy_config as _policy_config
     from openpi.training import config as _config
 
     from hosting.quic_server import QuicPolicyServer
 
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-
-    # Log container location for debugging network latency.
-    import json
-    import urllib.request
-
     try:
         with urllib.request.urlopen("https://ipinfo.io/json", timeout=5) as resp:
             ip_info = json.loads(resp.read())
-        location_msg = (
+        print(
             f"Container location: {ip_info.get('city')}, {ip_info.get('region')} "
             f"({ip_info.get('country')}) — IP: {ip_info.get('ip')}, org: {ip_info.get('org')}"
         )
-        print(location_msg)
-        logger.info(location_msg)
     except Exception as e:
-        logger.warning("Could not determine container location: %s", e)
+        print(f"Could not determine container location: {e}")
 
     # Load model.
-    logger.info("Loading model: config=%s, checkpoint=%s", model_config_name, checkpoint_dir)
+    print(f"Loading model: config={model_config_name}, checkpoint={checkpoint_dir}")
     train_config = _config.get_config(model_config_name)
 
-    # Workaround for PyTorch checkpoints:
-    # 1. Disable torch.compile — max-autotune crashes on mixed fp32/bf16 matmuls.
-    # 2. Skip to_bfloat16_for_selected_params — it keeps layernorm weights in
-    #    float32 while the patched siglip casts hidden states to bfloat16, causing
-    #    dtype mismatches. The checkpoint is already in the correct precision.
-    is_pytorch = (Path(checkpoint_dir) / "model.safetensors").exists()
-    if isinstance(train_config.model, _pi0_config.Pi0Config) and is_pytorch:
+    # Use default compile mode — reliable, compiles in ~2.5 min, gives ~76ms
+    # policy forward vs ~160ms eager.
+    import dataclasses
+
+    from openpi.models import pi0_config as _pi0_config
+
+    if isinstance(train_config.model, _pi0_config.Pi0Config):
         train_config = dataclasses.replace(
             train_config,
-            model=dataclasses.replace(train_config.model, pytorch_compile_mode=None),
+            model=dataclasses.replace(train_config.model, pytorch_compile_mode="default"),
         )
 
-        from openpi.models_pytorch import gemma_pytorch
+    import time
 
-        gemma_pytorch.PaliGemmaWithExpertModel.to_bfloat16_for_selected_params = (
-            lambda self, *a, **kw: None
-        )
-        logger.info(
-            "Applied PyTorch inference workarounds (disabled torch.compile and selective precision)"
-        )
-
+    load_start = time.monotonic()
     policy = _policy_config.create_trained_policy(
         train_config,
         checkpoint_dir,
         default_prompt=default_prompt or None,
     )
-    logger.info("Model loaded successfully")
+    load_elapsed = time.monotonic() - load_start
+    print(f"Model loaded in {load_elapsed:.1f}s")
+
+    import numpy as np
+
+    dummy_observation = {
+        "state": np.ones((14,)),
+        "images": {
+            "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            "cam_left_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            "cam_right_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+        },
+        "prompt": "do something",
+    }
+    print("Compiling model (warmup inference) ...")
+    compile_start = time.monotonic()
+    policy.infer(dummy_observation)
+    compile_elapsed = time.monotonic() - compile_start
+    print(f"Compilation done in {compile_elapsed:.1f}s")
+
+    # Clear stale coordination data from previous runs so the server doesn't
+    # immediately try to punch NAT with a non-existent client.
+    quic_dict.clear()
 
     # Serve over QUIC portal (blocks forever, handles reconnections).
     print(f"\nQUIC portal server ready (Dict: 'openpi-quic-info', port: {QUIC_PORT})")

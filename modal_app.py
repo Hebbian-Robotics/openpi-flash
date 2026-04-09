@@ -53,7 +53,8 @@ openpi_image = (
     )
     .run_commands(
         'TRANSFORMERS_DIR=$(/build/openpi/.venv/bin/python -c "import transformers; print(transformers.__file__)" | xargs dirname) && '
-        "cp -r /build/transformers_replace/* $TRANSFORMERS_DIR/"
+        "cp -r /build/transformers_replace/* $TRANSFORMERS_DIR/ && "
+        "echo 'transformers patched successfully'"
     )
     .env(
         {
@@ -82,14 +83,12 @@ model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_
 @modal.concurrent(max_inputs=1)
 class OpenPIInference:
     model_config_name: str = modal.parameter(default="pi05_aloha")
-    checkpoint_dir: str = modal.parameter(default="gs://openpi-assets/checkpoints/pi05_base")
+    checkpoint_dir: str = modal.parameter(default="/model-cache/pi05_base_pytorch")
     model_version: str = modal.parameter(default="pi05_v1")
     default_prompt: str = modal.parameter(default="")
 
     @modal.enter(snap=False)
     def load_model(self) -> None:
-        import dataclasses
-        import logging
         import shutil
         import sys
         from pathlib import Path
@@ -103,6 +102,8 @@ class OpenPIInference:
         shutil.copytree(patch_source, transformers_dir, dirs_exist_ok=True)
 
         # Delete stale .pyc bytecode caches so Python recompiles from the patched .py files.
+        # shutil.copytree preserves source timestamps, which can be older than the .pyc
+        # files generated during the image build, causing Python to use the stale bytecache.
         for pycache_dir in Path(transformers_dir, "models").glob("*/__pycache__"):
             shutil.rmtree(pycache_dir)
 
@@ -111,65 +112,68 @@ class OpenPIInference:
         for mod_name in patched_modules:
             del sys.modules[mod_name]
 
-        from openpi.models import pi0_config as _pi0_config
-        from openpi.policies import policy_config as _policy_config
-        from openpi.training import config as _config
-
-        logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger(__name__)
-
         # Log container location for debugging network latency.
         import json
         import urllib.request
 
+        from openpi.policies import policy_config as _policy_config
+        from openpi.training import config as _config
+
         try:
             with urllib.request.urlopen("https://ipinfo.io/json", timeout=5) as resp:
                 ip_info = json.loads(resp.read())
-            location_msg = (
+            print(
                 f"Container location: {ip_info.get('city')}, {ip_info.get('region')} "
                 f"({ip_info.get('country')}) — IP: {ip_info.get('ip')}, org: {ip_info.get('org')}"
             )
-            print(location_msg)
-            logger.info(location_msg)
         except Exception as e:
-            logger.warning("Could not determine container location: %s", e)
+            print(f"Could not determine container location: {e}")
 
-        logger.info(
-            "Loading model: config=%s, checkpoint=%s",
-            self.model_config_name,
-            self.checkpoint_dir,
-        )
+        print(f"Loading model: config={self.model_config_name}, checkpoint={self.checkpoint_dir}")
 
         train_config = _config.get_config(self.model_config_name)
 
-        # Workaround for PyTorch checkpoints:
-        # 1. Disable torch.compile — max-autotune crashes on mixed fp32/bf16 matmuls.
-        # 2. Skip to_bfloat16_for_selected_params — it keeps layernorm weights in
-        #    float32 while the patched siglip casts hidden states to bfloat16, causing
-        #    dtype mismatches. The checkpoint is already in the correct precision.
-        is_pytorch = (Path(self.checkpoint_dir) / "model.safetensors").exists()
-        if isinstance(train_config.model, _pi0_config.Pi0Config) and is_pytorch:
+        # Use default compile mode — reliable, compiles in ~2.5 min, gives ~76ms
+        # policy forward vs ~160ms eager.
+        import dataclasses
+
+        from openpi.models import pi0_config as _pi0_config
+
+        if isinstance(train_config.model, _pi0_config.Pi0Config):
             train_config = dataclasses.replace(
                 train_config,
-                model=dataclasses.replace(train_config.model, pytorch_compile_mode=None),
+                model=dataclasses.replace(train_config.model, pytorch_compile_mode="default"),
             )
 
-            from openpi.models_pytorch import gemma_pytorch
+        import time
 
-            gemma_pytorch.PaliGemmaWithExpertModel.to_bfloat16_for_selected_params = (
-                lambda self, *a, **kw: None
-            )
-            logger.info(
-                "Applied PyTorch inference workarounds (disabled torch.compile and selective precision)"
-            )
-
+        load_start = time.monotonic()
         self._policy = _policy_config.create_trained_policy(
             train_config,
             self.checkpoint_dir,
             default_prompt=self.default_prompt or None,
         )
+        load_elapsed = time.monotonic() - load_start
         self._metadata = train_config.policy_metadata
-        logger.info("Model loaded successfully")
+        print(f"Model loaded in {load_elapsed:.1f}s")
+
+        import numpy as np
+
+        dummy_observation = {
+            "state": np.ones((14,)),
+            "images": {
+                "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+                "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+                "cam_left_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+                "cam_right_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
+            },
+            "prompt": "do something",
+        }
+        print("Compiling model (warmup inference) ...")
+        compile_start = time.monotonic()
+        self._policy.infer(dummy_observation)
+        compile_elapsed = time.monotonic() - compile_start
+        print(f"Compilation done in {compile_elapsed:.1f}s")
 
     @modal.asgi_app()
     def serve(self) -> Any:

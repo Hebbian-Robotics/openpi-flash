@@ -12,6 +12,7 @@ import contextlib
 import logging
 import time
 import traceback
+from typing import ClassVar
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
@@ -49,6 +50,14 @@ class QuicPolicyServer:
         4. Repeat 2-3
     """
 
+    # Reliable public STUN servers with global presence. The quic-portal
+    # defaults include stun.ekiga.net which is frequently unreachable.
+    DEFAULT_STUN_SERVERS: ClassVar[list[tuple[str, int]]] = [
+        ("stun.l.google.com", 19302),
+        ("stun1.l.google.com", 19302),
+        ("stun2.l.google.com", 19302),
+    ]
+
     def __init__(
         self,
         policy: _base_policy.BasePolicy,
@@ -56,11 +65,13 @@ class QuicPolicyServer:
         metadata: dict | None = None,
         local_port: int = 5555,
         transport_options: QuicTransportOptions | None = None,
+        stun_servers: list[tuple[str, int]] | None = None,
     ) -> None:
         self._policy = policy
         self._portal_dict = portal_dict
         self._metadata = metadata or {}
         self._local_port = local_port
+        self._stun_servers = stun_servers or self.DEFAULT_STUN_SERVERS
         self._transport_options = transport_options or QuicTransportOptions(
             # 1 MiB initial window for large observation payloads (camera images).
             initial_window=1024 * 1024,
@@ -80,6 +91,7 @@ class QuicPolicyServer:
                 portal = Portal.create_server(
                     dict=self._portal_dict,
                     local_port=self._local_port,
+                    stun_servers=self._stun_servers,
                     transport_options=self._transport_options,
                 )
                 logger.info("Client connected via QUIC portal")
