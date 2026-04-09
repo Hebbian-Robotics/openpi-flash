@@ -128,6 +128,28 @@ Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()`:
 )
 ```
 
+### Low-latency mode (experimental)
+
+The default `modal_app.py` serves through Modal's ASGI layer (Starlette). For potentially lower latency, `modal_tunnel_app.py` uses `@modal.web_server` to run openpi's native `WebsocketPolicyServer` directly, bypassing the ASGI layer.
+
+```bash
+# Development
+uv run modal serve modal_tunnel_app.py
+
+# Production (persistent URL)
+uv run modal deploy modal_tunnel_app.py
+```
+
+### Testing
+
+A smoke test script is included that sends a random ALOHA observation and reports timing:
+
+```bash
+uv run python test_modal.py wss://<your-modal-url>
+```
+
+The test runs a health check (waits for cold start), a warmup inference (JAX compilation), and one timed inference with a full timing breakdown.
+
 ### Model weight caching
 
 The first cold start downloads model weights and caches them to a Modal Volume (`openpi-model-weights`). Subsequent cold starts load from the volume, which is much faster.
@@ -148,9 +170,9 @@ from openpi_client import websocket_client_policy as wcp
 # For EC2/Docker:
 client = wcp.WebsocketClientPolicy(host="localhost", port=8000)
 
-# For Modal (use the URL printed by modal serve/deploy):
+# For Modal (use wss:// with the URL printed by modal serve/deploy):
 client = wcp.WebsocketClientPolicy(
-    host="your-workspace--openpi-inference-openpiinference-serve.modal.run",
+    host="wss://your-workspace--openpi-inference-openpiinference-serve.modal.run",
     port=443,
 )
 
