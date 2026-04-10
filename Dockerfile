@@ -35,7 +35,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-install-project --no-dev
 
 # Install hosting dependencies.
-RUN uv pip install pydantic
+# - pydantic: config validation
+# - gsutil: download checkpoints from gs://openpi-assets (openpi's download
+#   module shells out to gsutil for this bucket; without it falls back to gcsfs
+#   which requires explicit GCP credentials)
+RUN uv pip install pydantic gsutil
 
 # Copy transformers_replace files (required for PyTorch models).
 COPY openpi/src/openpi/models_pytorch/transformers_replace/ /tmp/transformers_replace/
@@ -45,5 +49,13 @@ RUN /.venv/bin/python -c "import transformers; print(transformers.__file__)" | x
 COPY openpi/src /app/openpi-src
 COPY hosting/src /app/hosting-src
 ENV PYTHONPATH="/app/openpi-src:/app/hosting-src"
+
+# PyTorch inductor cache — persists within container lifetime (use a volume
+# mount at /cache for persistence across restarts).
+ENV TORCHINDUCTOR_CACHE_DIR=/cache/torch_inductor
+ENV TORCHINDUCTOR_FX_GRAPH_CACHE=1
+
+# openpi data home for downloaded checkpoints and norm stats.
+ENV OPENPI_DATA_HOME=/cache/models
 
 CMD ["python", "-m", "hosting.serve"]

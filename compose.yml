@@ -8,6 +8,7 @@ services:
       - INFERENCE_CONFIG_PATH=/config/config.json
     volumes:
       - ./config.json:/config/config.json:ro
+      - inference-cache:/cache
     ports:
       - "8000:8000"
     deploy:
@@ -50,3 +51,6 @@ services:
         awslogs-region: us-east-1
         awslogs-group: /vlash/inference
         awslogs-create-group: "true"
+
+volumes:
+  inference-cache:
