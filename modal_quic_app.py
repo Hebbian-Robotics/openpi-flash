@@ -26,28 +26,34 @@ Usage:
 
 import modal
 
-from hosting.modal_helpers import create_openpi_image
+from hosting.modal_helpers import (
+    DEFAULT_CHECKPOINT_DIR,
+    DEFAULT_MODEL_CONFIG_NAME,
+    GPU_TYPE,
+    MODEL_CACHE_MOUNT_PATH,
+    QUIC_PORT,
+    REGION,
+    create_openpi_image,
+    model_weights_volume,
+)
 
 app = modal.App("openpi-inference-quic")
 
 openpi_image = create_openpi_image(extra_pip_packages=["quic-portal"])
 
-model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_missing=True)
 quic_dict = modal.Dict.from_name("openpi-quic-info", create_if_missing=True)
-
-QUIC_PORT = 5555
 
 
 @app.function(
     image=openpi_image,
-    gpu="L40S",
-    region="ap",
-    volumes={"/model-cache": model_weights_volume},
+    gpu=GPU_TYPE,
+    region=REGION,
+    volumes={MODEL_CACHE_MOUNT_PATH: model_weights_volume},
     timeout=86400,
 )
 def serve_quic(
-    model_config_name: str = "pi05_aloha",
-    checkpoint_dir: str = "/model-cache/pi05_base_pytorch",
+    model_config_name: str = DEFAULT_MODEL_CONFIG_NAME,
+    checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR,
     default_prompt: str = "",
 ) -> None:
     from hosting.modal_helpers import load_openpi_policy

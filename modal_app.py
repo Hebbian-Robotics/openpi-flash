@@ -12,27 +12,33 @@ from typing import Any
 
 import modal
 
-from hosting.modal_helpers import create_openpi_image
+from hosting.modal_helpers import (
+    DEFAULT_CHECKPOINT_DIR,
+    DEFAULT_MODEL_CONFIG_NAME,
+    GPU_TYPE,
+    MODEL_CACHE_MOUNT_PATH,
+    REGION,
+    create_openpi_image,
+    model_weights_volume,
+)
 
 app = modal.App("openpi-inference")
 
 openpi_image = create_openpi_image()
 
-model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_missing=True)
-
 
 @app.cls(
     image=openpi_image,
-    gpu="L40S",
-    region="ap",
-    volumes={"/model-cache": model_weights_volume},
+    gpu=GPU_TYPE,
+    region=REGION,
+    volumes={MODEL_CACHE_MOUNT_PATH: model_weights_volume},
     scaledown_window=300,
     enable_memory_snapshot=True,
 )
 @modal.concurrent(max_inputs=1)
 class OpenPIInference:
-    model_config_name: str = modal.parameter(default="pi05_aloha")
-    checkpoint_dir: str = modal.parameter(default="/model-cache/pi05_base_pytorch")
+    model_config_name: str = modal.parameter(default=DEFAULT_MODEL_CONFIG_NAME)
+    checkpoint_dir: str = modal.parameter(default=DEFAULT_CHECKPOINT_DIR)
     model_version: str = modal.parameter(default="pi05_v1")
     default_prompt: str = modal.parameter(default="")
 

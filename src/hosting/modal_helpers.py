@@ -12,6 +12,20 @@ from __future__ import annotations
 
 import modal
 
+# ---------------------------------------------------------------------------
+# Shared Modal infrastructure settings — single source of truth for all apps.
+# ---------------------------------------------------------------------------
+GPU_TYPE = "L40S"
+REGION = "ap"
+MODEL_WEIGHTS_VOLUME_NAME = "openpi-model-weights"
+MODEL_CACHE_MOUNT_PATH = "/model-cache"
+DEFAULT_MODEL_CONFIG_NAME = "pi05_aloha"
+DEFAULT_CHECKPOINT_DIR = f"{MODEL_CACHE_MOUNT_PATH}/pi05_base_pytorch"
+WEBSOCKET_PORT = 8000
+QUIC_PORT = 5555
+
+model_weights_volume = modal.Volume.from_name(MODEL_WEIGHTS_VOLUME_NAME, create_if_missing=True)
+
 # Container paths set by the image builder.
 OPENPI_SRC_DIR = "/app/openpi-src"
 HOSTING_SRC_DIR = "/app/hosting-src"

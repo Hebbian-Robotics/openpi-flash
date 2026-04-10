@@ -16,6 +16,8 @@ Usage:
 
 import modal
 
+from hosting.modal_helpers import MODEL_CACHE_MOUNT_PATH, model_weights_volume
+
 app = modal.App("openpi-convert-checkpoint")
 
 convert_image = (
@@ -74,13 +76,11 @@ convert_image = (
     )
 )
 
-model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_missing=True)
-
 
 @app.function(
     image=convert_image,
     gpu="L4",
-    volumes={"/model-cache": model_weights_volume},
+    volumes={MODEL_CACHE_MOUNT_PATH: model_weights_volume},
     timeout=3600,
 )
 def convert_checkpoint(

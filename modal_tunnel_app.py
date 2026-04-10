@@ -19,28 +19,34 @@ Usage:
 
 import modal
 
-from hosting.modal_helpers import create_openpi_image
+from hosting.modal_helpers import (
+    DEFAULT_CHECKPOINT_DIR,
+    DEFAULT_MODEL_CONFIG_NAME,
+    GPU_TYPE,
+    MODEL_CACHE_MOUNT_PATH,
+    REGION,
+    WEBSOCKET_PORT,
+    create_openpi_image,
+    model_weights_volume,
+)
 
 app = modal.App("openpi-inference-tunnel")
 
 openpi_image = create_openpi_image()
 
-model_weights_volume = modal.Volume.from_name("openpi-model-weights", create_if_missing=True)
 tunnel_dict = modal.Dict.from_name("openpi-tunnel-info", create_if_missing=True)
-
-WEBSOCKET_PORT = 8000
 
 
 @app.function(
     image=openpi_image,
-    gpu="L40S",
-    region="ap",
-    volumes={"/model-cache": model_weights_volume},
+    gpu=GPU_TYPE,
+    region=REGION,
+    volumes={MODEL_CACHE_MOUNT_PATH: model_weights_volume},
     timeout=86400,
 )
 def serve_tunnel(
-    model_config_name: str = "pi05_aloha",
-    checkpoint_dir: str = "/model-cache/pi05_base_pytorch",
+    model_config_name: str = DEFAULT_MODEL_CONFIG_NAME,
+    checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR,
     default_prompt: str = "",
 ) -> None:
     import json
