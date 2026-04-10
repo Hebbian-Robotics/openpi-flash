@@ -1,6 +1,11 @@
-# Real-time inference for robots at Physical Intelligence
+---
+source: https://modal.com/blog/physical-intelligence-runs-real-time-remote-inference-for-robotic-control-on-modal
+date: 8 Apr 2026
+category: Customer Stories
+read_time: 5 minute read
+---
 
-*Customer Stories • April 8, 2026 • 5 minute read*
+# Real-time inference for robots at Physical Intelligence
 
 [Physical Intelligence](https://www.physicalintelligence.company/) (Pi) is building a general-purpose robotic intelligence system capable of operating any robot across any task. Their core model---a Visual-Language-Action (VLA) architecture---takes visual observations, natural-language instructions, and the robot's proprioceptive state, then outputs motor commands for the next fraction of a second. Every arm movement in their system flows through this closed loop of continuous inference.
 
@@ -42,6 +47,3 @@ Modal lets Pi pin inference deployments to specific regions close to the robots,
 
 Once inference is region-pinned, adding robots in a new location stops being an infrastructure build-out. Pi can bring up the same container near the new site, mount the same checkpoints via Modal Volumes, and connect robots over the same low-latency transport---without shipping GPU towers or standing up a local cluster.
 
----
-
-*Source: [Modal Blog](https://modal.com/blog/physical-intelligence-runs-real-time-remote-inference-for-robotic-control-on-modal)*

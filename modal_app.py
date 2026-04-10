@@ -20,6 +20,7 @@ from hosting.modal_helpers import (
     REGION,
     create_openpi_image,
     model_weights_volume,
+    prepare_openpi_config,
 )
 
 app = modal.App("openpi-inference")
@@ -42,12 +43,18 @@ class OpenPIInference:
     model_version: str = modal.parameter(default="pi05_v1")
     default_prompt: str = modal.parameter(default="")
 
+    @modal.enter(snap=True)
+    def prepare_config(self) -> None:
+        """CPU-only phase: patches, imports, config. Captured in memory snapshot."""
+        self._train_config = prepare_openpi_config(self.model_config_name)
+
     @modal.enter(snap=False)
     def load_model(self) -> None:
-        from hosting.modal_helpers import load_openpi_policy
+        """GPU phase: load weights and run warmup. Runs after snapshot restore."""
+        from hosting.modal_helpers import load_openpi_model
 
-        self._policy, train_config = load_openpi_policy(
-            self.model_config_name,
+        self._policy, train_config = load_openpi_model(
+            self._train_config,
             self.checkpoint_dir,
             self.default_prompt,
         )

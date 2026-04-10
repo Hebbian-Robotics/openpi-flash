@@ -10,7 +10,12 @@ Runtime helpers: imported inside function bodies where heavy deps are available.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import modal
+
+if TYPE_CHECKING:
+    from openpi.training.config import TrainConfig
 
 # ---------------------------------------------------------------------------
 # Shared Modal infrastructure settings — single source of truth for all apps.
@@ -155,33 +160,24 @@ def log_container_location() -> None:
         print(f"Could not determine container location: {e}")
 
 
-def load_openpi_policy(
-    model_config_name: str,
-    checkpoint_dir: str,
-    default_prompt: str = "",
-) -> tuple:
-    """Load an openpi policy with all necessary patches and workarounds.
+def prepare_openpi_config(model_config_name: str) -> TrainConfig:
+    """CPU-only phase: apply patches, import modules, and prepare train config.
 
-    Sequence: transformers patches → location log → config → compile mode →
-    model load (timed) → warmup inference (timed).
+    Safe to call without GPU access (e.g. inside @modal.enter(snap=True)).
+    Handles the expensive CPU work: transformers patches, heavy imports,
+    and config loading with compile mode set.
 
-    Returns:
-        Tuple of (policy, train_config) so callers can access policy_metadata
-        and other config attributes.
+    Returns the train_config ready for model loading.
     """
     import dataclasses
-    import time
-
-    import numpy as np
 
     apply_transformers_patches()
     log_container_location()
 
     from openpi.models import pi0_config as _pi0_config
-    from openpi.policies import policy_config as _policy_config
     from openpi.training import config as _config
 
-    print(f"Loading model: config={model_config_name}, checkpoint={checkpoint_dir}")
+    print(f"Preparing config: {model_config_name}")
     train_config = _config.get_config(model_config_name)
 
     # Use default compile mode — reliable, compiles in ~2.5 min, gives ~76ms
@@ -192,6 +188,26 @@ def load_openpi_policy(
             model=dataclasses.replace(train_config.model, pytorch_compile_mode="default"),
         )
 
+    return train_config
+
+
+def load_openpi_model(
+    train_config: TrainConfig, checkpoint_dir: str, default_prompt: str = ""
+) -> tuple:
+    """GPU phase: load model weights and run warmup inference.
+
+    Requires GPU access. Call after prepare_openpi_config().
+
+    Returns:
+        Tuple of (policy, train_config) so callers can access policy_metadata
+        and other config attributes.
+    """
+    import time
+
+    import numpy as np
+    from openpi.policies import policy_config as _policy_config
+
+    print(f"Loading model: checkpoint={checkpoint_dir}")
     load_start = time.monotonic()
     policy = _policy_config.create_trained_policy(
         train_config,
@@ -219,3 +235,21 @@ def load_openpi_policy(
     print(f"Compilation done in {compile_elapsed:.1f}s")
 
     return policy, train_config
+
+
+def load_openpi_policy(
+    model_config_name: str,
+    checkpoint_dir: str,
+    default_prompt: str = "",
+) -> tuple:
+    """Load an openpi policy with all necessary patches and workarounds.
+
+    Convenience wrapper that runs both CPU and GPU phases in sequence.
+    Used by tunnel/QUIC variants that don't support split snapshot phases.
+
+    Returns:
+        Tuple of (policy, train_config) so callers can access policy_metadata
+        and other config attributes.
+    """
+    train_config = prepare_openpi_config(model_config_name)
+    return load_openpi_model(train_config, checkpoint_dir, default_prompt)
