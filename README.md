@@ -330,22 +330,23 @@ sudo systemctl restart docker
 exit
 ```
 
-### 3. Build and run on the instance
+### 3. Pull the image from ECR and run
+
+The Docker image is built automatically by CI on every push to `main` and pushed to ECR. On a new EC2 instance, pull it instead of building locally:
 
 ```bash
 ssh -i your-keypair.pem ubuntu@<instance-ip>
 
-# Clone both repos
-git clone https://github.com/Physical-Intelligence/openpi ~/openpi/openpi
-git clone https://github.com/Hebbian-Robotics/openpi-hosting ~/openpi/hosting
+# Login to ECR
+aws ecr get-login-password --region us-west-2 | \
+  docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
 
-# Build the image on the instance (native amd64, no cross-compile issues)
-cd ~/openpi/hosting
-docker build .. -t openpi-hosted -f Dockerfile
+# Pull the latest image
+docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
 
 # Create your config
-cp config.example.json config.json
-# Edit config.json: set your model, etc.
+mkdir -p ~/openpi && cd ~/openpi
+# Copy or create config.json (see Configuration section above)
 
 # Run
 docker run -d --restart unless-stopped --gpus=all \
@@ -353,57 +354,64 @@ docker run -d --restart unless-stopped --gpus=all \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 \
   --name openpi-inference \
-  openpi-hosted
+  438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
 ```
 
-To deploy a new version:
+To deploy a new version after CI has built it:
 
 ```bash
-cd ~/openpi/hosting && git pull
-cd ~/openpi/openpi && git pull
-cd ~/openpi/hosting
-docker build .. -t openpi-hosted -f Dockerfile
+aws ecr get-login-password --region us-west-2 | \
+  docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
+docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
 docker stop openpi-inference && docker rm openpi-inference
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 \
   --name openpi-inference \
-  openpi-hosted
+  438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
 ```
 
-### 4. Back up the image to ECR
-
-Push to AWS Elastic Container Registry so you can restore quickly if the instance is replaced.
+You can also pin to a specific commit instead of `latest`:
 
 ```bash
-# Create an ECR repository (one-time, from any machine with AWS CLI)
-aws ecr create-repository --repository-name openpi-hosting --region us-east-1
-
-# On the instance: login, tag, and push
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-aws ecr get-login-password --region us-east-1 | \
-  docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
-
-docker tag openpi-hosted:latest $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/openpi-hosting:latest
-docker push $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/openpi-hosting:latest
+docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:<commit-sha>
 ```
 
-The image is large (several GB due to CUDA + model dependencies). The initial push takes a while but subsequent pushes only upload changed layers.
+### 4. Pushing dev images from your local machine
 
-To restore on a new instance, pull instead of building:
+To test uncommitted changes or a feature branch before merging to `main`:
 
 ```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-aws ecr get-login-password --region us-east-1 | \
-  docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com
-docker pull $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/openpi-hosting:latest
-docker tag $ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/openpi-hosting:latest openpi-hosted
+# Login to ECR (one-time per 12-hour session)
+aws ecr get-login-password --region us-west-2 | \
+  docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
+
+# Build locally (from the hosting/ directory)
+docker build .. -t 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:dev -f Dockerfile
+
+# Push with a dev tag
+docker push 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:dev
 ```
 
-Ensure the EC2 instance has an IAM role with `ecr:GetAuthorizationToken`, `ecr:BatchGetImage`, and `ecr:PutImage` permissions.
+Then pull the `:dev` tag on your EC2 instance instead of `:latest`. Use any tag name you want (e.g. `dev`, `experiment`, a branch name).
 
-### 5. HTTPS with Caddy (recommended for single instance)
+> **Note:** ECR is configured to always keep `latest` plus the 3 most recent other images. Older images are cleaned up automatically.
+
+### 5. Building locally instead of pulling from ECR
+
+If you prefer to build on the instance (e.g. no ECR access):
+
+```bash
+git clone https://github.com/Hebbian-Robotics/openpi ~/openpi/openpi
+git clone https://github.com/Hebbian-Robotics/openpi-hosting ~/openpi/hosting
+cd ~/openpi/hosting
+docker build .. -t openpi-hosted -f Dockerfile
+```
+
+Ensure the EC2 instance has an IAM role with `ecr:GetAuthorizationToken` and `ecr:BatchGetImage` permissions to pull images.
+
+### 6. HTTPS with Caddy (recommended for single instance)
 
 Install Caddy on the instance and reverse-proxy to the Docker container:
 
@@ -430,7 +438,7 @@ sudo systemctl restart caddy
 
 Caddy automatically provisions and renews TLS certificates via Let's Encrypt. Point your domain's DNS A record to the instance's public IP.
 
-### 6. HTTPS with ALB (alternative)
+### 7. HTTPS with ALB (alternative)
 
 If you prefer AWS-managed TLS:
 

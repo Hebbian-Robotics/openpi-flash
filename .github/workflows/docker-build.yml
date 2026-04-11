@@ -8,9 +8,16 @@ on:
     branches:
       - "*"
 
+env:
+  AWS_REGION: us-west-2
+  ECR_REPOSITORY: openpi-hosted
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout hosting
         uses: actions/checkout@v6
@@ -23,15 +30,29 @@ jobs:
           repository: Hebbian-Robotics/openpi
           path: openpi
 
+      - name: Configure AWS credentials
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: arn:aws:iam::438136598620:role/github-actions-ecr-push
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build Docker image
+      - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: hosting/Dockerfile
-          push: false
-          tags: openpi-hosted:latest
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags: |
+            438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
+            438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
