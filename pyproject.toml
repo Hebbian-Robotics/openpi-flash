@@ -2,6 +2,8 @@
 name = "openpi-hosting"
 version = "0.1.0"
 description = "Hosted inference service for openpi"
+license = { file = "LICENSE" }
+authors = [{ name = "Hebbian Robotics" }]
 requires-python = ">=3.11,<3.13"
 dependencies = [
     "openpi",
