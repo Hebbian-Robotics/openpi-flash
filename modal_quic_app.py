@@ -42,7 +42,7 @@ from hosting.modal_helpers import (
 app = modal.App("openpi-inference-quic")
 
 openpi_image = create_openpi_image(
-    extra_pip_packages=["quic-portal @ git+https://github.com/kstonekuan/quic-portal.git"]
+    extra_pip_packages=["quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git"]
 )
 
 quic_dict = modal.Dict.from_name("openpi-quic-info", create_if_missing=True)

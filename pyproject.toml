@@ -72,5 +72,3 @@ possibly-unresolved-reference = "error"
 [tool.ty.src]
 # test_modal.py uses runtime sys.path manipulation that ty cannot resolve.
 exclude = ["test_modal.py", "test_modal_tunnel.py", "test_modal_quic.py"]
-
-[tool.ty.environment]
