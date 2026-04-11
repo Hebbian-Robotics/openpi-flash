@@ -53,8 +53,9 @@ RUN /.venv/bin/python -c "import transformers; print(transformers.__file__)" | x
 
 # Copy application code.
 COPY openpi/src /app/openpi-src
+COPY openpi/packages/openpi-client/src /app/openpi-client-src
 COPY hosting/src /app/hosting-src
-ENV PYTHONPATH="/app/openpi-src:/app/hosting-src"
+ENV PYTHONPATH="/app/openpi-src:/app/openpi-client-src:/app/hosting-src"
 
 # PyTorch inductor cache — persists within container lifetime (use a volume
 # mount at /cache for persistence across restarts).
