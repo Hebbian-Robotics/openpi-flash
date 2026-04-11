@@ -25,6 +25,7 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: hosting/Dockerfile
+          config: hosting/.hadolint.yaml
 
   build:
     needs: lint
