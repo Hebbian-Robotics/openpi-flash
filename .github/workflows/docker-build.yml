@@ -1,0 +1,37 @@
+name: Docker Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hosting
+        uses: actions/checkout@v6
+        with:
+          path: hosting
+
+      - name: Checkout openpi
+        uses: actions/checkout@v6
+        with:
+          repository: Hebbian-Robotics/openpi
+          path: openpi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: hosting/Dockerfile
+          push: false
+          tags: openpi-hosted:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
