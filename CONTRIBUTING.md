@@ -30,7 +30,7 @@ uv run modal run modal_quic_app.py
 
 ```bash
 # Smoke test against a running instance
-uv run python test_modal.py wss://your-modal-url
+uv run python test_server.py ws://localhost:8000
 
 # Smoke test tunnel variant
 uv run python test_modal_tunnel.py
@@ -45,6 +45,7 @@ uv run python test_modal_quic.py
 uv run ruff check --fix  # Linting with auto-fix
 uv run ruff format       # Code formatting
 uv run ty check          # Type checking
+hadolint Dockerfile      # Docker linting (brew install hadolint)
 ```
 
 ## Code Style & Philosophy

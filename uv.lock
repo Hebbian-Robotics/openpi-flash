@@ -2435,7 +2435,7 @@ requires-dist = [
     { name = "openpi-client", editable = "../openpi/packages/openpi-client" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
-    { name = "quic-portal", specifier = ">=0.1.13" },
+    { name = "quic-portal", git = "https://github.com/Hebbian-Robotics/quic-portal.git" },
     { name = "starlette", specifier = ">=1.0.0" },
 ]
 
@@ -3123,12 +3123,7 @@ wheels = [
 [[package]]
 name = "quic-portal"
 version = "0.1.13"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/68/e7/bbc4c89ca16db2012cd98caa945ea78ff948324ee6006dfe34c3806089d9/quic_portal-0.1.13.tar.gz", hash = "sha256:6b0eaba945570bc055f34543f6d9b63fc33c9e366aa788bcb5549a4ff84a2aaf", size = 34174, upload-time = "2025-08-27T18:30:04.386Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1e/4d/648c08f44ee0af6e1a0ef2aec9deb3a9b06c2b1e33189e886306cb8cdc84/quic_portal-0.1.13-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:8665c61fde7d665221eee17e246acaa04de5df302acc5f1c849845547467b7d2", size = 1144027, upload-time = "2025-08-27T18:30:02.537Z" },
-    { url = "https://files.pythonhosted.org/packages/a2/12/61d2df8bdc475ffe4c00d6ed4c99e72356afb0f2598e984dd56481f411ec/quic_portal-0.1.13-cp39-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:2afeddc2fe2e94199818800f1b2b4e730c52cd6621738733ae4ad0f7de4c5b60", size = 1346580, upload-time = "2025-08-27T18:31:19.22Z" },
-]
+source = { git = "https://github.com/Hebbian-Robotics/quic-portal.git#ee374de9e7ae1001db58a273832163a068a87523" }
 
 [[package]]
 name = "regex"
@@ -3705,7 +3700,7 @@ name = "triton"
 version = "3.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "setuptools", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/21/2f/3e56ea7b58f80ff68899b1dbe810ff257c9d177d288c6b0f55bf2fe4eb50/triton-3.3.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b31e3aa26f8cb3cc5bf4e187bf737cbacf17311e1112b781d4a059353dfd731b", size = 155689937, upload-time = "2025-05-29T23:39:44.182Z" },

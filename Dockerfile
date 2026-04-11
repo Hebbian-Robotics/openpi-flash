@@ -8,7 +8,7 @@
 #   docker run --rm -it --gpus=all \
 #     -v ./config.json:/config/config.json:ro \
 #     -e INFERENCE_CONFIG_PATH=/config/config.json \
-#     -p 8000:8000 \
+#     -p 8000:8000 -p 5555:5555/udp \
 #     openpi-hosted
 
 FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04@sha256:2d913b09e6be8387e1a10976933642c73c840c0b735f0bf3c28d97fc9bc422e0
@@ -17,13 +17,18 @@ COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
 WORKDIR /app
 
 # System dependencies.
-RUN apt-get update && apt-get install -y git git-lfs linux-headers-generic build-essential clang libgl1-mesa-glx libglib2.0-0 libsm6 libxrender1 libxext6
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git git-lfs linux-headers-generic build-essential clang \
+        libgl1-mesa-glx libglib2.0-0 libsm6 libxrender1 libxext6 \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy from the cache instead of linking since it's a mounted volume.
 ENV UV_LINK_MODE=copy
 
 # Virtual environment outside project directory.
 ENV UV_PROJECT_ENVIRONMENT=/.venv
+ENV PATH="/.venv/bin:$PATH"
 
 # Install openpi dependencies using its lockfile.
 RUN uv venv --python 3.11.9 $UV_PROJECT_ENVIRONMENT
@@ -39,10 +44,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # - gsutil: download checkpoints from gs://openpi-assets (openpi's download
 #   module shells out to gsutil for this bucket; without it falls back to gcsfs
 #   which requires explicit GCP credentials)
-RUN uv pip install pydantic gsutil
+RUN uv pip install pydantic gsutil "quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git" pytest
 
 # Copy transformers_replace files (required for PyTorch models).
 COPY openpi/src/openpi/models_pytorch/transformers_replace/ /tmp/transformers_replace/
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN /.venv/bin/python -c "import transformers; print(transformers.__file__)" | xargs dirname | xargs -I{} cp -r /tmp/transformers_replace/* {} && rm -rf /tmp/transformers_replace
 
 # Copy application code.
@@ -57,5 +63,7 @@ ENV TORCHINDUCTOR_FX_GRAPH_CACHE=1
 
 # openpi data home for downloaded checkpoints and norm stats.
 ENV OPENPI_DATA_HOME=/cache/models
+
+EXPOSE 5555/udp
 
 CMD ["python", "-m", "hosting.serve"]

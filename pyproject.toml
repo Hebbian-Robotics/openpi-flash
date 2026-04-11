@@ -25,6 +25,7 @@ override-dependencies = [
 [tool.uv.sources]
 openpi = { path = "../openpi", editable = true }
 openpi-client = { path = "../openpi/packages/openpi-client", editable = true }
+quic-portal = { git = "https://github.com/Hebbian-Robotics/quic-portal.git" }
 
 [build-system]
 requires = ["hatchling"]
@@ -72,5 +73,5 @@ unused-ignore-comment = "error"
 possibly-unresolved-reference = "error"
 
 [tool.ty.src]
-# test_modal.py uses runtime sys.path manipulation that ty cannot resolve.
-exclude = ["test_modal.py", "test_modal_tunnel.py", "test_modal_quic.py"]
+# Test scripts use runtime sys.path manipulation that ty cannot resolve.
+exclude = ["test_server.py", "test_modal_tunnel.py", "test_modal_quic.py", "test_quic.py"]

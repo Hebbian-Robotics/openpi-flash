@@ -19,7 +19,13 @@ from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 
-from hosting.quic_protocol import PortalDictLike, QuicMessageType, UdpAddr
+from hosting.quic_protocol import (
+    PortalDictLike,
+    UdpAddr,
+    recv_data,
+    send_data,
+    send_error,
+)
 from hosting.relay import register_with_relay
 
 # Timeout for recv() so the server can periodically check connection health.
@@ -30,16 +36,6 @@ def _log(msg: str) -> None:
     """Print with UTC timestamp for correlating with relay logs."""
     ts = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S.%f")[:-3]
     _log(f"{ts} {msg}")
-
-
-def _send_data(portal: Portal, data: bytes) -> None:
-    """Send a msgpack-encoded data message with the data type prefix."""
-    portal.send(QuicMessageType.DATA.value + data)
-
-
-def _send_error(portal: Portal, error_message: str) -> None:
-    """Send an error message with the error type prefix."""
-    portal.send(QuicMessageType.ERROR.value + error_message.encode("utf-8"))
 
 
 class QuicPolicyServer:
@@ -160,7 +156,7 @@ class QuicPolicyServer:
         packer = msgpack_numpy.Packer()
 
         # Send metadata as the first message (same as WebSocket variant).
-        _send_data(portal, packer.pack(self._metadata))
+        send_data(portal, packer.pack(self._metadata))
         _log("[quic-server] Sent metadata, waiting for observations...")
 
         request_count = 0
@@ -169,23 +165,10 @@ class QuicPolicyServer:
             try:
                 start_time = time.monotonic()
 
-                raw_message = portal.recv(timeout_ms=_RECV_TIMEOUT_MS)
-                if raw_message is None:
+                observation = recv_data(portal, timeout_ms=_RECV_TIMEOUT_MS)
+                if observation is None:
                     # Timeout — client may still be there, just no request yet.
                     continue
-
-                if len(raw_message) < 1:
-                    _log("[quic-server] Received empty message, ignoring")
-                    continue
-
-                message_type = raw_message[0:1]
-                message_body = raw_message[1:]
-
-                if message_type != QuicMessageType.DATA.value:
-                    _log(f"[quic-server] Unexpected message type: {message_type!r}")
-                    continue
-
-                observation = msgpack_numpy.unpackb(message_body)
 
                 infer_start = time.monotonic()
                 action = self._policy.infer(observation)
@@ -196,7 +179,7 @@ class QuicPolicyServer:
                     timing["prev_total_ms"] = prev_total_time * 1000
 
                 response = {**action, "server_timing": timing}
-                _send_data(portal, packer.pack(response))
+                send_data(portal, packer.pack(response))
                 prev_total_time = time.monotonic() - start_time
                 total_ms = prev_total_time * 1000
 
@@ -213,7 +196,7 @@ class QuicPolicyServer:
                     f"[quic-server] Error after {request_count} requests:\n{traceback.format_exc()}"
                 )
                 with contextlib.suppress(PortalError):
-                    _send_error(portal, traceback.format_exc())
+                    send_error(portal, traceback.format_exc())
                 break
 
         with contextlib.suppress(PortalError):

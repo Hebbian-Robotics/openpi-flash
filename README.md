@@ -205,10 +205,12 @@ The Modal app reads `.env` via `modal.Secret.from_dotenv()` and injects `QUIC_RE
 
 All test scripts run a warmup inference followed by 5 timed iterations, reporting per-iteration timing and a summary with mean/min/max.
 
-#### ASGI mode (`modal_app.py`)
+#### EC2/Docker or Modal ASGI
 
 ```bash
-uv run python test_modal.py wss://<your-modal-url>
+uv run python test_server.py ws://localhost:8000          # EC2/Docker (plain)
+uv run python test_server.py wss://your-domain            # EC2 with HTTPS
+uv run python test_server.py wss://<your-modal-url>       # Modal
 ```
 
 #### Tunnel mode (`modal_tunnel_app.py`)

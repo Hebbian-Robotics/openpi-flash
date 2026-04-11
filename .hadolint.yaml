@@ -1,0 +1,4 @@
+ignored:
+  # System packages in a CUDA base image — pinning versions is impractical
+  # and would break on base image updates.
+  - DL3008

@@ -19,7 +19,7 @@ from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 from typing_extensions import override
 
-from hosting.quic_protocol import PortalDictLike, QuicMessageType, UdpAddr
+from hosting.quic_protocol import PortalDictLike, UdpAddr, recv_data, send_data
 from hosting.relay import register_with_relay
 
 logger = logging.getLogger(__name__)
@@ -133,8 +133,8 @@ class QuicClientPolicy(_base_policy.BasePolicy):
                 portal = self._create_portal()
 
                 # First message from server is metadata.
-                raw_metadata = portal.recv(timeout_ms=30_000)
-                if raw_metadata is None:
+                metadata = recv_data(portal, timeout_ms=30_000)
+                if metadata is None:
                     logger.warning(
                         "Timeout waiting for server metadata, retrying... (%d/%d)",
                         attempt,
@@ -144,12 +144,6 @@ class QuicClientPolicy(_base_policy.BasePolicy):
                     time.sleep(2)
                     continue
 
-                if len(raw_metadata) < 1 or raw_metadata[0:1] != QuicMessageType.DATA.value:
-                    raise RuntimeError(
-                        f"Expected data message for metadata, got prefix: {raw_metadata[0:1]!r}"
-                    )
-
-                metadata = msgpack_numpy.unpackb(raw_metadata[1:])
                 logger.info("Connected to QUIC portal server")
                 return portal, metadata
 
@@ -167,26 +161,12 @@ class QuicClientPolicy(_base_policy.BasePolicy):
 
     @override
     def infer(self, obs: dict) -> dict:
-        data = self._packer.pack(obs)
-        self._portal.send(QuicMessageType.DATA.value + data)
+        send_data(self._portal, self._packer.pack(obs))
 
-        response = self._portal.recv()
+        response = recv_data(self._portal)
         if response is None:
             raise ConnectionError("QUIC connection lost (recv returned None)")
-
-        if len(response) < 1:
-            raise RuntimeError("Received empty response from server")
-
-        message_type = response[0:1]
-        message_body = response[1:]
-
-        if message_type == QuicMessageType.ERROR.value:
-            raise RuntimeError(f"Error in inference server:\n{message_body.decode('utf-8')}")
-
-        if message_type != QuicMessageType.DATA.value:
-            raise RuntimeError(f"Unexpected message type from server: {message_type!r}")
-
-        return msgpack_numpy.unpackb(message_body)
+        return response
 
     @override
     def reset(self) -> None:

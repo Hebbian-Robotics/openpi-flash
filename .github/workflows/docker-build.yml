@@ -13,7 +13,21 @@ env:
   ECR_REPOSITORY: openpi-hosted
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hosting
+        uses: actions/checkout@v6
+        with:
+          path: hosting
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: hosting/Dockerfile
+
   build:
+    needs: lint
     runs-on: ubuntu-latest
     permissions:
       id-token: write

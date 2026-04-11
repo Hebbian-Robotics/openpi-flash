@@ -1,9 +1,11 @@
-"""Quick smoke test for the Modal ASGI deployment.
+"""Quick smoke test for any WebSocket deployment (EC2, Docker, Modal ASGI).
 
 Sends random ALOHA observations to the server and prints benchmark results.
 
 Usage:
-    uv run python test_modal.py wss://your-modal-url
+    uv run python test_server.py ws://localhost:8000          # EC2/Docker (plain)
+    uv run python test_server.py wss://your-domain            # EC2 with HTTPS
+    uv run python test_server.py wss://your-modal-url         # Modal
 """
 
 import sys
@@ -21,15 +23,17 @@ from main import _random_observation_aloha
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: uv run python test_modal.py wss://your-modal-url")
+        print("Usage: uv run python test_server.py ws://host:port  OR  wss://host")
         sys.exit(1)
 
     host = sys.argv[1]
-    port = int(sys.argv[2]) if len(sys.argv) > 2 else 443
+    is_secure = host.startswith("wss://")
+    port = int(sys.argv[2]) if len(sys.argv) > 2 else (443 if is_secure else 8000)
 
     # Health check (retries until server is ready, handles cold start).
-    https_host = host.removeprefix("wss://").removeprefix("ws://")
-    health_url = f"https://{https_host}/healthz"
+    bare_host = host.removeprefix("wss://").removeprefix("ws://")
+    health_scheme = "https" if is_secure else "http"
+    health_url = f"{health_scheme}://{bare_host}/healthz"
     print(f"Health check {health_url} (waiting for server to be ready) ...")
     while True:
         try:

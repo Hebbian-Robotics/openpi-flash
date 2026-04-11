@@ -11,6 +11,7 @@ services:
       - inference-cache:/cache
     ports:
       - "8000:8000"
+      - "5555:5555/udp"
     deploy:
       resources:
         reservations:
