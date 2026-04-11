@@ -74,6 +74,3 @@ possibly-unresolved-reference = "error"
 exclude = ["test_modal.py", "test_modal_tunnel.py", "test_modal_quic.py"]
 
 [tool.ty.environment]
-# vlash is not installed in the hosting venv — it's added via PYTHONPATH
-# in the Docker container. Point ty at it so it can resolve vlash.* imports.
-extra-paths = ["../vlash"]

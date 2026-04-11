@@ -26,4 +26,3 @@ dist/
 .env.*
 !.env.example
 config.json
-config.vlash.json
