@@ -165,13 +165,41 @@ The tunnel address is stored in a Modal Dict (`openpi-tunnel-info`) so clients c
 
 ### QUIC portal mode (experimental)
 
-`modal_quic_app.py` uses [quic-portal](https://github.com/nicois/quic-portal) for direct peer-to-peer QUIC transport with automatic NAT traversal via STUN + UDP hole punching. This avoids TCP head-of-line blocking for potentially lower latency than the tunnel mode.
+`modal_quic_app.py` uses [quic-portal](https://github.com/kstonekuan/quic-portal) for direct peer-to-peer QUIC transport with automatic NAT traversal via STUN + UDP hole punching. This avoids TCP head-of-line blocking for potentially lower latency than the tunnel mode.
 
 ```bash
 uv run modal run modal_quic_app.py
 ```
 
 Connection is coordinated through a shared Modal Dict (`openpi-quic-info`) — no URL or port to manage. Note: NAT traversal only works with "easy" NATs. Fall back to the tunnel mode if connectivity issues arise.
+
+### QUIC relay fallback (WIP)
+
+> **Status: Not yet working end-to-end.** The relay server forwards traffic correctly, but full QUIC-over-relay has not been verified.
+
+When hole punching fails (symmetric NATs, corporate firewalls), the QUIC app can fall back to a [UDP relay](https://github.com/kstonekuan/quic-relay) server.
+
+**Prerequisites:**
+
+1. [quic-portal fork](https://github.com/kstonekuan/quic-portal) with `SO_REUSEPORT` — install with `pip install git+https://github.com/kstonekuan/quic-portal.git`
+2. [quic-relay](https://github.com/kstonekuan/quic-relay) running on AWS EC2 — see its README for deployment instructions
+
+**Setup:**
+
+Create `hosting/.env`:
+
+```
+QUIC_RELAY_IP=your-elastic-ip
+QUIC_RELAY_ONLY=true   # skip hole punch, always use relay
+```
+
+Deploy:
+
+```bash
+uv run modal deploy modal_quic_app.py
+```
+
+The Modal app reads `.env` via `modal.Secret.from_dotenv()` and injects `QUIC_RELAY_IP` into the container. The client discovers the relay address from the Modal Dict automatically — no client-side config needed.
 
 ### Testing
 

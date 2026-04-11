@@ -49,14 +49,12 @@ def serve_tunnel(
     checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR,
     default_prompt: str = "",
 ) -> None:
-    import json
     import socket
     import threading
-    import urllib.request
 
     from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 
-    from hosting.modal_helpers import load_openpi_policy
+    from hosting.modal_helpers import load_openpi_policy, log_ip_location
 
     # Open tunnel early to check relay location before spending time on model loading.
     # modal.forward doesn't need the server to be listening yet.
@@ -66,12 +64,7 @@ def serve_tunnel(
         # Resolve relay location.
         try:
             relay_ip = socket.gethostbyname(host)
-            with urllib.request.urlopen(f"https://ipinfo.io/{relay_ip}/json", timeout=5) as resp:
-                relay_info = json.loads(resp.read())
-            print(
-                f"Relay location: {relay_info.get('city')}, {relay_info.get('region')} "
-                f"({relay_info.get('country')}) — IP: {relay_ip}, org: {relay_info.get('org')}"
-            )
+            log_ip_location("Relay", relay_ip)
         except Exception as e:
             print(f"Could not resolve relay location: {e}")
 

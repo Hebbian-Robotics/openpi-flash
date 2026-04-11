@@ -9,21 +9,27 @@ Only one client can be connected at a time (typical for robotics — one robot p
 """
 
 import contextlib
-import logging
+import datetime
 import time
 import traceback
+import uuid
 from typing import ClassVar
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 
-from hosting.quic_protocol import PortalDictLike, QuicMessageType
-
-logger = logging.getLogger(__name__)
+from hosting.quic_protocol import PortalDictLike, QuicMessageType, UdpAddr
+from hosting.relay import register_with_relay
 
 # Timeout for recv() so the server can periodically check connection health.
 _RECV_TIMEOUT_MS = 30_000
+
+
+def _log(msg: str) -> None:
+    """Print with UTC timestamp for correlating with relay logs."""
+    ts = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S.%f")[:-3]
+    _log(f"{ts} {msg}")
 
 
 def _send_data(portal: Portal, data: bytes) -> None:
@@ -52,7 +58,7 @@ class QuicPolicyServer:
 
     # Reliable public STUN servers with global presence. The quic-portal
     # defaults include stun.ekiga.net which is frequently unreachable.
-    DEFAULT_STUN_SERVERS: ClassVar[list[tuple[str, int]]] = [
+    DEFAULT_STUN_SERVERS: ClassVar[list[UdpAddr]] = [
         ("stun.l.google.com", 19302),
         ("stun1.l.google.com", 19302),
         ("stun2.l.google.com", 19302),
@@ -65,7 +71,9 @@ class QuicPolicyServer:
         metadata: dict | None = None,
         local_port: int = 5555,
         transport_options: QuicTransportOptions | None = None,
-        stun_servers: list[tuple[str, int]] | None = None,
+        stun_servers: list[UdpAddr] | None = None,
+        relay_addr: UdpAddr | None = None,
+        relay_only: bool = False,
     ) -> None:
         self._policy = policy
         self._portal_dict = portal_dict
@@ -78,6 +86,55 @@ class QuicPolicyServer:
             # Keep-alive to maintain NAT bindings.
             keep_alive_interval_secs=2,
         )
+        self._relay_addr = relay_addr
+        self._relay_only = relay_only
+
+    def _create_portal(self) -> Portal:
+        """Create a portal, falling back to relay if hole punching fails."""
+        if self._relay_only:
+            if self._relay_addr is None:
+                raise ConnectionError("relay_only=True but no relay_addr configured")
+            _log("[quic-server] Relay-only mode, skipping hole punch")
+            return self._create_portal_via_relay()
+
+        try:
+            portal = Portal.create_server(
+                dict=self._portal_dict,
+                local_port=self._local_port,
+                stun_servers=self._stun_servers,
+                transport_options=self._transport_options,
+            )
+            _log("[quic-server] Client connected (direct)")
+            return portal
+        except (PortalError, ConnectionError):
+            if self._relay_addr is None:
+                raise
+            _log("[quic-server] Hole punch failed, falling back to UDP relay")
+            return self._create_portal_via_relay()
+
+    def _create_portal_via_relay(self) -> Portal:
+        """Create a portal through the UDP relay server.
+
+        The keepalive socket stays alive alongside Quinn (via SO_REUSEPORT in
+        quic-portal) to maintain the NAT mapping so the relay can reach us.
+        """
+        assert self._relay_addr is not None
+
+        session_id = str(uuid.uuid4())
+        self._portal_dict["relay_session"] = session_id
+        self._portal_dict["relay_addr"] = self._relay_addr
+        _log("[quic-server] Relay session created, registering...")
+
+        keepalive = register_with_relay(self._relay_addr, session_id, self._local_port)
+
+        try:
+            _log("[quic-server] Waiting for client to connect through relay...")
+            portal = Portal()
+            portal.listen(self._local_port, self._transport_options)
+            _log("[quic-server] Client connected (relayed)")
+            return portal
+        finally:
+            keepalive.stop()
 
     def serve_forever(self) -> None:
         """Block forever, accepting and serving one client at a time.
@@ -87,20 +144,14 @@ class QuicPolicyServer:
         """
         while True:
             try:
-                logger.info("Creating QUIC portal server (waiting for client)...")
-                portal = Portal.create_server(
-                    dict=self._portal_dict,
-                    local_port=self._local_port,
-                    stun_servers=self._stun_servers,
-                    transport_options=self._transport_options,
-                )
-                logger.info("Client connected via QUIC portal")
+                _log("[quic-server] Waiting for client...")
+                portal = self._create_portal()
 
                 self._serve_connection(portal)
-            except PortalError:
-                logger.exception("Portal error, will retry")
+            except PortalError as e:
+                _log(f"[quic-server] Portal error, will retry: {e}")
             except Exception:
-                logger.exception("Unexpected error in serve loop, will retry")
+                _log(f"[quic-server] Error, will retry:\n{traceback.format_exc()}")
             finally:
                 time.sleep(1)  # Brief pause before accepting next client.
 
@@ -110,7 +161,9 @@ class QuicPolicyServer:
 
         # Send metadata as the first message (same as WebSocket variant).
         _send_data(portal, packer.pack(self._metadata))
+        _log("[quic-server] Sent metadata, waiting for observations...")
 
+        request_count = 0
         prev_total_time: float | None = None
         while True:
             try:
@@ -122,35 +175,43 @@ class QuicPolicyServer:
                     continue
 
                 if len(raw_message) < 1:
-                    logger.warning("Received empty message, ignoring")
+                    _log("[quic-server] Received empty message, ignoring")
                     continue
 
                 message_type = raw_message[0:1]
                 message_body = raw_message[1:]
 
                 if message_type != QuicMessageType.DATA.value:
-                    logger.warning("Received unexpected message type: %r", message_type)
+                    _log(f"[quic-server] Unexpected message type: {message_type!r}")
                     continue
 
                 observation = msgpack_numpy.unpackb(message_body)
 
-                infer_time = time.monotonic()
+                infer_start = time.monotonic()
                 action = self._policy.infer(observation)
-                infer_time = time.monotonic() - infer_time
+                infer_ms = (time.monotonic() - infer_start) * 1000
 
-                timing: dict[str, float] = {"infer_ms": infer_time * 1000}
+                timing: dict[str, float] = {"infer_ms": infer_ms}
                 if prev_total_time is not None:
                     timing["prev_total_ms"] = prev_total_time * 1000
 
                 response = {**action, "server_timing": timing}
                 _send_data(portal, packer.pack(response))
                 prev_total_time = time.monotonic() - start_time
+                total_ms = prev_total_time * 1000
+
+                request_count += 1
+                _log(
+                    f"[quic-server] req #{request_count}: infer={infer_ms:.1f}ms total={total_ms:.1f}ms"
+                )
 
             except PortalError:
-                logger.info("Client disconnected (portal error)")
+                _log(f"[quic-server] Client disconnected after {request_count} requests")
                 break
             except Exception:
-                logger.exception("Error during inference")
+                _log(
+                    f"[quic-server] Error after {request_count} requests:\n{traceback.format_exc()}"
+                )
                 with contextlib.suppress(PortalError):
                     _send_error(portal, traceback.format_exc())
                 break

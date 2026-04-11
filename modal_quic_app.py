@@ -24,6 +24,8 @@ Usage:
     policy = QuicClientPolicy(portal_dict=quic_dict)
 """
 
+import os
+
 import modal
 
 from hosting.modal_helpers import (
@@ -39,9 +41,30 @@ from hosting.modal_helpers import (
 
 app = modal.App("openpi-inference-quic")
 
-openpi_image = create_openpi_image(extra_pip_packages=["quic-portal"])
+openpi_image = create_openpi_image(
+    extra_pip_packages=["quic-portal @ git+https://github.com/kstonekuan/quic-portal.git"]
+)
 
 quic_dict = modal.Dict.from_name("openpi-quic-info", create_if_missing=True)
+
+# Inject QUIC_RELAY_IP into the container environment so the server can
+# fall back to the relay when direct hole punching fails.
+relay_secret = modal.Secret.from_dotenv()
+
+RELAY_PORT = 4433
+
+
+def _get_relay_addr() -> tuple[str, int] | None:
+    """Read QUIC_RELAY_IP from environment. Returns None if unset."""
+    relay_ip = os.environ.get("QUIC_RELAY_IP")
+    if not relay_ip:
+        return None
+    return (relay_ip.strip(), RELAY_PORT)
+
+
+def _is_relay_only() -> bool:
+    """Check if QUIC_RELAY_ONLY is set to skip hole punching entirely."""
+    return os.environ.get("QUIC_RELAY_ONLY", "").strip().lower() in ("1", "true", "yes")
 
 
 @app.function(
@@ -49,6 +72,7 @@ quic_dict = modal.Dict.from_name("openpi-quic-info", create_if_missing=True)
     gpu=GPU_TYPE,
     region=REGION,
     volumes={MODEL_CACHE_MOUNT_PATH: model_weights_volume},
+    secrets=[relay_secret],
     timeout=86400,
 )
 def serve_quic(
@@ -73,8 +97,23 @@ def serve_quic(
     # immediately try to punch NAT with a non-existent client.
     quic_dict.clear()
 
+    relay_addr = _get_relay_addr()
+    relay_only = _is_relay_only()
+
+    # Resolve relay location for debugging network latency.
+    if relay_addr:
+        from hosting.modal_helpers import log_ip_location
+
+        log_ip_location("Relay", relay_addr[0])
+
     # Serve over QUIC portal (blocks forever, handles reconnections).
     print(f"\nQUIC portal server ready (Dict: 'openpi-quic-info', port: {QUIC_PORT})")
+    if relay_only and relay_addr:
+        print(f"Relay-only mode: {relay_addr[0]}:{relay_addr[1]}")
+    elif relay_addr:
+        print(f"Relay fallback: {relay_addr[0]}:{relay_addr[1]}")
+    else:
+        print("No relay configured — direct hole punch only")
     print("Test with: uv run python test_modal_quic.py")
 
     server = QuicPolicyServer(
@@ -82,5 +121,7 @@ def serve_quic(
         portal_dict=quic_dict,
         metadata=train_config.policy_metadata,
         local_port=QUIC_PORT,
+        relay_addr=relay_addr,
+        relay_only=relay_only,
     )
     server.serve_forever()

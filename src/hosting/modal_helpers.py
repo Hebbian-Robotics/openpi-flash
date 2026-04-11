@@ -29,6 +29,7 @@ DEFAULT_CHECKPOINT_DIR = f"{MODEL_CACHE_MOUNT_PATH}/pi05_base_pytorch"
 WEBSOCKET_PORT = 8000
 QUIC_PORT = 5555
 
+
 model_weights_volume = modal.Volume.from_name(MODEL_WEIGHTS_VOLUME_NAME, create_if_missing=True)
 
 # Container paths set by the image builder.
@@ -140,24 +141,31 @@ def apply_transformers_patches() -> None:
         del sys.modules[mod_name]
 
 
-def log_container_location() -> None:
-    """Log the container's geographic location via ipinfo.io.
+def log_ip_location(label: str, ip: str | None = None) -> None:
+    """Log the geographic location of an IP address via ipinfo.io.
 
-    Useful for debugging network latency when the container lands in
-    an unexpected region.
+    Args:
+        label: Human-readable label for the location (e.g. "Container", "Relay").
+        ip: IP address to look up. If None, looks up the caller's own IP.
     """
     import json
     import urllib.request
 
+    url = f"https://ipinfo.io/{ip}/json" if ip else "https://ipinfo.io/json"
     try:
-        with urllib.request.urlopen("https://ipinfo.io/json", timeout=5) as resp:
-            ip_info = json.loads(resp.read())
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            info = json.loads(resp.read())
         print(
-            f"Container location: {ip_info.get('city')}, {ip_info.get('region')} "
-            f"({ip_info.get('country')}) — IP: {ip_info.get('ip')}, org: {ip_info.get('org')}"
+            f"{label} location: {info.get('city')}, {info.get('region')} "
+            f"({info.get('country')}) — IP: {info.get('ip')}, org: {info.get('org')}"
         )
     except Exception as e:
-        print(f"Could not determine container location: {e}")
+        print(f"Could not determine {label.lower()} location: {e}")
+
+
+def log_container_location() -> None:
+    """Log the container's geographic location via ipinfo.io."""
+    log_ip_location("Container")
 
 
 def prepare_openpi_config(model_config_name: str) -> TrainConfig:

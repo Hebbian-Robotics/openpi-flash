@@ -57,6 +57,10 @@ uv run ty check          # Type checking
 - Structure types to enable exhaustive matching when handling variants
 - Prefer **shared internal functions over factory patterns** when extracting common logic -- keep each export explicitly defined for better IDE navigation and readability
 
+### Logging
+
+- Use `print()` instead of `logging.getLogger()` for code that runs inside Modal containers — Modal does not reliably capture Python logger output.
+
 ### Self-Documenting Code
 
 - **Verbose naming**: Variable and function naming should read like documentation

@@ -7,6 +7,9 @@ QuicPolicyServer and QuicClientPolicy.
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+# (host, port) address of a UDP endpoint (relay server, STUN server, etc.).
+UdpAddr = tuple[str, int]
+
 
 class QuicMessageType(Enum):
     """Message type prefixes to distinguish data from errors over raw QUIC bytes.
@@ -29,3 +32,4 @@ class PortalDictLike(Protocol):
 
     def __getitem__(self, key: str) -> Any: ...
     def __setitem__(self, key: str, value: Any) -> None: ...
+    def __contains__(self, key: str) -> bool: ...

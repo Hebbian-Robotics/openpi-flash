@@ -902,7 +902,7 @@ wheels = [
 
 [[package]]
 name = "google-api-core"
-version = "2.30.2"
+version = "2.30.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-auth" },
@@ -911,9 +911,9 @@ dependencies = [
     { name = "protobuf" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1a/2e/83ca41eb400eb228f9279ec14ed66f6475218b59af4c6daec2d5a509fe83/google_api_core-2.30.2.tar.gz", hash = "sha256:9a8113e1a88bdc09a7ff629707f2214d98d61c7f6ceb0ea38c42a095d02dc0f9", size = 176862, upload-time = "2026-04-02T21:23:44.876Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/ce/502a57fb0ec752026d24df1280b162294b22a0afb98a326084f9a979138b/google_api_core-2.30.3.tar.gz", hash = "sha256:e601a37f148585319b26db36e219df68c5d07b6382cff2d580e83404e44d641b", size = 177001, upload-time = "2026-04-10T00:41:28.035Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/e1/ebd5100cbb202e561c0c8b59e485ef3bd63fa9beb610f3fdcaea443f0288/google_api_core-2.30.2-py3-none-any.whl", hash = "sha256:a4c226766d6af2580577db1f1a51bf53cd262f722b49731ce7414c43068a9594", size = 173236, upload-time = "2026-04-02T21:23:06.395Z" },
+    { url = "https://files.pythonhosted.org/packages/03/15/e56f351cf6ef1cfea58e6ac226a7318ed1deb2218c4b3cc9bd9e4b786c5a/google_api_core-2.30.3-py3-none-any.whl", hash = "sha256:a85761ba72c444dad5d611c2220633480b2b6be2521eca69cca2dbb3ffd6bfe8", size = 173274, upload-time = "2026-04-09T22:57:16.198Z" },
 ]
 
 [package.optional-dependencies]
@@ -2416,6 +2416,7 @@ dependencies = [
     { name = "openpi" },
     { name = "openpi-client" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "quic-portal" },
     { name = "starlette" },
 ]
@@ -2433,6 +2434,7 @@ requires-dist = [
     { name = "openpi", editable = "../openpi" },
     { name = "openpi-client", editable = "../openpi/packages/openpi-client" },
     { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "quic-portal", specifier = ">=0.1.13" },
     { name = "starlette", specifier = ">=1.0.0" },
 ]
@@ -3011,6 +3013,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/66/c0/0c8b6ad9f17a802ee498c46e004a0eb49bc148f2fd230864601a86dcf6db/python-dateutil-2.9.0.post0.tar.gz", hash = "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3", size = 342432, upload-time = "2024-03-01T18:36:20.211Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ec/57/56b9bcc3c9c6a792fcbaf139543cee77261f3651ca9da0c93f5c1221264b/python_dateutil-2.9.0.post0-py2.py3-none-any.whl", hash = "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427", size = 229892, upload-time = "2024-03-01T18:36:18.57Z" },
+]
+
+[[package]]
+name = "python-dotenv"
+version = "1.2.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/ed/0301aeeac3e5353ef3d94b6ec08bbcabd04a72018415dcb29e588514bba8/python_dotenv-1.2.2.tar.gz", hash = "sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3", size = 50135, upload-time = "2026-03-01T16:00:26.196Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0b/d7/1959b9648791274998a9c3526f6d0ec8fd2233e4d4acce81bbae76b44b2a/python_dotenv-1.2.2-py3-none-any.whl", hash = "sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a", size = 22101, upload-time = "2026-03-01T16:00:25.09Z" },
 ]
 
 [[package]]
