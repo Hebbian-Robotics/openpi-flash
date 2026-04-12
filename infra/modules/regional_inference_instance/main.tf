@@ -4,14 +4,14 @@ data "aws_subnet" "selected" {
   id = var.subnet_id
 }
 
-data "aws_ami" "ubuntu_noble" {
+data "aws_ami" "gpu_ready_ubuntu_noble" {
   count       = var.ami_id == null ? 1 : 0
   most_recent = true
-  owners      = ["099720109477"]
+  owners      = ["amazon"]
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+    values = ["Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04)*"]
   }
 
   filter {
@@ -26,7 +26,7 @@ data "aws_ami" "ubuntu_noble" {
 }
 
 locals {
-  effective_ami_id = var.ami_id != null ? var.ami_id : data.aws_ami.ubuntu_noble[0].id
+  effective_ami_id = var.ami_id != null ? var.ami_id : data.aws_ami.gpu_ready_ubuntu_noble[0].id
 
   effective_tags = merge(
     var.tags,
@@ -134,14 +134,16 @@ resource "aws_instance" "inference" {
   user_data = templatefile(
     "${path.module}/templates/user_data.sh.tftpl",
     {
-      cloudwatch_log_group_name = var.cloudwatch_log_group_name
-      config_json               = local.effective_service_config_json
-      container_name            = var.container_name
-      ecr_region                = var.ecr_region
-      ecr_registry_host         = local.ecr_registry_host
-      extra_bootstrap_commands  = var.extra_bootstrap_commands
-      image_url                 = local.effective_image_url
-      log_region                = data.aws_region.current.name
+      cloudwatch_log_group_name   = var.cloudwatch_log_group_name
+      config_json                 = local.effective_service_config_json
+      container_name              = var.container_name
+      ecr_region                  = var.ecr_region
+      ecr_registry_host           = local.ecr_registry_host
+      extra_bootstrap_commands    = var.extra_bootstrap_commands
+      image_url                   = local.effective_image_url
+      log_region                  = data.aws_region.current.name
+      openpi_pytorch_compile_mode = var.openpi_pytorch_compile_mode
+      openpi_quic_backend         = var.openpi_quic_backend
     }
   )
 

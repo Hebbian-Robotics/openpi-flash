@@ -4,13 +4,23 @@ set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y ca-certificates curl gnupg awscli
+apt-get install -y ca-certificates curl gnupg unzip
 
-curl -fsSL https://get.docker.com | sh
+if ! command -v aws >/dev/null 2>&1; then
+  curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscliv2.zip
+  rm -rf /tmp/aws /usr/local/aws-cli
+  unzip -q /tmp/awscliv2.zip -d /tmp
+  /tmp/aws/install --update
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  curl -fsSL https://get.docker.com | sh
+fi
 usermod -aG docker ubuntu || true
 systemctl enable docker
 
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+  gpg --dearmor --batch --yes -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
 curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
   sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
   > /etc/apt/sources.list.d/nvidia-container-toolkit.list
@@ -44,6 +54,8 @@ docker run -d --restart unless-stopped --gpus=all \
   -v /etc/openpi/config.json:/config/config.json:ro \
   -v openpi-inference-cache:/cache \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
+  -e OPENPI_PYTORCH_COMPILE_MODE=${openpi_pytorch_compile_mode} \
+  -e OPENPI_QUIC_BACKEND=${openpi_quic_backend} \
   -p 8000:8000 \
   -p 5555:5555/udp \
   --name ${container_name} \

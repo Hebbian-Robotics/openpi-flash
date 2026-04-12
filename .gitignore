@@ -22,6 +22,10 @@ dist/
 *.egg-info/
 target/
 Cargo.lock
+*.log
+*.out
+*.err
+logs/
 
 # Local configuration
 .env

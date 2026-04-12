@@ -27,7 +27,7 @@ variable "iam_instance_profile_name" {
 }
 
 variable "ami_id" {
-  description = "Optional explicit AMI ID; defaults to latest Canonical Ubuntu 24.04 x86_64 in the selected region"
+  description = "Optional explicit AMI ID; defaults to the latest Deep Learning Base OSS Nvidia Driver GPU AMI for Ubuntu 24.04 x86_64 in the selected region"
   type        = string
   default     = null
 }
@@ -125,6 +125,18 @@ variable "checkpoint_dir" {
   description = "Checkpoint directory for the model"
   type        = string
   default     = "s3://openpi-checkpoints-us-west-2/pi05_base_pytorch"
+}
+
+variable "openpi_pytorch_compile_mode" {
+  description = "Value for OPENPI_PYTORCH_COMPILE_MODE inside the inference container"
+  type        = string
+  default     = "default"
+}
+
+variable "openpi_quic_backend" {
+  description = "Value for OPENPI_QUIC_BACKEND inside the inference container"
+  type        = string
+  default     = "rust-sidecar"
 }
 
 variable "model_version" {
