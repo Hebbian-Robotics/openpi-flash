@@ -312,33 +312,39 @@ See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md) for full details. The
 3. Pull and run:
 
 ```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
+
 # Login to ECR
 aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
+  docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
 # Pull and run
-docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
+docker pull "${ECR_REGISTRY}/openpi-hosted:latest"
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
-  438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
+  "${ECR_REGISTRY}/openpi-hosted:latest"
 ```
 
 ### Updating to a new version
 
 ```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
+
 aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
-docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
+  docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+docker pull "${ECR_REGISTRY}/openpi-hosted:latest"
 docker stop openpi-inference && docker rm openpi-inference
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
-  438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
+  "${ECR_REGISTRY}/openpi-hosted:latest"
 ```
 
 You can pin to a specific commit: `openpi-hosted:<commit-sha>` instead of `:latest`.
@@ -346,9 +352,12 @@ You can pin to a specific commit: `openpi-hosted:<commit-sha>` instead of `:late
 ### Pushing dev images
 
 ```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
+
 # Build and push with a dev tag
-docker build .. -t 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:dev -f Dockerfile
-docker push 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:dev
+docker build .. -t "${ECR_REGISTRY}/openpi-hosted:dev" -f Dockerfile
+docker push "${ECR_REGISTRY}/openpi-hosted:dev"
 ```
 
 ECR keeps `latest` plus the 3 most recent images; older ones are cleaned up automatically.

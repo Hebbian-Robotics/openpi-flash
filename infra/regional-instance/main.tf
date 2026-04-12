@@ -1,0 +1,53 @@
+terraform {
+  required_version = ">= 1.5"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region  = var.aws_region
+  profile = var.aws_profile
+
+  default_tags {
+    tags = {
+      Project   = "openpi"
+      ManagedBy = "terraform"
+    }
+  }
+}
+
+module "regional_inference_instance" {
+  source = "../modules/regional_inference_instance"
+
+  allowed_https_cidr_blocks     = var.allowed_https_cidr_blocks
+  allowed_quic_cidr_blocks      = var.allowed_quic_cidr_blocks
+  allowed_ssh_cidr_blocks       = var.allowed_ssh_cidr_blocks
+  allowed_websocket_cidr_blocks = var.allowed_websocket_cidr_blocks
+  ami_id                        = var.ami_id
+  associate_public_ip_address   = var.associate_public_ip_address
+  assign_elastic_ip             = var.assign_elastic_ip
+  checkpoint_dir                = var.checkpoint_dir
+  cloudwatch_log_group_name     = var.cloudwatch_log_group_name
+  container_name                = var.container_name
+  default_prompt                = var.default_prompt
+  deployment_name               = var.deployment_name
+  docker_image_tag              = var.docker_image_tag
+  ecr_region                    = var.ecr_region
+  ecr_repository_url            = var.ecr_repository_url
+  extra_bootstrap_commands      = var.extra_bootstrap_commands
+  iam_instance_profile_name     = var.iam_instance_profile_name
+  instance_type                 = var.instance_type
+  max_concurrent_requests       = var.max_concurrent_requests
+  model_config_name             = var.model_config_name
+  model_version                 = var.model_version
+  root_volume_size_gib          = var.root_volume_size_gib
+  ssh_key_name                  = var.ssh_key_name
+  subnet_id                     = var.subnet_id
+  tags                          = var.tags
+  user_data_replace_on_change   = var.user_data_replace_on_change
+}

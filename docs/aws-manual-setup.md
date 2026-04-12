@@ -117,28 +117,9 @@ aws iam create-role \
   }'
 
 # ECR pull permissions
-aws iam put-role-policy \
+aws iam attach-role-policy \
   --role-name ec2-ecr-pull \
-  --policy-name ecr-pull \
-  --policy-document "{
-    \"Version\": \"2012-10-17\",
-    \"Statement\": [
-      {
-        \"Effect\": \"Allow\",
-        \"Action\": [\"ecr:GetAuthorizationToken\"],
-        \"Resource\": \"*\"
-      },
-      {
-        \"Effect\": \"Allow\",
-        \"Action\": [
-          \"ecr:BatchCheckLayerAvailability\",
-          \"ecr:BatchGetImage\",
-          \"ecr:GetDownloadUrlForLayer\"
-        ],
-        \"Resource\": \"arn:aws:ecr:us-west-2:${ACCOUNT_ID}:repository/openpi-hosted\"
-      }
-    ]
-  }"
+  --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
 
 # S3 checkpoint read permissions
 aws iam put-role-policy \
@@ -205,6 +186,8 @@ aws s3api put-public-access-block \
 ```
 
 ## Per-instance setup
+
+If you want a reusable, region-agnostic Terraform path instead of manual CLI steps, use [`infra/regional-instance/`](../infra/regional-instance/). The manual steps below are still useful for debugging or one-off experiments.
 
 These steps are repeated for each EC2 instance you launch.
 
@@ -274,12 +257,15 @@ exit
 ```bash
 ssh -i your-keypair.pem ubuntu@<instance-ip>
 
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
+
 # Login to ECR
 aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
+  docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
 # Pull
-docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
+docker pull "${ECR_REGISTRY}/openpi-hosted:latest"
 
 # Create config
 mkdir -p ~/openpi && cd ~/openpi
@@ -299,7 +285,7 @@ docker run -d --restart unless-stopped --gpus=all \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
-  438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
+  "${ECR_REGISTRY}/openpi-hosted:latest"
 ```
 
 ### 4. Optional: Elastic IP

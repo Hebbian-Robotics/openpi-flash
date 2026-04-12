@@ -89,31 +89,9 @@ resource "aws_iam_role" "ec2_inference" {
   })
 }
 
-resource "aws_iam_role_policy" "ec2_ecr_pull" {
-  name = "ecr-pull"
-  role = aws_iam_role.ec2_inference.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-        ]
-        Resource = "*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:BatchGetImage",
-          "ecr:GetDownloadUrlForLayer",
-        ]
-        Resource = aws_ecr_repository.inference.arn
-      }
-    ]
-  })
+resource "aws_iam_role_policy_attachment" "ec2_ecr_pull_read_only" {
+  role       = aws_iam_role.ec2_inference.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
 resource "aws_iam_role_policy" "ec2_s3_checkpoint_read" {
