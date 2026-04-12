@@ -165,10 +165,19 @@ async fn handle_client_connection(
         .context("Failed during QUIC handshake")?;
 
     loop {
-        let Some(quic_message_payload) = read_length_prefixed_message(&mut recv_stream).await?
-        else {
-            info!("Client {remote_address} disconnected");
-            break;
+        let quic_message_payload = match read_length_prefixed_message(&mut recv_stream).await {
+            Ok(Some(quic_message_payload)) => quic_message_payload,
+            Ok(None) => {
+                info!("Client {remote_address} disconnected");
+                break;
+            }
+            Err(error) if is_expected_peer_disconnect_error(&error) => {
+                info!("Client {remote_address} disconnected");
+                break;
+            }
+            Err(error) => {
+                return Err(error).context("Failed while reading QUIC client message");
+            }
         };
 
         let (quic_message_type, quic_message_body) =
@@ -194,11 +203,26 @@ async fn handle_client_connection(
             .context("Failed to forward backend response to QUIC client")?;
     }
 
-    send_stream
-        .finish()
-        .context("Failed to finish QUIC send stream")?;
+    let _ = send_stream.finish();
     quic_connection.close(0_u32.into(), b"client disconnected");
     Ok(())
+}
+
+fn is_expected_peer_disconnect_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| {
+                matches!(
+                    io_error.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                )
+            })
+    })
 }
 
 async fn handle_quic_message_handshake(
