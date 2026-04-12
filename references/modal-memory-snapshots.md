@@ -5,7 +5,7 @@ date: 10 Apr 2026
 
 # Memory Snapshots
 
-Modal Memory Snapshots can dramatically reduce the [cold start](/docs/guide/cold-start) latency of Modal Functions by skipping initialization work on most container boots.
+Modal Memory Snapshots can dramatically reduce the [cold start](https://modal.com/docs/guide/cold-start) latency of Modal Functions by skipping initialization work on most container boots.
 
 For instance, during initialization, your code might issue many file read operations sequentially,
 like the >20,000 file operations required to load `torch`.
@@ -15,11 +15,11 @@ Memory Snapshots replace this initialization work with direct restoration of the
 
 The relative speedup is unbounded: the more work you do to create fewer bytes, the greater it becomes.
 In our experience, practical initialization-heavy Functions often start up
-[3-10x faster from Memory Snapshots](/blog/gpu-mem-snapshots).
+[3-10x faster from Memory Snapshots](https://modal.com/blog/gpu-mem-snapshots).
 
 There are two variants of Memory Snapshots.
 [CPU Memory Snapshots](#cpu-memory-snapshots) capture the state of CPU memory.
-[GPU Memory Snapshots](#gpu-memory-snapshots-alpha), an [alpha feature](/docs/guide/feature-maturity), also capture the state of GPU memory.
+[GPU Memory Snapshots](#gpu-memory-snapshots-alpha), an [alpha feature](https://modal.com/docs/guide/feature-maturity), also capture the state of GPU memory.
 
 ## CPU Memory Snapshots
 
@@ -37,7 +37,7 @@ def my_func():
 Then deploy the App, e.g. with `modal deploy`. Memory Snapshots are created only for deployed Apps.
 
 Any code executed in global scope, such as imports, will be captured in the Memory Snapshot.
-Use the [`Image.imports` context manager](/docs/reference/modal.Image#imports)
+Use the [`Image.imports` context manager](https://modal.com/docs/reference/modal.Image#imports)
 to import remote-only dependencies in the global scope.
 
 ```python
@@ -54,7 +54,7 @@ def my_func():
 
 ## Container lifecycle hooks and Memory Snapshots
 
-Modal's [container lifecycle hooks](/docs/guide/lifecycle-functions)
+Modal's [container lifecycle hooks](https://modal.com/docs/guide/lifecycle-functions)
 provide additional control over what parts of container initialization work
 are included in Memory Snapshots. Put initialization code that you want to run
 before snapshotting inside methods decorated with `@modal.enter(snap=True)`.
@@ -75,7 +75,7 @@ class MyCls:
 
 <Callout variant="alpha">
 
-This feature is currently in alpha. See [feature maturity](/docs/guide/feature-maturity) for more details.
+This feature is currently in alpha. See [feature maturity](https://modal.com/docs/guide/feature-maturity) for more details.
 
 </Callout>
 
@@ -97,7 +97,7 @@ def my_gpu_func():
 
 You'll generally want to include any expensive initialization work that
 requires the GPU in the Memory Snapshot.
-Use a Modal [Cls](/docs/guide/lifecycle-functions)
+Use a Modal [Cls](https://modal.com/docs/guide/lifecycle-functions)
 and put that work inside a `@modal.enter` method,
 like so:
 
@@ -124,7 +124,7 @@ class Llm:
         self.pipeline(context)
 ```
 
-You can find a complete code sample [here](/docs/examples/gpu_snapshot).
+You can find a complete code sample [here](https://modal.com/docs/examples/gpu_snapshot).
 
 We recommend warming up your model by running a few forward passes on sample data
 in the `@modal.enter(snap=True)` method to move more initialization work into the snapshotting phase.
@@ -134,7 +134,7 @@ which shows up as tail latency.
 
 ### Limitations of GPU Memory Snapshots
 
-[We've seen](/blog/gpu-mem-snapshots) that GPU Memory Snapshots can massively reduce cold start time,
+[We've seen](https://modal.com/blog/gpu-mem-snapshots) that GPU Memory Snapshots can massively reduce cold start time,
 but they are subject to certain limitations.
 The underlying checkpoint/restore technology in the device drivers
 is still quite new. We expect these limitations to be resolved as the drivers update.
@@ -149,11 +149,11 @@ most Functions will need some of their code rewritten to ensure compatibility wi
 or to deliver performance improvements.
 
 This is particularly true for more complex inference engines,
-like those used to maximize [LLM inference performance](/docs/guide/high-performance-llm-inference).
+like those used to maximize [LLM inference performance](https://modal.com/docs/guide/high-performance-llm-inference).
 For instance, it is often better to discard the initial, unfilled KV cache before the snapshot is taken,
 then recreate it on restore, rather than writing and then reading the KV cache's meaningless pages in a snapshot.
-See [this example with vLLM](/docs/examples/vllm_snapshot)
-and [this example with SGLang](/docs/examples/sglang_snapshot)
+See [this example with vLLM](https://modal.com/docs/examples/lfm_snapshot)
+and [this example with SGLang](https://modal.com/docs/examples/sglang_snapshot)
 for sample code, patterns, and other guidance.
 
 #### GPU Memory Snapshots are generally incompatible with multi-GPU code
@@ -170,8 +170,8 @@ For instance, use of graphics capabilities prior to snapshotting will generally 
 #### GPU Memory Snapshots do not speed up model loading from storage
 
 Memory Snapshots use the same high-performance distributed filesystem
-that delivers Modal [Images](/docs/guide/images)
-and Modal [Volumes](/docs/guide/volumes)
+that delivers Modal [Images](https://modal.com/docs/guide/images)
+and Modal [Volumes](https://modal.com/docs/guide/volumes)
 to our worldwide fleet of containers at minimum latency and maximum throughput.
 
 That means that if the majority of your initialization latency is spent loading weights,
@@ -199,11 +199,11 @@ You can also search your Modal App's logs for the line `Snapshot created. Restor
 
 ### When are Memory Snapshots updated?
 
-Redeploying your Function with new configuration (e.g. a [new GPU type](/docs/guide/gpu))
+Redeploying your Function with new configuration (e.g. a [new GPU type](https://modal.com/docs/guide/gpu))
 or new code will cause previous Memory Snapshots to become obsolete.
 Subsequent invocations to the new Function version will automatically create new Memory Snapshots with the new configuration and code.
 
-Changes to [Modal Volumes](/docs/guide/volumes) do not cause Memory Snapshots to update.
+Changes to [Modal Volumes](https://modal.com/docs/guide/volumes) do not cause Memory Snapshots to update.
 Deleting files in a Volume used during restore will cause restore failures.
 
 ### I haven't changed my Function. Why do I still see Memory Snapshots being created sometimes?

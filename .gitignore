@@ -26,3 +26,5 @@ dist/
 .env.*
 !.env.example
 config.json
+
+.codex

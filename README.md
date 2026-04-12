@@ -87,10 +87,10 @@ uv run modal setup  # one-time auth
 uv run modal serve modal_app.py
 ```
 
-This starts a dev server with a temporary URL. Modal prints the URL — it looks like:
+This starts a dev server with a temporary URL. Modal prints a host ending in `.modal.run`, with a shape like:
 
 ```
-https://<your-workspace>--openpi-inference-openpiinference-serve-dev.modal.run
+<your-workspace>--openpi-inference-openpiinference-serve-dev.modal.run
 ```
 
 ### Production deploy
@@ -209,8 +209,8 @@ All test scripts run a warmup inference followed by 5 timed iterations, reportin
 
 ```bash
 uv run python test_server.py ws://localhost:8000          # EC2/Docker (plain)
-uv run python test_server.py wss://your-domain            # EC2 with HTTPS
-uv run python test_server.py wss://<your-modal-url>       # Modal
+uv run python test_server.py wss://$EC2_HTTPS_HOST   # EC2 with HTTPS
+uv run python test_server.py wss://$MODAL_HOSTNAME   # Modal
 ```
 
 #### Tunnel mode (`modal_tunnel_app.py`)
@@ -245,9 +245,11 @@ from openpi_client import websocket_client_policy as wcp
 # For EC2/Docker:
 client = wcp.WebsocketClientPolicy(host="localhost", port=8000)
 
-# For Modal (use wss:// with the URL printed by modal serve/deploy):
+# For Modal, use the hostname printed by modal serve/deploy, for example:
+# <your-workspace>--openpi-inference-openpiinference-serve-dev.modal.run
+modal_hostname = "your Modal hostname"
 client = wcp.WebsocketClientPolicy(
-    host="wss://your-workspace--openpi-inference-openpiinference-serve.modal.run",
+    host=f"wss://{modal_hostname}",
     port=443,
 )
 
@@ -262,7 +264,7 @@ action = client.infer(observation)
 curl http://localhost:8000/healthz
 
 # Modal
-curl https://<modal-url>/healthz
+curl "https://$MODAL_HOSTNAME/healthz"
 ```
 
 ## Linting and typechecking

@@ -7,7 +7,7 @@ read_time: 5 minute read
 
 # Real-time inference for robots at Physical Intelligence
 
-[Physical Intelligence](https://www.physicalintelligence.company/) (Pi) is building a general-purpose robotic intelligence system capable of operating any robot across any task. Their core model---a Visual-Language-Action (VLA) architecture---takes visual observations, natural-language instructions, and the robot's proprioceptive state, then outputs motor commands for the next fraction of a second. Every arm movement in their system flows through this closed loop of continuous inference.
+[Physical Intelligence](https://www.pi.website/) (Pi) is building a general-purpose robotic intelligence system capable of operating any robot across any task. Their core model---a Visual-Language-Action (VLA) architecture---takes visual observations, natural-language instructions, and the robot's proprioceptive state, then outputs motor commands for the next fraction of a second. Every arm movement in their system flows through this closed loop of continuous inference.
 
 To evaluate progress, Pi doesn't just rely on simulation. Every model revision must be validated on real robots performing real tasks. That means thousands of inference cycles running 24/7 across a growing fleet of robots.
 
@@ -46,4 +46,3 @@ Even the best protocols can't overcome the speed of light, so where the GPU runs
 Modal lets Pi pin inference deployments to specific regions close to the robots, keeping the round-trip path short and predictable.
 
 Once inference is region-pinned, adding robots in a new location stops being an infrastructure build-out. Pi can bring up the same container near the new site, mount the same checkpoints via Modal Volumes, and connect robots over the same low-latency transport---without shipping GPU towers or standing up a local cluster.
-

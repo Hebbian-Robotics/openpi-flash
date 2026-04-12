@@ -32,7 +32,7 @@ tunnel.url        = https://wtqcahqwhd4tu0.r5.modal.host
 tunnel.tls_socket = ('wtqcahqwhd4tu0.r5.modal.host', 443)
 ```
 
-You can also create tunnels on a [Sandbox](/docs/guide/sandbox-networking#forwarding-ports)
+You can also create tunnels on a [Sandbox](https://modal.com/docs/guide/sandbox-networking#forwarding-ports)
 to directly expose the container's ports.
 
 ## Build with tunnels

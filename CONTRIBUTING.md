@@ -45,6 +45,7 @@ uv run python test_modal_quic.py
 uv run ruff check --fix  # Linting with auto-fix
 uv run ruff format       # Code formatting
 uv run ty check          # Type checking
+lychee -v .              # Markdown link checking
 hadolint Dockerfile      # Docker linting (brew install hadolint)
 ```
 
