@@ -180,6 +180,8 @@ def prepare_openpi_config(model_config_name: str) -> TrainConfig:
     """
     import dataclasses
 
+    from hosting.compile_mode import get_serving_pytorch_compile_mode
+
     apply_transformers_patches()
     log_container_location()
 
@@ -188,13 +190,16 @@ def prepare_openpi_config(model_config_name: str) -> TrainConfig:
 
     print(f"Preparing config: {model_config_name}")
     train_config = _config.get_config(model_config_name)
+    serving_pytorch_compile_mode = get_serving_pytorch_compile_mode()
+    print(f"Using PyTorch compile mode {serving_pytorch_compile_mode!r}")
 
-    # Use default compile mode — reliable, compiles in ~2.5 min, gives ~76ms
-    # policy forward vs ~160ms eager.
     if isinstance(train_config.model, _pi0_config.Pi0Config):
         train_config = dataclasses.replace(
             train_config,
-            model=dataclasses.replace(train_config.model, pytorch_compile_mode="default"),
+            model=dataclasses.replace(
+                train_config.model,
+                pytorch_compile_mode=serving_pytorch_compile_mode,
+            ),
         )
 
     return train_config

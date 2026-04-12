@@ -51,6 +51,9 @@ cp config.example.json config.json
 INFERENCE_CONFIG_PATH=config.json uv run python -m hosting.serve
 ```
 
+Set `OPENPI_PYTORCH_COMPILE_MODE` to override the serving compile mode at runtime.
+Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`.
+
 By default, local development uses the original Python QUIC backend (`quic-portal`) for direct QUIC. To exercise the Rust QUIC sidecar locally, build it first and set the backend explicitly:
 
 ```bash

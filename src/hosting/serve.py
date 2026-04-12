@@ -30,17 +30,13 @@ from openpi.training import config as _config
 from openpi_client import base_policy as _base_policy
 from quic_portal import Portal, PortalError
 
+from hosting.compile_mode import get_serving_pytorch_compile_mode
 from hosting.config import ServiceConfig, load_config
 from hosting.local_policy_socket_server import LocalPolicySocketServer
 from hosting.quic_protocol import DEFAULT_TRANSPORT_OPTIONS, serve_quic_connection
 from hosting.warmup import make_aloha_warmup_observation
 
 logger = logging.getLogger(__name__)
-
-# Compile mode "default" is proven reliable on Modal (~2.5 min compile, ~76ms
-# inference). The config default "max-autotune" optimises for training
-# throughput and takes longer to compile with no serving-speed benefit.
-PYTORCH_COMPILE_MODE = "default"
 
 QUIC_PORT = 5555
 DEFAULT_LOCAL_POLICY_SOCKET_PATH = pathlib.Path("/tmp/openpi-policy.sock")
@@ -106,12 +102,16 @@ def load_policy(
         f"elapsed={checkpoint_resolution_elapsed_seconds:.1f}s)"
     )
 
+    serving_pytorch_compile_mode = get_serving_pytorch_compile_mode()
+    _log_service_milestone(f"Using PyTorch compile mode {serving_pytorch_compile_mode!r}")
+
     # Override compile mode for faster, reliable compilation during serving.
     if isinstance(train_config.model, _pi0_config.Pi0Config):
         train_config = dataclasses.replace(
             train_config,
             model=dataclasses.replace(
-                train_config.model, pytorch_compile_mode=PYTORCH_COMPILE_MODE
+                train_config.model,
+                pytorch_compile_mode=serving_pytorch_compile_mode,
             ),
         )
 
