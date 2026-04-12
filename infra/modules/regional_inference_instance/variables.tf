@@ -4,8 +4,9 @@ variable "deployment_name" {
 }
 
 variable "subnet_id" {
-  description = "Subnet to launch the inference instance into"
+  description = "Subnet to launch the inference instance into. When null, uses the default VPC's first available subnet."
   type        = string
+  default     = null
 }
 
 variable "iam_instance_profile_name" {
@@ -14,9 +15,15 @@ variable "iam_instance_profile_name" {
 }
 
 variable "ami_id" {
-  description = "AMI to use for the instance; defaults to the latest Deep Learning Base OSS Nvidia Driver GPU AMI for Ubuntu 24.04 x86_64"
+  description = "Explicit AMI ID. When null, the latest Deep Learning AMI GPU PyTorch (Ubuntu 24.04) is resolved via SSM."
   type        = string
   default     = null
+}
+
+variable "dlami_ssm_slug" {
+  description = "SSM parameter slug under /aws/service/deeplearning/ami/x86_64/ used to resolve the default AMI."
+  type        = string
+  default     = "oss-nvidia-driver-gpu-pytorch-2.10-ubuntu-24.04"
 }
 
 variable "instance_type" {
@@ -32,7 +39,13 @@ variable "root_volume_size_gib" {
 }
 
 variable "ssh_key_name" {
-  description = "Optional EC2 key pair name for SSH access"
+  description = "Optional EC2 key pair name for SSH access. Mutually exclusive with ssh_public_key."
+  type        = string
+  default     = null
+}
+
+variable "ssh_public_key" {
+  description = "Optional SSH public key material. When set, Terraform creates a managed key pair instead of using ssh_key_name."
   type        = string
   default     = null
 }

@@ -29,6 +29,7 @@ module "regional_inference_instance" {
   allowed_ssh_cidr_blocks       = var.allowed_ssh_cidr_blocks
   allowed_websocket_cidr_blocks = var.allowed_websocket_cidr_blocks
   ami_id                        = var.ami_id
+  dlami_ssm_slug                = var.dlami_ssm_slug
   associate_public_ip_address   = var.associate_public_ip_address
   assign_elastic_ip             = var.assign_elastic_ip
   checkpoint_dir                = var.checkpoint_dir
@@ -49,6 +50,7 @@ module "regional_inference_instance" {
   openpi_quic_backend           = var.openpi_quic_backend
   root_volume_size_gib          = var.root_volume_size_gib
   ssh_key_name                  = var.ssh_key_name
+  ssh_public_key                = var.ssh_public_key
   subnet_id                     = var.subnet_id
   tags                          = var.tags
   user_data_replace_on_change   = var.user_data_replace_on_change

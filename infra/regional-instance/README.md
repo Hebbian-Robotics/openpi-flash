@@ -37,10 +37,22 @@ terraform apply \
   -var='allowed_quic_cidr_blocks=["203.0.113.10/32"]'
 ```
 
+### Minimal deploy (auto-discover subnet from default VPC)
+
+```bash
+terraform apply \
+  -var aws_region=ap-southeast-5 \
+  -var ecr_repository_url="$SHARED_ECR_REPOSITORY_URL" \
+  -var 'ssh_public_key=ssh-ed25519 AAAA... user@host'
+```
+
+When `subnet_id` is omitted, the module discovers the default VPC's first public subnet in the target region. When `ssh_public_key` is provided instead of `ssh_key_name`, Terraform creates and manages the key pair.
+
 ## Notes
 
 - Pass `ecr_repository_url` from the shared root output rather than hardcoding an account-specific ECR registry URL.
 - The stack still defaults to the shared checkpoint bucket path in `us-west-2`.
 - Cross-region ECR pulls and S3 checkpoint downloads are acceptable for testing and steady-state serving, but they increase cold-start time.
-- The default AMI lookup uses the latest Deep Learning Base OSS Nvidia Driver GPU AMI for Ubuntu 24.04 x86_64 in the selected region. If you need a different image, pass `ami_id`.
+- The default AMI is the latest Deep Learning AMI GPU PyTorch (Ubuntu 24.04), resolved via SSM parameter. This AMI ships with Docker, nvidia-container-toolkit, CUDA, and AWS CLI pre-installed. Override with `ami_id` or change the PyTorch version via `dlami_ssm_slug`.
 - This stack expects the shared IAM instance profile (`ec2-ecr-pull`) to already exist.
+- `ssh_key_name` and `ssh_public_key` are mutually exclusive. Use `ssh_key_name` to reference a pre-existing AWS key pair, or `ssh_public_key` to have Terraform create one.

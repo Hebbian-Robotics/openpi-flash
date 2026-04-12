@@ -35,3 +35,11 @@ config.json
 
 .codex
 scratch.md
+
+# Terraform / OpenTofu
+.terraform/
+terraform.tfstate
+terraform.tfstate.*
+terraform.tfstate.d/
+*.tfvars
+!*.tfvars.example

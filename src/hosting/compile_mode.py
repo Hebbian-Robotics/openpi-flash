@@ -7,6 +7,7 @@ import os
 OPENPI_PYTORCH_COMPILE_MODE_ENV_VAR = "OPENPI_PYTORCH_COMPILE_MODE"
 DEFAULT_SERVING_PYTORCH_COMPILE_MODE = "default"
 SUPPORTED_PYTORCH_COMPILE_MODES = (
+    "none",
     "default",
     "reduce-overhead",
     "max-autotune",
@@ -14,8 +15,12 @@ SUPPORTED_PYTORCH_COMPILE_MODES = (
 )
 
 
-def get_serving_pytorch_compile_mode() -> str:
-    """Return the serving compile mode, honoring an env override when set."""
+def get_serving_pytorch_compile_mode() -> str | None:
+    """Return the serving compile mode, honoring an env override when set.
+
+    Returns None when set to "none", which disables torch.compile entirely
+    and runs in eager mode.
+    """
     configured_compile_mode = os.environ.get(
         OPENPI_PYTORCH_COMPILE_MODE_ENV_VAR,
         DEFAULT_SERVING_PYTORCH_COMPILE_MODE,
@@ -26,4 +31,6 @@ def get_serving_pytorch_compile_mode() -> str:
             f"Unsupported {OPENPI_PYTORCH_COMPILE_MODE_ENV_VAR}="
             f"{configured_compile_mode!r}. Expected one of: {supported_compile_modes}."
         )
+    if configured_compile_mode == "none":
+        return None
     return configured_compile_mode

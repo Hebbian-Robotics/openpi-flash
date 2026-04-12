@@ -1,0 +1,69 @@
+#cloud-config
+# Cloud-init configuration for OpenPI inference instances.
+# Expects a Deep Learning AMI GPU PyTorch (Ubuntu 24.04) which ships with
+# Docker, nvidia-container-toolkit, CUDA, and AWS CLI pre-installed.
+
+write_files:
+  - path: /etc/openpi/config.json
+    owner: root:root
+    permissions: "0644"
+    content: |
+      ${config_json}
+
+  - path: /usr/local/bin/openpi-start
+    owner: root:root
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+
+      aws ecr get-login-password --region ${ecr_region} | \
+        docker login --username AWS --password-stdin ${ecr_registry_host}
+
+      docker rm -f ${container_name} || true
+      docker volume create openpi-inference-cache || true
+      docker pull ${image_url}
+
+      docker run -d --restart unless-stopped --gpus=all \
+        --log-driver=awslogs \
+        --log-opt awslogs-region=${log_region} \
+        --log-opt awslogs-group=${cloudwatch_log_group_name} \
+        --log-opt awslogs-create-group=true \
+        -v /etc/openpi/config.json:/config/config.json:ro \
+        -v openpi-inference-cache:/cache \
+        -e INFERENCE_CONFIG_PATH=/config/config.json \
+        -e OPENPI_PYTORCH_COMPILE_MODE=${openpi_pytorch_compile_mode} \
+        -e OPENPI_QUIC_BACKEND=${openpi_quic_backend} \
+        -p 8000:8000 \
+        -p 5555:5555/udp \
+        --name ${container_name} \
+        ${image_url}
+
+  - path: /etc/systemd/system/openpi-inference.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=OpenPI inference container
+      After=network-online.target docker.service
+      Wants=network-online.target docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/bin/openpi-start
+      ExecStop=/usr/bin/docker stop ${container_name}
+      ExecStopPost=-/usr/bin/docker rm -f ${container_name}
+      TimeoutStartSec=0
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl enable openpi-inference.service
+  - systemctl start openpi-inference.service
+%{ if extra_bootstrap_commands != "" ~}
+  - |
+    ${extra_bootstrap_commands}
+%{ endif ~}

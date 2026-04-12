@@ -1,32 +1,41 @@
 data "aws_region" "current" {}
 
-data "aws_subnet" "selected" {
-  id = var.subnet_id
+# -- Default VPC/subnet discovery (used when subnet_id is not provided) --
+data "aws_vpc" "default" {
+  count   = var.subnet_id == null ? 1 : 0
+  default = true
 }
 
-data "aws_ami" "gpu_ready_ubuntu_noble" {
-  count       = var.ami_id == null ? 1 : 0
-  most_recent = true
-  owners      = ["amazon"]
+data "aws_subnets" "default_vpc" {
+  count = var.subnet_id == null ? 1 : 0
 
   filter {
-    name   = "name"
-    values = ["Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04)*"]
+    name   = "vpc-id"
+    values = [data.aws_vpc.default[0].id]
   }
 
   filter {
-    name   = "architecture"
-    values = ["x86_64"]
+    name   = "default-for-az"
+    values = ["true"]
   }
+}
 
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
+data "aws_subnet" "selected" {
+  id = local.effective_subnet_id
+}
+
+# Resolve the latest Deep Learning AMI GPU PyTorch (Ubuntu 24.04) via SSM.
+# This AMI ships with Docker, nvidia-container-toolkit, CUDA, and AWS CLI
+# pre-installed, so the bootstrap script only needs to write config and start
+# the inference service.
+data "aws_ssm_parameter" "dlami_pytorch" {
+  count = var.ami_id == null ? 1 : 0
+  name  = "/aws/service/deeplearning/ami/x86_64/${var.dlami_ssm_slug}/latest/ami-id"
 }
 
 locals {
-  effective_ami_id = var.ami_id != null ? var.ami_id : data.aws_ami.gpu_ready_ubuntu_noble[0].id
+  effective_subnet_id = var.subnet_id != null ? var.subnet_id : data.aws_subnets.default_vpc[0].ids[0]
+  effective_ami_id    = var.ami_id != null ? var.ami_id : nonsensitive(data.aws_ssm_parameter.dlami_pytorch[0].value)
 
   effective_tags = merge(
     var.tags,
@@ -113,12 +122,19 @@ resource "aws_vpc_security_group_egress_rule" "all_outbound" {
 resource "aws_instance" "inference" {
   ami                         = local.effective_ami_id
   instance_type               = var.instance_type
-  subnet_id                   = var.subnet_id
+  subnet_id                   = local.effective_subnet_id
   vpc_security_group_ids      = [aws_security_group.inference.id]
   iam_instance_profile        = var.iam_instance_profile_name
-  key_name                    = var.ssh_key_name
+  key_name                    = var.ssh_public_key != null ? aws_key_pair.inference[0].key_name : var.ssh_key_name
   associate_public_ip_address = var.associate_public_ip_address
   user_data_replace_on_change = var.user_data_replace_on_change
+
+  lifecycle {
+    precondition {
+      condition     = !(var.ssh_key_name != null && var.ssh_public_key != null)
+      error_message = "Only one of ssh_key_name or ssh_public_key may be set, not both."
+    }
+  }
 
   metadata_options {
     http_endpoint = "enabled"
@@ -132,7 +148,7 @@ resource "aws_instance" "inference" {
   }
 
   user_data = templatefile(
-    "${path.module}/templates/user_data.sh.tftpl",
+    "${path.module}/templates/user_data.yaml.tftpl",
     {
       cloudwatch_log_group_name   = var.cloudwatch_log_group_name
       config_json                 = local.effective_service_config_json
@@ -155,6 +171,15 @@ resource "aws_eip" "inference" {
 
   instance = aws_instance.inference.id
   domain   = "vpc"
+
+  tags = local.effective_tags
+}
+
+resource "aws_key_pair" "inference" {
+  count = var.ssh_public_key != null ? 1 : 0
+
+  key_name   = "${var.deployment_name}-ssh"
+  public_key = var.ssh_public_key
 
   tags = local.effective_tags
 }

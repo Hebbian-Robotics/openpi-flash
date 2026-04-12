@@ -27,3 +27,13 @@ output "elastic_ip_allocation_id" {
   description = "Elastic IP allocation ID when one is attached"
   value       = var.assign_elastic_ip ? aws_eip.inference[0].allocation_id : null
 }
+
+output "ssh_key_pair_name" {
+  description = "Name of the SSH key pair (managed or external)"
+  value       = var.ssh_public_key != null ? aws_key_pair.inference[0].key_name : var.ssh_key_name
+}
+
+output "effective_subnet_id" {
+  description = "Subnet ID used by the instance (explicit or auto-discovered)"
+  value       = local.effective_subnet_id
+}
