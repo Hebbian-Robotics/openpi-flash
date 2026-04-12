@@ -11,8 +11,16 @@
 #     -p 8000:8000 -p 5555:5555/udp \
 #     openpi-hosted
 
+FROM rust:1.88-bookworm AS quic-sidecar-builder
+
+WORKDIR /build
+COPY hosting/quic-sidecar/Cargo.toml /build/Cargo.toml
+COPY hosting/quic-sidecar/src /build/src
+RUN cargo build --release
+
 FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04@sha256:2d913b09e6be8387e1a10976933642c73c840c0b735f0bf3c28d97fc9bc422e0
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
+COPY --from=quic-sidecar-builder /build/target/release/openpi-quic-sidecar /usr/local/bin/openpi-quic-sidecar
 
 WORKDIR /app
 
@@ -66,6 +74,7 @@ ENV TORCHINDUCTOR_FX_GRAPH_CACHE=1
 
 # openpi data home for downloaded checkpoints and norm stats.
 ENV OPENPI_DATA_HOME=/cache/models
+ENV OPENPI_QUIC_BACKEND=rust-sidecar
 
 EXPOSE 5555/udp
 

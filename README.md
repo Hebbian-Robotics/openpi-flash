@@ -1,6 +1,6 @@
 # openpi-hosting
 
-Hosted inference service for [openpi](https://github.com/Physical-Intelligence/openpi). Wraps openpi's policy inference in a WebSocket server with concurrency control and health checks. Supports deployment on AWS EC2 (Docker) or [Modal](https://modal.com).
+Hosted inference service for [openpi](https://github.com/Physical-Intelligence/openpi). Wraps openpi's policy inference in a WebSocket server with concurrency control, health checks, and optional QUIC transport. Supports deployment on AWS EC2 (Docker) or [Modal](https://modal.com).
 
 ## Prerequisites
 
@@ -51,6 +51,17 @@ cp config.example.json config.json
 INFERENCE_CONFIG_PATH=config.json uv run python -m hosting.serve
 ```
 
+By default, local development uses the original Python QUIC backend (`quic-portal`) for direct QUIC. To exercise the Rust QUIC sidecar locally, build it first and set the backend explicitly:
+
+```bash
+cd quic-sidecar && cargo build
+cd ..
+OPENPI_QUIC_BACKEND=rust-sidecar \
+OPENPI_QUIC_SIDECAR_BINARY=$PWD/quic-sidecar/target/debug/openpi-quic-sidecar \
+INFERENCE_CONFIG_PATH=config.json \
+uv run python -m hosting.serve
+```
+
 ## Running with Docker
 
 ```bash
@@ -62,6 +73,7 @@ docker run --rm --gpus=all \
   -v ./config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 \
+  -p 5555:5555/udp \
   openpi-hosted
 ```
 
@@ -70,6 +82,8 @@ Or with Docker Compose:
 ```bash
 docker compose --profile openpi up --build
 ```
+
+The Docker image builds and runs a Rust QUIC sidecar by default for the direct EC2/AWS QUIC path. The Python process still owns policy loading and inference; the sidecar only terminates QUIC and forwards requests over a local Unix socket.
 
 ## Running on Modal
 
@@ -211,6 +225,13 @@ All test scripts run a warmup inference followed by 5 timed iterations, reportin
 uv run python test_server.py ws://localhost:8000          # EC2/Docker (plain)
 uv run python test_server.py wss://$EC2_HTTPS_HOST   # EC2 with HTTPS
 uv run python test_server.py wss://$MODAL_HOSTNAME   # Modal
+```
+
+#### Direct QUIC on EC2/Docker
+
+```bash
+uv run python test_quic.py localhost
+uv run python test_quic.py $EC2_HOST --quic-port 5555 --ws-port 8000
 ```
 
 #### Tunnel mode (`modal_tunnel_app.py`)

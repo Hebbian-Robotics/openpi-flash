@@ -14,6 +14,9 @@ Usage:
 import dataclasses
 import datetime
 import logging
+import os
+import pathlib
+import subprocess
 import threading
 import time
 import traceback
@@ -28,6 +31,7 @@ from openpi_client import base_policy as _base_policy
 from quic_portal import Portal, PortalError
 
 from hosting.config import ServiceConfig, load_config
+from hosting.local_policy_socket_server import LocalPolicySocketServer
 from hosting.quic_protocol import DEFAULT_TRANSPORT_OPTIONS, serve_quic_connection
 from hosting.warmup import make_aloha_warmup_observation
 
@@ -39,6 +43,10 @@ logger = logging.getLogger(__name__)
 PYTORCH_COMPILE_MODE = "default"
 
 QUIC_PORT = 5555
+DEFAULT_LOCAL_POLICY_SOCKET_PATH = pathlib.Path("/tmp/openpi-policy.sock")
+DEFAULT_QUIC_BACKEND_KIND = "portal"
+RUST_QUIC_BACKEND_KIND = "rust-sidecar"
+DEFAULT_RUST_QUIC_SIDECAR_BINARY_PATH = pathlib.Path("/usr/local/bin/openpi-quic-sidecar")
 
 
 def _log_service_milestone(message: str) -> None:
@@ -156,6 +164,54 @@ def _run_quic_server(policy: ThreadSafePolicy, metadata: dict) -> None:
             time.sleep(1)  # Brief pause before accepting next client.
 
 
+def _get_quic_backend_kind() -> str:
+    return os.environ.get("OPENPI_QUIC_BACKEND", DEFAULT_QUIC_BACKEND_KIND)
+
+
+def _get_local_policy_socket_path() -> pathlib.Path:
+    configured_socket_path = os.environ.get("OPENPI_LOCAL_POLICY_SOCKET_PATH")
+    if configured_socket_path:
+        return pathlib.Path(configured_socket_path)
+    return DEFAULT_LOCAL_POLICY_SOCKET_PATH
+
+
+def _get_rust_quic_sidecar_binary_path() -> pathlib.Path:
+    configured_binary_path = os.environ.get("OPENPI_QUIC_SIDECAR_BINARY")
+    if configured_binary_path:
+        return pathlib.Path(configured_binary_path)
+    return DEFAULT_RUST_QUIC_SIDECAR_BINARY_PATH
+
+
+def _run_rust_quic_sidecar(local_policy_socket_path: pathlib.Path) -> None:
+    sidecar_binary_path = _get_rust_quic_sidecar_binary_path()
+    sidecar_command = [
+        str(sidecar_binary_path),
+        "--listen-port",
+        str(QUIC_PORT),
+        "--backend-socket-path",
+        str(local_policy_socket_path),
+    ]
+
+    while True:
+        _log_service_milestone(
+            f"Starting Rust QUIC sidecar ({sidecar_binary_path}) on UDP port {QUIC_PORT}"
+        )
+        try:
+            sidecar_process = subprocess.Popen(sidecar_command)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "Rust QUIC sidecar binary not found. "
+                f"Expected {sidecar_binary_path}. "
+                "Set OPENPI_QUIC_SIDECAR_BINARY to override the path."
+            ) from exc
+
+        sidecar_exit_code = sidecar_process.wait()
+        _log_service_milestone(
+            f"Rust QUIC sidecar exited with code {sidecar_exit_code}; restarting in 1s"
+        )
+        time.sleep(1)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, force=True)
 
@@ -184,9 +240,34 @@ def main() -> None:
     websocket_thread.start()
     _log_service_milestone(f"WebSocket server thread started on TCP port {service_config.port}")
 
-    # Run QUIC server on the main thread (blocks forever).
-    _log_service_milestone(f"Starting QUIC server on UDP port {QUIC_PORT}")
-    _run_quic_server(thread_safe_policy, metadata)
+    quic_backend_kind = _get_quic_backend_kind()
+    if quic_backend_kind == DEFAULT_QUIC_BACKEND_KIND:
+        _log_service_milestone(f"Starting QUIC server on UDP port {QUIC_PORT}")
+        _run_quic_server(thread_safe_policy, metadata)
+        return
+
+    if quic_backend_kind == RUST_QUIC_BACKEND_KIND:
+        local_policy_socket_path = _get_local_policy_socket_path()
+        local_policy_socket_server = LocalPolicySocketServer(
+            policy=thread_safe_policy,
+            socket_path=local_policy_socket_path,
+            metadata=metadata,
+            log=_log_service_milestone,
+        )
+        local_policy_socket_thread = threading.Thread(
+            target=local_policy_socket_server.serve_forever,
+            name="local-policy-socket-server",
+            daemon=True,
+        )
+        local_policy_socket_thread.start()
+        _run_rust_quic_sidecar(local_policy_socket_path)
+        return
+
+    raise ValueError(
+        "Unsupported QUIC backend kind "
+        f"{quic_backend_kind!r}. "
+        f"Expected {DEFAULT_QUIC_BACKEND_KIND!r} or {RUST_QUIC_BACKEND_KIND!r}."
+    )
 
 
 if __name__ == "__main__":

@@ -20,6 +20,8 @@ venv/
 build/
 dist/
 *.egg-info/
+target/
+Cargo.lock
 
 # Local configuration
 .env

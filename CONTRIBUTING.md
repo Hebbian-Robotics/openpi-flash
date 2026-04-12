@@ -2,13 +2,21 @@
 
 ## Project Overview
 
-openpi-hosting is a hosted inference service that wraps OpenPI policy models in a WebSocket server. It supports deployment on AWS EC2 (Docker Compose) and Modal (serverless).
+openpi-hosting is a hosted inference service that wraps OpenPI policy models in WebSocket and QUIC transports. It supports deployment on AWS EC2 (Docker Compose) and Modal (serverless).
 
 ## Running Locally
 
 ```bash
 # Local development
 INFERENCE_CONFIG_PATH=config.json uv run python -m hosting.serve
+
+# Local development with Rust QUIC sidecar
+cd quic-sidecar && cargo build
+cd ..
+OPENPI_QUIC_BACKEND=rust-sidecar \
+OPENPI_QUIC_SIDECAR_BINARY=$PWD/quic-sidecar/target/debug/openpi-quic-sidecar \
+INFERENCE_CONFIG_PATH=config.json \
+uv run python -m hosting.serve
 
 # Docker (requires config.json)
 docker compose up --build
@@ -37,6 +45,9 @@ uv run python test_modal_tunnel.py
 
 # Smoke test QUIC portal variant (no URL needed — discovery via Modal Dict)
 uv run python test_modal_quic.py
+
+# Smoke test direct QUIC for EC2/Docker
+uv run python test_quic.py localhost
 ```
 
 ## Code Quality
@@ -45,6 +56,11 @@ uv run python test_modal_quic.py
 uv run ruff check --fix  # Linting with auto-fix
 uv run ruff format       # Code formatting
 uv run ty check          # Type checking
+
+# Rust QUIC sidecar
+cd quic-sidecar && cargo fmt
+cd quic-sidecar && cargo clippy --all-targets --all-features
+
 lychee -v .              # Markdown link checking
 hadolint Dockerfile      # Docker linting (brew install hadolint)
 
