@@ -44,7 +44,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # - gsutil: download checkpoints from gs://openpi-assets (openpi's download
 #   module shells out to gsutil for this bucket; without it falls back to gcsfs
 #   which requires explicit GCP credentials)
-RUN uv pip install pydantic gsutil "quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git" pytest
+# - s3fs: fsspec S3 backend so maybe_download() handles s3:// checkpoint URLs
+#   (EC2 instances authenticate via IAM instance profile, no credentials needed)
+RUN uv pip install pydantic gsutil s3fs "quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git" pytest
 
 # Copy transformers_replace files (required for PyTorch models).
 COPY openpi/src/openpi/models_pytorch/transformers_replace/ /tmp/transformers_replace/

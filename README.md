@@ -39,7 +39,7 @@ cp config.example.json config.json
 | Field | Description |
 |-------|-------------|
 | `model_config_name` | openpi training config name (e.g. `pi05_aloha`, `pi0_aloha_sim`, `pi05_droid`) |
-| `checkpoint_dir` | Local path or `gs://` URI to model checkpoint |
+| `checkpoint_dir` | Local path, `gs://`, or `s3://` URI to model checkpoint |
 | `model_version` | Arbitrary string included in logs and responses |
 | `default_prompt` | Optional default text prompt if not provided per-request |
 | `port` | Server port (default: 8000) |
@@ -332,7 +332,61 @@ sudo systemctl restart docker
 exit
 ```
 
-### 3. Pull the image from ECR and run
+### 3. PyTorch checkpoint setup
+
+The Docker image runs PyTorch inference, which requires a converted checkpoint (`model.safetensors`). The default JAX checkpoints from `gs://openpi-assets` won't work — they need JAX dependencies that aren't in the Docker image.
+
+A pre-converted checkpoint is stored in S3. Set your `config.json` to use it:
+
+```json
+{
+  "checkpoint_dir": "s3://openpi-checkpoints-us-west-2/pi05_base_pytorch"
+}
+```
+
+The EC2 instance's IAM role (`ec2-ecr-pull`) has read access to this bucket. The checkpoint is downloaded on first startup and cached in `/cache/models` — subsequent restarts reuse the cache.
+
+**Converting a new checkpoint:**
+
+If you need to convert a different model (e.g. `pi05_droid`), use the Modal conversion script and upload to S3:
+
+```bash
+# 1. Convert on Modal (saves to Modal Volume)
+uv run modal run convert_checkpoint_modal.py \
+    --checkpoint-dir gs://openpi-assets/checkpoints/pi05_droid \
+    --config-name pi05_droid \
+    --output-name pi05_droid_pytorch
+
+# 2. Download from Modal Volume
+modal volume get openpi-model-weights pi05_droid_pytorch /tmp/pi05_droid_pytorch
+
+# 3. Upload to S3
+aws s3 sync /tmp/pi05_droid_pytorch/pi05_droid_pytorch/ \
+    s3://openpi-checkpoints-us-west-2/pi05_droid_pytorch/
+```
+
+**AWS setup for S3 checkpoints (one-time):**
+
+The EC2 instance role needs `s3:GetObject` and `s3:ListBucket` permissions on the checkpoint bucket. If using a new bucket, add an inline policy to the `ec2-ecr-pull` role:
+
+```bash
+aws iam put-role-policy \
+  --role-name ec2-ecr-pull \
+  --policy-name s3-checkpoint-read \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::your-bucket-name",
+        "arn:aws:s3:::your-bucket-name/*"
+      ]
+    }]
+  }'
+```
+
+### 4. Pull the image from ECR and run
 
 The Docker image is built automatically by CI on every push to `main` and pushed to ECR. On a new EC2 instance, pull it instead of building locally:
 
@@ -380,7 +434,7 @@ You can also pin to a specific commit instead of `latest`:
 docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:<commit-sha>
 ```
 
-### 4. Pushing dev images from your local machine
+### 5. Pushing dev images from your local machine
 
 To test uncommitted changes or a feature branch before merging to `main`:
 
@@ -400,7 +454,7 @@ Then pull the `:dev` tag on your EC2 instance instead of `:latest`. Use any tag 
 
 > **Note:** ECR is configured to always keep `latest` plus the 3 most recent other images. Older images are cleaned up automatically.
 
-### 5. Building locally instead of pulling from ECR
+### 6. Building locally instead of pulling from ECR
 
 If you prefer to build on the instance (e.g. no ECR access):
 
@@ -413,7 +467,7 @@ docker build .. -t openpi-hosted -f Dockerfile
 
 Ensure the EC2 instance has an IAM role with `ecr:GetAuthorizationToken` and `ecr:BatchGetImage` permissions to pull images.
 
-### 6. HTTPS with Caddy (recommended for single instance)
+### 7. HTTPS with Caddy (recommended for single instance)
 
 Install Caddy on the instance and reverse-proxy to the Docker container:
 
@@ -440,7 +494,7 @@ sudo systemctl restart caddy
 
 Caddy automatically provisions and renews TLS certificates via Let's Encrypt. Point your domain's DNS A record to the instance's public IP.
 
-### 7. HTTPS with ALB (alternative)
+### 8. HTTPS with ALB (alternative)
 
 If you prefer AWS-managed TLS:
 
