@@ -277,68 +277,18 @@ uv run ty check src/hosting/
 
 ## Deploying to AWS
 
-### 1. Launch an EC2 GPU instance
+### AWS infrastructure setup
 
-**Option A: AWS Console**
+The shared AWS resources (ECR, IAM roles, S3 bucket) can be set up with Terraform or manually:
 
-1. Go to **EC2 > Launch Instance**
-2. Name: `openpi-inference`
-3. AMI: search for **Ubuntu 24.04** (select the 64-bit x86 version)
-4. Instance type: **g6e.xlarge** (1x L40S GPU, 4 vCPUs, 32 GB RAM)
-5. Key pair: select or create one for SSH access
-6. Network settings: create or select a security group that allows:
-   - SSH (TCP 22) from your IP
-   - Custom TCP 8000 (or 443 if using Caddy/ALB for HTTPS)
-7. Storage: increase root volume to **100 GiB** (gp3)
-8. Launch the instance
+- **Terraform/OpenTofu (recommended):** See [`infra/`](infra/) — run `terraform apply` to create everything
+- **Manual CLI:** See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md) for step-by-step `aws` commands
 
-**Option B: AWS CLI**
+### PyTorch checkpoint
 
-```bash
-# Find the latest Ubuntu 24.04 AMI for your region
-AMI_ID=$(aws ec2 describe-images \
-  --owners 099720109477 \
-  --filters "Name=name,Values=ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*" \
-  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-  --output text)
+The Docker image runs PyTorch inference, which requires a pre-converted checkpoint. The default JAX checkpoints from `gs://openpi-assets` won't work in the Docker image (no JAX dependencies).
 
-aws ec2 run-instances \
-  --image-id $AMI_ID \
-  --instance-type g6e.xlarge \
-  --key-name your-keypair \
-  --security-group-ids sg-xxxxxxxx \
-  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":100,"VolumeType":"gp3"}}]' \
-  --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=openpi-inference}]'
-```
-
-### 2. Install dependencies on the instance
-
-```bash
-ssh -i your-keypair.pem ubuntu@<instance-ip>
-
-# Install Docker with NVIDIA GPU support
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-
-# Install NVIDIA Container Toolkit
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
-  sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-
-# Log out and back in for docker group to take effect
-exit
-```
-
-### 3. PyTorch checkpoint setup
-
-The Docker image runs PyTorch inference, which requires a converted checkpoint (`model.safetensors`). The default JAX checkpoints from `gs://openpi-assets` won't work — they need JAX dependencies that aren't in the Docker image.
-
-A pre-converted checkpoint is stored in S3. Set your `config.json` to use it:
+A pre-converted checkpoint is stored in S3:
 
 ```json
 {
@@ -346,76 +296,37 @@ A pre-converted checkpoint is stored in S3. Set your `config.json` to use it:
 }
 ```
 
-The EC2 instance's IAM role (`ec2-ecr-pull`) has read access to this bucket. The checkpoint is downloaded on first startup and cached in `/cache/models` — subsequent restarts reuse the cache.
-
-**Converting a new checkpoint:**
-
-If you need to convert a different model (e.g. `pi05_droid`), use the Modal conversion script and upload to S3:
+The checkpoint is downloaded on first startup and cached in `/cache/models`. To convert a different model, see [Converting checkpoints to PyTorch](#converting-checkpoints-to-pytorch) and upload to S3:
 
 ```bash
-# 1. Convert on Modal (saves to Modal Volume)
-uv run modal run convert_checkpoint_modal.py \
-    --checkpoint-dir gs://openpi-assets/checkpoints/pi05_droid \
-    --config-name pi05_droid \
-    --output-name pi05_droid_pytorch
-
-# 2. Download from Modal Volume
-modal volume get openpi-model-weights pi05_droid_pytorch /tmp/pi05_droid_pytorch
-
-# 3. Upload to S3
-aws s3 sync /tmp/pi05_droid_pytorch/pi05_droid_pytorch/ \
-    s3://openpi-checkpoints-us-west-2/pi05_droid_pytorch/
+modal volume get openpi-model-weights <output-name> /tmp/<output-name>
+aws s3 sync /tmp/<output-name>/<output-name>/ s3://openpi-checkpoints-us-west-2/<output-name>/
 ```
 
-**AWS setup for S3 checkpoints (one-time):**
+### Launching an EC2 instance
 
-The EC2 instance role needs `s3:GetObject` and `s3:ListBucket` permissions on the checkpoint bucket. If using a new bucket, add an inline policy to the `ec2-ecr-pull` role:
+See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md) for full details. The short version:
 
-```bash
-aws iam put-role-policy \
-  --role-name ec2-ecr-pull \
-  --policy-name s3-checkpoint-read \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:ListBucket"],
-      "Resource": [
-        "arn:aws:s3:::your-bucket-name",
-        "arn:aws:s3:::your-bucket-name/*"
-      ]
-    }]
-  }'
-```
-
-### 4. Pull the image from ECR and run
-
-The Docker image is built automatically by CI on every push to `main` and pushed to ECR. On a new EC2 instance, pull it instead of building locally:
+1. Launch a **g6e.xlarge** (L40S GPU) with **Ubuntu 24.04**, **100 GiB** gp3, IAM profile `ec2-ecr-pull`
+2. Install Docker + NVIDIA Container Toolkit
+3. Pull and run:
 
 ```bash
-ssh -i your-keypair.pem ubuntu@<instance-ip>
-
 # Login to ECR
 aws ecr get-login-password --region us-west-2 | \
   docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
 
-# Pull the latest image
+# Pull and run
 docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
-
-# Create your config
-mkdir -p ~/openpi && cd ~/openpi
-# Copy or create config.json (see Configuration section above)
-
-# Run
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
-  -p 8000:8000 \
+  -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
   438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
 ```
 
-To deploy a new version after CI has built it:
+### Updating to a new version
 
 ```bash
 aws ecr get-login-password --region us-west-2 | \
@@ -425,86 +336,28 @@ docker stop openpi-inference && docker rm openpi-inference
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
-  -p 8000:8000 \
+  -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
   438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:latest
 ```
 
-You can also pin to a specific commit instead of `latest`:
+You can pin to a specific commit: `openpi-hosted:<commit-sha>` instead of `:latest`.
+
+### Pushing dev images
 
 ```bash
-docker pull 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:<commit-sha>
-```
-
-### 5. Pushing dev images from your local machine
-
-To test uncommitted changes or a feature branch before merging to `main`:
-
-```bash
-# Login to ECR (one-time per 12-hour session)
-aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin 438136598620.dkr.ecr.us-west-2.amazonaws.com
-
-# Build locally (from the hosting/ directory)
+# Build and push with a dev tag
 docker build .. -t 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:dev -f Dockerfile
-
-# Push with a dev tag
 docker push 438136598620.dkr.ecr.us-west-2.amazonaws.com/openpi-hosted:dev
 ```
 
-Then pull the `:dev` tag on your EC2 instance instead of `:latest`. Use any tag name you want (e.g. `dev`, `experiment`, a branch name).
+ECR keeps `latest` plus the 3 most recent images; older ones are cleaned up automatically.
 
-> **Note:** ECR is configured to always keep `latest` plus the 3 most recent other images. Older images are cleaned up automatically.
+### HTTPS
 
-### 6. Building locally instead of pulling from ECR
+**Caddy (recommended for single instance):** See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md#5-optional-https-with-caddy) — auto-provisions TLS via Let's Encrypt.
 
-If you prefer to build on the instance (e.g. no ECR access):
-
-```bash
-git clone https://github.com/Hebbian-Robotics/openpi ~/openpi/openpi
-git clone https://github.com/Hebbian-Robotics/openpi-hosting ~/openpi/hosting
-cd ~/openpi/hosting
-docker build .. -t openpi-hosted -f Dockerfile
-```
-
-Ensure the EC2 instance has an IAM role with `ecr:GetAuthorizationToken` and `ecr:BatchGetImage` permissions to pull images.
-
-### 7. HTTPS with Caddy (recommended for single instance)
-
-Install Caddy on the instance and reverse-proxy to the Docker container:
-
-```bash
-sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | \
-  sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | \
-  sudo tee /etc/apt/sources.list.d/caddy-stable.list
-sudo apt update && sudo apt install caddy
-```
-
-Create `/etc/caddy/Caddyfile`:
-
-```
-your-domain.com {
-    reverse_proxy localhost:8000
-}
-```
-
-```bash
-sudo systemctl restart caddy
-```
-
-Caddy automatically provisions and renews TLS certificates via Let's Encrypt. Point your domain's DNS A record to the instance's public IP.
-
-### 8. HTTPS with ALB (alternative)
-
-If you prefer AWS-managed TLS:
-
-1. Create a Target Group (protocol: HTTP, port: 8000, health check path: `/healthz`)
-2. Register your EC2 instance
-3. Create an Application Load Balancer with an HTTPS listener (port 443)
-4. Attach an ACM certificate for your domain
-5. Point your domain's DNS to the ALB
+**ALB (alternative):** Create a Target Group (HTTP 8000, health check `/healthz`), an HTTPS ALB listener with an ACM certificate, and point DNS to the ALB.
 
 ## Architecture
 

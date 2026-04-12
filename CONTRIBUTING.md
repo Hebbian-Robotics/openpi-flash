@@ -47,6 +47,11 @@ uv run ruff format       # Code formatting
 uv run ty check          # Type checking
 lychee -v .              # Markdown link checking
 hadolint Dockerfile      # Docker linting (brew install hadolint)
+
+# Terraform / OpenTofu (infra/)
+cd infra && tofu fmt     # Format .tf files (brew install opentofu)
+cd infra && tofu validate  # Validate configuration
+cd infra && tflint       # Lint Terraform (brew install tflint)
 ```
 
 ## Code Style & Philosophy
