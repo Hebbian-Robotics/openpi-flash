@@ -14,7 +14,12 @@ from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 from typing_extensions import override
 
-from hosting.quic_protocol import DEFAULT_TRANSPORT_OPTIONS, recv_data, send_data
+from hosting.quic_protocol import (
+    DEFAULT_TRANSPORT_OPTIONS,
+    make_direct_quic_handshake_message,
+    recv_data,
+    send_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +42,10 @@ class DirectQuicClientPolicy(_base_policy.BasePolicy):
         self._portal.connect(host, port, local_port, self._transport_options)
         logger.info("Connected")
 
-        # First message from server is metadata.
+        send_data(self._portal, self._packer.pack(make_direct_quic_handshake_message()))
+        logger.info("Sent direct QUIC handshake")
+
+        # First response from server is metadata.
         metadata = recv_data(self._portal, timeout_ms=30_000)
         if metadata is None:
             raise ConnectionError("Timeout waiting for server metadata")

@@ -17,10 +17,12 @@ import logging
 import threading
 import time
 import traceback
+import urllib.parse
 
 from openpi.models import pi0_config as _pi0_config
 from openpi.policies import policy_config as _policy_config
 from openpi.serving.websocket_policy_server import WebsocketPolicyServer
+from openpi.shared import download as _download
 from openpi.training import config as _config
 from openpi_client import base_policy as _base_policy
 from quic_portal import Portal, PortalError
@@ -39,10 +41,15 @@ PYTORCH_COMPILE_MODE = "default"
 QUIC_PORT = 5555
 
 
+def _log_service_milestone(message: str) -> None:
+    """Emit a concise startup milestone to stdout for container logs."""
+    timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"{timestamp} {message}", flush=True)
+
+
 def _quic_log(msg: str) -> None:
     """Log with UTC timestamp for correlating with relay/portal logs."""
-    ts = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S.%f")[:-3]
-    logger.info("%s %s", ts, msg)
+    _log_service_milestone(msg)
 
 
 class ThreadSafePolicy(_base_policy.BasePolicy):
@@ -69,13 +76,27 @@ def load_policy(
     Also used by the Modal entry points (modal_helpers.py) to share model
     loading logic.
     """
-    logger.info(
-        "Loading model: config=%s, checkpoint=%s",
-        service_config.model_config_name,
-        service_config.checkpoint_dir,
+    _log_service_milestone(
+        "Preparing policy load "
+        f"(config={service_config.model_config_name}, checkpoint={service_config.checkpoint_dir})"
     )
 
     train_config = _config.get_config(service_config.model_config_name)
+    _log_service_milestone(
+        f"Resolved training config {service_config.model_config_name}; preparing checkpoint path"
+    )
+
+    checkpoint_resolution_start_time = time.monotonic()
+    resolved_checkpoint_dir = _download.maybe_download(service_config.checkpoint_dir)
+    checkpoint_resolution_elapsed_seconds = time.monotonic() - checkpoint_resolution_start_time
+    checkpoint_source_kind = (
+        "remote" if urllib.parse.urlparse(service_config.checkpoint_dir).scheme else "local"
+    )
+    _log_service_milestone(
+        "Checkpoint path ready "
+        f"(source={checkpoint_source_kind}, local_path={resolved_checkpoint_dir}, "
+        f"elapsed={checkpoint_resolution_elapsed_seconds:.1f}s)"
+    )
 
     # Override compile mode for faster, reliable compilation during serving.
     if isinstance(train_config.model, _pi0_config.Pi0Config):
@@ -87,21 +108,22 @@ def load_policy(
         )
 
     load_start = time.monotonic()
+    _log_service_milestone("Creating trained policy from resolved checkpoint")
     policy = _policy_config.create_trained_policy(
         train_config,
-        service_config.checkpoint_dir,
+        resolved_checkpoint_dir,
         default_prompt=service_config.default_prompt,
     )
     load_elapsed = time.monotonic() - load_start
-    logger.info("Model loaded in %.1fs", load_elapsed)
+    _log_service_milestone(f"Policy loaded in {load_elapsed:.1f}s")
 
     # Warmup inference triggers torch.compile and populates the inductor cache
     # so the first real client request doesn't block for minutes.
-    logger.info("Compiling model (warmup inference) ...")
+    _log_service_milestone("Starting warmup inference for torch.compile")
     compile_start = time.monotonic()
     policy.infer(make_aloha_warmup_observation())
     compile_elapsed = time.monotonic() - compile_start
-    logger.info("Compilation done in %.1fs", compile_elapsed)
+    _log_service_milestone(f"Warmup inference complete in {compile_elapsed:.1f}s")
 
     return policy, train_config
 
@@ -119,7 +141,13 @@ def _run_quic_server(policy: ThreadSafePolicy, metadata: dict) -> None:
             portal.listen(QUIC_PORT, DEFAULT_TRANSPORT_OPTIONS)
             _quic_log("[quic-server] Client connected")
 
-            serve_quic_connection(portal, policy, metadata, log=_quic_log)
+            serve_quic_connection(
+                portal,
+                policy,
+                metadata,
+                log=_quic_log,
+                client_initiates_handshake=True,
+            )
         except PortalError as e:
             _quic_log(f"[quic-server] Portal error, will retry: {e}")
         except Exception:
@@ -129,9 +157,14 @@ def _run_quic_server(policy: ThreadSafePolicy, metadata: dict) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, force=True)
 
+    _log_service_milestone("Loading service configuration")
     service_config = load_config()
+    _log_service_milestone(
+        "Service configuration loaded "
+        f"(port={service_config.port}, max_concurrent_requests={service_config.max_concurrent_requests})"
+    )
     policy, train_config = load_policy(service_config)
 
     thread_safe_policy = ThreadSafePolicy(policy)
@@ -149,10 +182,10 @@ def main() -> None:
         daemon=True,
     )
     websocket_thread.start()
-    logger.info("WebSocket server started on port %d", service_config.port)
+    _log_service_milestone(f"WebSocket server thread started on TCP port {service_config.port}")
 
     # Run QUIC server on the main thread (blocks forever).
-    logger.info("Starting QUIC server on UDP port %d", QUIC_PORT)
+    _log_service_milestone(f"Starting QUIC server on UDP port {QUIC_PORT}")
     _run_quic_server(thread_safe_policy, metadata)
 
 

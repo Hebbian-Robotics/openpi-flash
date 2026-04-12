@@ -37,6 +37,9 @@ DEFAULT_TRANSPORT_OPTIONS = QuicTransportOptions(
     keep_alive_interval_secs=2,
 )
 
+DIRECT_QUIC_HANDSHAKE_KEY = "__openpi_direct_quic_handshake__"
+DIRECT_QUIC_HANDSHAKE_VALUE = "hello"
+
 
 class QuicMessageType(Enum):
     """Message type prefixes to distinguish data from errors over raw QUIC bytes.
@@ -101,6 +104,16 @@ def recv_data(portal: Portal, *, timeout_ms: int = 30_000) -> dict | None:
     return msgpack_numpy.unpackb(message_body)
 
 
+def make_direct_quic_handshake_message() -> dict[str, str]:
+    """Build the initial hello message for direct QUIC connections."""
+    return {DIRECT_QUIC_HANDSHAKE_KEY: DIRECT_QUIC_HANDSHAKE_VALUE}
+
+
+def is_direct_quic_handshake_message(message: dict) -> bool:
+    """Return True when a decoded QUIC message is the direct-connect handshake."""
+    return message.get(DIRECT_QUIC_HANDSHAKE_KEY) == DIRECT_QUIC_HANDSHAKE_VALUE
+
+
 # ---------------------------------------------------------------------------
 # Shared connection serving logic
 # ---------------------------------------------------------------------------
@@ -114,6 +127,8 @@ def serve_quic_connection(
     policy: _base_policy.BasePolicy,
     metadata: dict,
     log: Callable[[str], None],
+    *,
+    client_initiates_handshake: bool = False,
 ) -> None:
     """Handle a single QUIC client connection until it disconnects.
 
@@ -123,9 +138,19 @@ def serve_quic_connection(
     """
     packer = msgpack_numpy.Packer()
 
-    # Send metadata as the first message (same as WebSocket variant).
-    send_data(portal, packer.pack(metadata))
-    log("[quic-server] Sent metadata, waiting for observations...")
+    if client_initiates_handshake:
+        log("[quic-server] Waiting for client hello...")
+        handshake_message = recv_data(portal, timeout_ms=RECV_TIMEOUT_MS)
+        if handshake_message is None:
+            raise TimeoutError("Timed out waiting for direct QUIC client handshake")
+        if not is_direct_quic_handshake_message(handshake_message):
+            raise RuntimeError(f"Unexpected initial direct QUIC message: {handshake_message!r}")
+        send_data(portal, packer.pack(metadata))
+        log("[quic-server] Handshake complete, sent metadata")
+    else:
+        # Send metadata as the first message (same as WebSocket variant).
+        send_data(portal, packer.pack(metadata))
+        log("[quic-server] Sent metadata, waiting for observations...")
 
     request_count = 0
     prev_total_time: float | None = None
