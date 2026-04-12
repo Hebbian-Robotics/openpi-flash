@@ -12,14 +12,20 @@ if connectivity issues arise.
 import contextlib
 import logging
 import time
-from typing import ClassVar
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 from typing_extensions import override
 
-from hosting.quic_protocol import PortalDictLike, UdpAddr, recv_data, send_data
+from hosting.quic_protocol import (
+    DEFAULT_STUN_SERVERS,
+    DEFAULT_TRANSPORT_OPTIONS,
+    PortalDictLike,
+    UdpAddr,
+    recv_data,
+    send_data,
+)
 from hosting.relay import register_with_relay
 
 logger = logging.getLogger(__name__)
@@ -30,14 +36,6 @@ class QuicClientPolicy(_base_policy.BasePolicy):
 
     See QuicPolicyServer for a corresponding server implementation.
     """
-
-    # Reliable public STUN servers with global presence. The quic-portal
-    # defaults include stun.ekiga.net which is frequently unreachable.
-    DEFAULT_STUN_SERVERS: ClassVar[list[UdpAddr]] = [
-        ("stun.l.google.com", 19302),
-        ("stun1.l.google.com", 19302),
-        ("stun2.l.google.com", 19302),
-    ]
 
     def __init__(
         self,
@@ -51,11 +49,8 @@ class QuicClientPolicy(_base_policy.BasePolicy):
     ) -> None:
         self._portal_dict = portal_dict
         self._local_port = local_port
-        self._stun_servers = stun_servers or self.DEFAULT_STUN_SERVERS
-        self._transport_options = transport_options or QuicTransportOptions(
-            initial_window=1024 * 1024,
-            keep_alive_interval_secs=2,
-        )
+        self._stun_servers = stun_servers or DEFAULT_STUN_SERVERS
+        self._transport_options = transport_options or DEFAULT_TRANSPORT_OPTIONS
         self._max_connect_attempts = max_connect_attempts
         self._relay_addr = relay_addr
         self._relay_only = relay_only

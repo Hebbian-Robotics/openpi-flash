@@ -14,7 +14,7 @@ from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 from typing_extensions import override
 
-from hosting.quic_protocol import recv_data, send_data
+from hosting.quic_protocol import DEFAULT_TRANSPORT_OPTIONS, recv_data, send_data
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +29,7 @@ class DirectQuicClientPolicy(_base_policy.BasePolicy):
         local_port: int = 5556,
         transport_options: QuicTransportOptions | None = None,
     ) -> None:
-        self._transport_options = transport_options or QuicTransportOptions(
-            initial_window=1024 * 1024,
-            keep_alive_interval_secs=2,
-        )
+        self._transport_options = transport_options or DEFAULT_TRANSPORT_OPTIONS
         self._packer = msgpack_numpy.Packer()
 
         logger.info("Connecting to %s:%d via QUIC...", host, port)

@@ -14,6 +14,8 @@ Usage:
         --output-name pi05_droid_pytorch
 """
 
+from typing import Literal
+
 import modal
 
 from hosting.modal_helpers import MODEL_CACHE_MOUNT_PATH, model_weights_volume
@@ -87,7 +89,7 @@ def convert_checkpoint(
     checkpoint_dir: str = "gs://openpi-assets/checkpoints/pi05_base",
     config_name: str = "pi05_aloha",
     output_name: str = "pi05_base_pytorch",
-    precision: str = "bfloat16",
+    precision: Literal["bfloat16", "float16", "float32"] = "bfloat16",
 ) -> None:
     import importlib.util
     import logging

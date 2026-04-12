@@ -16,6 +16,7 @@ import modal
 
 if TYPE_CHECKING:
     from openpi.training.config import TrainConfig
+    from openpi_client.base_policy import BasePolicy
 
 # ---------------------------------------------------------------------------
 # Shared Modal infrastructure settings — single source of truth for all apps.
@@ -201,7 +202,7 @@ def prepare_openpi_config(model_config_name: str) -> TrainConfig:
 
 def load_openpi_model(
     train_config: TrainConfig, checkpoint_dir: str, default_prompt: str = ""
-) -> tuple:
+) -> tuple[BasePolicy, TrainConfig]:
     """GPU phase: load model weights and run warmup inference.
 
     Requires GPU access. Call after prepare_openpi_config().
@@ -212,7 +213,6 @@ def load_openpi_model(
     """
     import time
 
-    import numpy as np
     from openpi.policies import policy_config as _policy_config
 
     print(f"Loading model: checkpoint={checkpoint_dir}")
@@ -226,19 +226,11 @@ def load_openpi_model(
     print(f"Model loaded in {load_elapsed:.1f}s")
 
     # Warmup inference to trigger torch.compile and populate inductor cache.
-    dummy_observation = {
-        "state": np.ones((14,)),
-        "images": {
-            "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_left_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_right_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-        },
-        "prompt": "do something",
-    }
+    from hosting.warmup import make_aloha_warmup_observation
+
     print("Compiling model (warmup inference) ...")
     compile_start = time.monotonic()
-    policy.infer(dummy_observation)
+    policy.infer(make_aloha_warmup_observation())
     compile_elapsed = time.monotonic() - compile_start
     print(f"Compilation done in {compile_elapsed:.1f}s")
 
@@ -249,7 +241,7 @@ def load_openpi_policy(
     model_config_name: str,
     checkpoint_dir: str,
     default_prompt: str = "",
-) -> tuple:
+) -> tuple[BasePolicy, TrainConfig]:
     """Load an openpi policy with all necessary patches and workarounds.
 
     Convenience wrapper that runs both CPU and GPU phases in sequence.

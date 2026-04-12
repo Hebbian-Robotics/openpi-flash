@@ -1,19 +1,41 @@
-"""Shared QUIC protocol types and message framing for server and client.
+"""Shared QUIC protocol types, message framing, and connection handling.
 
-Defines the wire format, send/recv helpers, and shared interfaces used by
-QuicPolicyServer, QuicClientPolicy, and DirectQuicClientPolicy. All message
-framing goes through this module so changes to the protocol are made in one
-place.
+Defines the wire format, send/recv helpers, connection serving logic, and
+shared interfaces used by QuicPolicyServer, QuicClientPolicy, and
+DirectQuicClientPolicy. All message framing and connection protocol goes
+through this module so changes are made in one place.
 """
 
+import contextlib
+import time
+import traceback
+from collections.abc import Callable
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
-from quic_portal import Portal
+from quic_portal import Portal, PortalError, QuicTransportOptions
 
 # (host, port) address of a UDP endpoint (relay server, STUN server, etc.).
 UdpAddr = tuple[str, int]
+
+# Reliable public STUN servers with global presence. The quic-portal
+# defaults include stun.ekiga.net which is frequently unreachable.
+DEFAULT_STUN_SERVERS: list[UdpAddr] = [
+    ("stun.l.google.com", 19302),
+    ("stun1.l.google.com", 19302),
+    ("stun2.l.google.com", 19302),
+]
+
+# Default transport options for QUIC connections. Shared by server and client
+# to ensure consistent behavior.
+DEFAULT_TRANSPORT_OPTIONS = QuicTransportOptions(
+    # 1 MiB initial window for large observation payloads (camera images).
+    initial_window=1024 * 1024,
+    # Keep-alive to detect dead connections and maintain NAT bindings.
+    keep_alive_interval_secs=2,
+)
 
 
 class QuicMessageType(Enum):
@@ -77,3 +99,71 @@ def recv_data(portal: Portal, *, timeout_ms: int = 30_000) -> dict | None:
         raise RuntimeError(f"Unexpected message type: {message_type!r}")
 
     return msgpack_numpy.unpackb(message_body)
+
+
+# ---------------------------------------------------------------------------
+# Shared connection serving logic
+# ---------------------------------------------------------------------------
+
+# Timeout for recv() so the server can periodically check connection health.
+RECV_TIMEOUT_MS = 30_000
+
+
+def serve_quic_connection(
+    portal: Portal,
+    policy: _base_policy.BasePolicy,
+    metadata: dict,
+    log: Callable[[str], None],
+) -> None:
+    """Handle a single QUIC client connection until it disconnects.
+
+    Sends metadata as the first message, then enters a recv-infer-send loop.
+    Used by both the direct QUIC server (serve.py) and the NAT-traversal
+    QUIC server (quic_server.py).
+    """
+    packer = msgpack_numpy.Packer()
+
+    # Send metadata as the first message (same as WebSocket variant).
+    send_data(portal, packer.pack(metadata))
+    log("[quic-server] Sent metadata, waiting for observations...")
+
+    request_count = 0
+    prev_total_time: float | None = None
+    while True:
+        try:
+            start_time = time.monotonic()
+
+            observation = recv_data(portal, timeout_ms=RECV_TIMEOUT_MS)
+            if observation is None:
+                # Timeout — client may still be there, just no request yet.
+                continue
+
+            infer_start = time.monotonic()
+            action = policy.infer(observation)
+            infer_ms = (time.monotonic() - infer_start) * 1000
+
+            timing: dict[str, float] = {"infer_ms": infer_ms}
+            if prev_total_time is not None:
+                timing["prev_total_ms"] = prev_total_time * 1000
+
+            response = {**action, "server_timing": timing}
+            send_data(portal, packer.pack(response))
+            prev_total_time = time.monotonic() - start_time
+            total_ms = prev_total_time * 1000
+
+            request_count += 1
+            log(
+                f"[quic-server] req #{request_count}: infer={infer_ms:.1f}ms total={total_ms:.1f}ms"
+            )
+
+        except PortalError:
+            log(f"[quic-server] Client disconnected after {request_count} requests")
+            break
+        except Exception:
+            log(f"[quic-server] Error after {request_count} requests:\n{traceback.format_exc()}")
+            with contextlib.suppress(PortalError):
+                send_error(portal, traceback.format_exc())
+            break
+
+    with contextlib.suppress(PortalError):
+        portal.close()

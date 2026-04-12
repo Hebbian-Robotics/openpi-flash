@@ -11,7 +11,6 @@ Usage:
     INFERENCE_CONFIG_PATH=config.json python -m hosting.serve
 """
 
-import contextlib
 import dataclasses
 import datetime
 import logging
@@ -19,17 +18,16 @@ import threading
 import time
 import traceback
 
-import numpy as np
 from openpi.models import pi0_config as _pi0_config
 from openpi.policies import policy_config as _policy_config
 from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 from openpi.training import config as _config
 from openpi_client import base_policy as _base_policy
-from openpi_client import msgpack_numpy
-from quic_portal import Portal, PortalError, QuicTransportOptions
+from quic_portal import Portal, PortalError
 
 from hosting.config import ServiceConfig, load_config
-from hosting.quic_protocol import recv_data, send_data, send_error
+from hosting.quic_protocol import DEFAULT_TRANSPORT_OPTIONS, serve_quic_connection
+from hosting.warmup import make_aloha_warmup_observation
 
 logger = logging.getLogger(__name__)
 
@@ -40,14 +38,11 @@ PYTORCH_COMPILE_MODE = "default"
 
 QUIC_PORT = 5555
 
-# Timeout for recv() so the server can periodically check connection health.
-_RECV_TIMEOUT_MS = 30_000
-
 
 def _quic_log(msg: str) -> None:
-    """Print with UTC timestamp for correlating with logs."""
+    """Log with UTC timestamp for correlating with relay/portal logs."""
     ts = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S.%f")[:-3]
-    print(f"{ts} {msg}")
+    logger.info("%s %s", ts, msg)
 
 
 class ThreadSafePolicy(_base_policy.BasePolicy):
@@ -102,79 +97,13 @@ def load_policy(
 
     # Warmup inference triggers torch.compile and populates the inductor cache
     # so the first real client request doesn't block for minutes.
-    warmup_observation = {
-        "state": np.ones((14,)),
-        "images": {
-            "cam_high": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_low": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_left_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-            "cam_right_wrist": np.random.randint(256, size=(3, 224, 224), dtype=np.uint8),
-        },
-        "prompt": "warmup",
-    }
     logger.info("Compiling model (warmup inference) ...")
     compile_start = time.monotonic()
-    policy.infer(warmup_observation)
+    policy.infer(make_aloha_warmup_observation())
     compile_elapsed = time.monotonic() - compile_start
     logger.info("Compilation done in %.1fs", compile_elapsed)
 
     return policy, train_config
-
-
-def _serve_quic_connection(
-    portal: Portal,
-    policy: ThreadSafePolicy,
-    metadata: dict,
-) -> None:
-    """Handle a single QUIC client connection until it disconnects."""
-    packer = msgpack_numpy.Packer()
-
-    # Send metadata as the first message (same as WebSocket variant).
-    send_data(portal, packer.pack(metadata))
-    _quic_log("[quic-server] Sent metadata, waiting for observations...")
-
-    request_count = 0
-    prev_total_time: float | None = None
-    while True:
-        try:
-            start_time = time.monotonic()
-
-            observation = recv_data(portal, timeout_ms=_RECV_TIMEOUT_MS)
-            if observation is None:
-                # Timeout — client may still be there, just no request yet.
-                continue
-
-            infer_start = time.monotonic()
-            action = policy.infer(observation)
-            infer_ms = (time.monotonic() - infer_start) * 1000
-
-            timing: dict[str, float] = {"infer_ms": infer_ms}
-            if prev_total_time is not None:
-                timing["prev_total_ms"] = prev_total_time * 1000
-
-            response = {**action, "server_timing": timing}
-            send_data(portal, packer.pack(response))
-            prev_total_time = time.monotonic() - start_time
-            total_ms = prev_total_time * 1000
-
-            request_count += 1
-            _quic_log(
-                f"[quic-server] req #{request_count}: infer={infer_ms:.1f}ms total={total_ms:.1f}ms"
-            )
-
-        except PortalError:
-            _quic_log(f"[quic-server] Client disconnected after {request_count} requests")
-            break
-        except Exception:
-            _quic_log(
-                f"[quic-server] Error after {request_count} requests:\n{traceback.format_exc()}"
-            )
-            with contextlib.suppress(PortalError):
-                send_error(portal, traceback.format_exc())
-            break
-
-    with contextlib.suppress(PortalError):
-        portal.close()
 
 
 def _run_quic_server(policy: ThreadSafePolicy, metadata: dict) -> None:
@@ -183,21 +112,14 @@ def _run_quic_server(policy: ThreadSafePolicy, metadata: dict) -> None:
     Uses Portal.listen() for direct connections — no STUN, no relay, no dict
     coordination. Clients connect directly to <host>:<QUIC_PORT>.
     """
-    transport_options = QuicTransportOptions(
-        # 1 MiB initial window for large observation payloads (camera images).
-        initial_window=1024 * 1024,
-        # Keep-alive to detect dead connections.
-        keep_alive_interval_secs=2,
-    )
-
     while True:
         try:
             _quic_log(f"[quic-server] Listening on UDP port {QUIC_PORT}...")
             portal = Portal()
-            portal.listen(QUIC_PORT, transport_options)
+            portal.listen(QUIC_PORT, DEFAULT_TRANSPORT_OPTIONS)
             _quic_log("[quic-server] Client connected")
 
-            _serve_quic_connection(portal, policy, metadata)
+            serve_quic_connection(portal, policy, metadata, log=_quic_log)
         except PortalError as e:
             _quic_log(f"[quic-server] Portal error, will retry: {e}")
         except Exception:

@@ -8,34 +8,28 @@ Note: quic-portal is experimental and not intended for production use.
 Only one client can be connected at a time (typical for robotics — one robot per GPU).
 """
 
-import contextlib
 import datetime
 import time
 import traceback
 import uuid
-from typing import ClassVar
 
 from openpi_client import base_policy as _base_policy
-from openpi_client import msgpack_numpy
 from quic_portal import Portal, PortalError, QuicTransportOptions
 
 from hosting.quic_protocol import (
+    DEFAULT_STUN_SERVERS,
+    DEFAULT_TRANSPORT_OPTIONS,
     PortalDictLike,
     UdpAddr,
-    recv_data,
-    send_data,
-    send_error,
+    serve_quic_connection,
 )
 from hosting.relay import register_with_relay
-
-# Timeout for recv() so the server can periodically check connection health.
-_RECV_TIMEOUT_MS = 30_000
 
 
 def _log(msg: str) -> None:
     """Print with UTC timestamp for correlating with relay logs."""
     ts = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S.%f")[:-3]
-    _log(f"{ts} {msg}")
+    print(f"{ts} {msg}")
 
 
 class QuicPolicyServer:
@@ -52,14 +46,6 @@ class QuicPolicyServer:
         4. Repeat 2-3
     """
 
-    # Reliable public STUN servers with global presence. The quic-portal
-    # defaults include stun.ekiga.net which is frequently unreachable.
-    DEFAULT_STUN_SERVERS: ClassVar[list[UdpAddr]] = [
-        ("stun.l.google.com", 19302),
-        ("stun1.l.google.com", 19302),
-        ("stun2.l.google.com", 19302),
-    ]
-
     def __init__(
         self,
         policy: _base_policy.BasePolicy,
@@ -75,13 +61,8 @@ class QuicPolicyServer:
         self._portal_dict = portal_dict
         self._metadata = metadata or {}
         self._local_port = local_port
-        self._stun_servers = stun_servers or self.DEFAULT_STUN_SERVERS
-        self._transport_options = transport_options or QuicTransportOptions(
-            # 1 MiB initial window for large observation payloads (camera images).
-            initial_window=1024 * 1024,
-            # Keep-alive to maintain NAT bindings.
-            keep_alive_interval_secs=2,
-        )
+        self._stun_servers = stun_servers or DEFAULT_STUN_SERVERS
+        self._transport_options = transport_options or DEFAULT_TRANSPORT_OPTIONS
         self._relay_addr = relay_addr
         self._relay_only = relay_only
 
@@ -143,61 +124,10 @@ class QuicPolicyServer:
                 _log("[quic-server] Waiting for client...")
                 portal = self._create_portal()
 
-                self._serve_connection(portal)
+                serve_quic_connection(portal, self._policy, self._metadata, log=_log)
             except PortalError as e:
                 _log(f"[quic-server] Portal error, will retry: {e}")
             except Exception:
                 _log(f"[quic-server] Error, will retry:\n{traceback.format_exc()}")
             finally:
                 time.sleep(1)  # Brief pause before accepting next client.
-
-    def _serve_connection(self, portal: Portal) -> None:
-        """Handle a single client connection until it disconnects."""
-        packer = msgpack_numpy.Packer()
-
-        # Send metadata as the first message (same as WebSocket variant).
-        send_data(portal, packer.pack(self._metadata))
-        _log("[quic-server] Sent metadata, waiting for observations...")
-
-        request_count = 0
-        prev_total_time: float | None = None
-        while True:
-            try:
-                start_time = time.monotonic()
-
-                observation = recv_data(portal, timeout_ms=_RECV_TIMEOUT_MS)
-                if observation is None:
-                    # Timeout — client may still be there, just no request yet.
-                    continue
-
-                infer_start = time.monotonic()
-                action = self._policy.infer(observation)
-                infer_ms = (time.monotonic() - infer_start) * 1000
-
-                timing: dict[str, float] = {"infer_ms": infer_ms}
-                if prev_total_time is not None:
-                    timing["prev_total_ms"] = prev_total_time * 1000
-
-                response = {**action, "server_timing": timing}
-                send_data(portal, packer.pack(response))
-                prev_total_time = time.monotonic() - start_time
-                total_ms = prev_total_time * 1000
-
-                request_count += 1
-                _log(
-                    f"[quic-server] req #{request_count}: infer={infer_ms:.1f}ms total={total_ms:.1f}ms"
-                )
-
-            except PortalError:
-                _log(f"[quic-server] Client disconnected after {request_count} requests")
-                break
-            except Exception:
-                _log(
-                    f"[quic-server] Error after {request_count} requests:\n{traceback.format_exc()}"
-                )
-                with contextlib.suppress(PortalError):
-                    send_error(portal, traceback.format_exc())
-                break
-
-        with contextlib.suppress(PortalError):
-            portal.close()
