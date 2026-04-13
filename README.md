@@ -1,12 +1,12 @@
 # openpi-flash
 
-Real-time inference engine for [openpi](https://github.com/Physical-Intelligence/openpi). Optimized for low-latency policy serving over QUIC and WebSocket, with torch.compile acceleration, concurrency control, and health monitoring. Deploy on AWS EC2 (Docker) or [Modal](https://modal.com).
+Real-time inference engine for [openpi](https://github.com/Physical-Intelligence/openpi). Optimized for low-latency policy serving over QUIC and WebSocket. Deploy on AWS EC2 (Docker) or [Modal](https://modal.com).
 
 ## Prerequisites
 
 - Python 3.11
 - [uv](https://docs.astral.sh/uv/)
-- A GPU with CUDA support (for inference)
+- A GPU with CUDA support (recommended L40S)
 
 ## Setup
 
