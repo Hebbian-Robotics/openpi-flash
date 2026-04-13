@@ -44,7 +44,6 @@ class QuicClientPolicy(_base_policy.BasePolicy):
         transport_options: QuicTransportOptions | None = None,
         stun_servers: list[UdpAddr] | None = None,
         max_connect_attempts: int = 30,
-        relay_addr: UdpAddr | None = None,
         relay_only: bool = False,
     ) -> None:
         self._portal_dict = portal_dict
@@ -52,7 +51,6 @@ class QuicClientPolicy(_base_policy.BasePolicy):
         self._stun_servers = stun_servers or DEFAULT_STUN_SERVERS
         self._transport_options = transport_options or DEFAULT_TRANSPORT_OPTIONS
         self._max_connect_attempts = max_connect_attempts
-        self._relay_addr = relay_addr
         self._relay_only = relay_only
         self._packer = msgpack_numpy.Packer()
         self._portal, self._server_metadata = self._wait_for_server()
@@ -63,8 +61,8 @@ class QuicClientPolicy(_base_policy.BasePolicy):
     def _create_portal(self) -> Portal:
         """Create a portal, falling back to relay if hole punching fails.
 
-        Relay fallback is available if either ``relay_addr`` was passed to the
-        constructor OR the server wrote relay info to the Modal Dict.
+        Relay fallback is available only when the server publishes relay info
+        to the shared Modal Dict.
         """
         if self._relay_only:
             logger.info("Relay-only mode, skipping hole punch")
@@ -87,7 +85,7 @@ class QuicClientPolicy(_base_policy.BasePolicy):
             return portal
         except (PortalError, ConnectionError):
             # Relay fallback is available if the server wrote relay info to the dict.
-            has_relay = self._relay_addr is not None or "relay_session" in self._portal_dict
+            has_relay = "relay_session" in self._portal_dict
             if not has_relay:
                 raise
             logger.warning("Hole punch failed, falling back to UDP relay")

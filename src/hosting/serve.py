@@ -13,7 +13,6 @@ Usage:
 
 import dataclasses
 import datetime
-import logging
 import os
 import pathlib
 import subprocess
@@ -32,8 +31,6 @@ from hosting.compile_mode import get_serving_pytorch_compile_mode
 from hosting.config import ServiceConfig, load_config
 from hosting.local_policy_socket_server import LocalPolicySocketServer
 from hosting.warmup import make_aloha_warmup_observation
-
-logger = logging.getLogger(__name__)
 
 QUIC_PORT = 5555
 DEFAULT_LOCAL_POLICY_SOCKET_PATH = pathlib.Path("/tmp/openpi-policy.sock")
@@ -171,8 +168,6 @@ def _run_rust_quic_sidecar(local_policy_socket_path: pathlib.Path) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, force=True)
-
     _log_service_milestone("Loading service configuration")
     service_config = load_config()
     _log_service_milestone(

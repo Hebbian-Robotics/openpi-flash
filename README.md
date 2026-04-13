@@ -54,12 +54,11 @@ uv run python main.py serve --config config.json
 Set `OPENPI_PYTORCH_COMPILE_MODE` to override the serving compile mode at runtime.
 Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`.
 
-By default, local development uses the original Python QUIC backend (`quic-portal`) for direct QUIC. To exercise the Rust QUIC sidecar locally, build it first and set the backend explicitly:
+Local serving uses the Rust QUIC sidecar for direct QUIC. If you are not using the Docker image, build the sidecar locally and point the server at the binary:
 
 ```bash
 cd quic-sidecar && cargo build
 cd ..
-OPENPI_QUIC_BACKEND=rust-sidecar \
 OPENPI_QUIC_SIDECAR_BINARY=$PWD/quic-sidecar/target/debug/openpi-quic-sidecar \
 uv run python main.py serve --config config.json
 ```
@@ -197,7 +196,11 @@ When hole punching fails (symmetric NATs, corporate firewalls), the QUIC app can
 
 **Setup:**
 
-Create `hosting/.env`:
+Copy `.env.example` to `.env` in the repo root:
+
+```bash
+cp .env.example .env
+```
 
 ```
 QUIC_RELAY_IP=your-elastic-ip
