@@ -65,7 +65,7 @@ variable "associate_public_ip_address" {
 variable "assign_elastic_ip" {
   description = "Whether to allocate and associate an Elastic IP"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "allowed_ssh_cidr_blocks" {
