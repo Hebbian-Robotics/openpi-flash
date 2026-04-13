@@ -6,13 +6,14 @@ Connects via QUIC portal using the shared Modal Dict and runs benchmark inferenc
 from modal import Dict
 
 from hosting.benchmark import run_benchmark
+from hosting.modal_dict_names import OPENPI_MODAL_QUIC_INFO_DICT_NAME
 from hosting.quic_client_policy import QuicClientPolicy
 from tests.helpers import random_observation_aloha
 
 
 def run() -> None:
-    print("Connecting via QUIC portal (Dict: 'openpi-quic-info') ...")
-    quic_dict = Dict.from_name("openpi-quic-info")
+    print(f"Connecting via QUIC portal (Dict: '{OPENPI_MODAL_QUIC_INFO_DICT_NAME}') ...")
+    quic_dict = Dict.from_name(OPENPI_MODAL_QUIC_INFO_DICT_NAME)
 
     policy = QuicClientPolicy(portal_dict=quic_dict)
     print(f"Server metadata: {policy.get_server_metadata()}")

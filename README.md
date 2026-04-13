@@ -40,7 +40,6 @@ cp config.example.json config.json
 |-------|-------------|
 | `model_config_name` | openpi training config name (e.g. `pi05_aloha`, `pi0_aloha_sim`, `pi05_droid`) |
 | `checkpoint_dir` | Local path, `gs://`, or `s3://` URI to model checkpoint |
-| `model_version` | Arbitrary string included in logs and responses |
 | `default_prompt` | Optional default text prompt if not provided per-request |
 | `port` | Server port (default: 8000) |
 | `max_concurrent_requests` | Max simultaneous inferences (default: 1) |
@@ -126,9 +125,8 @@ uv run modal deploy modal_app.py \
   --model-config-name pi0_aloha_sim \
   --checkpoint-dir gs://openpi-assets/checkpoints/pi0_aloha_sim
 
-# With a model version and default prompt
+# With a default prompt
 uv run modal deploy modal_app.py \
-  --model-version pi0_sim_v2 \
   --default-prompt "pick up the cube"
 ```
 

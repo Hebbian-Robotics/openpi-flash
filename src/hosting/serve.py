@@ -185,12 +185,11 @@ def main() -> None:
         port=service_config.port,
         metadata=metadata,
     )
-    websocket_thread = threading.Thread(
+    threading.Thread(
         target=websocket_server.serve_forever,
         name="websocket-server",
         daemon=True,
-    )
-    websocket_thread.start()
+    ).start()
     _log_service_milestone(f"WebSocket server thread started on TCP port {service_config.port}")
 
     local_policy_socket_path = _get_local_policy_socket_path()
@@ -200,12 +199,11 @@ def main() -> None:
         metadata=metadata,
         log=_log_service_milestone,
     )
-    local_policy_socket_thread = threading.Thread(
+    threading.Thread(
         target=local_policy_socket_server.serve_forever,
         name="local-policy-socket-server",
         daemon=True,
-    )
-    local_policy_socket_thread.start()
+    ).start()
     _run_rust_quic_sidecar(local_policy_socket_path)
 
 

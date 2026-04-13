@@ -5,7 +5,6 @@ into a Starlette ASGI app compatible with Modal's @modal.asgi_app().
 """
 
 import asyncio
-import logging
 import time
 import traceback
 from typing import Any, TypedDict
@@ -17,8 +16,6 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
-
-logger = logging.getLogger(__name__)
 
 
 class OpenPIServerTiming(TypedDict, total=False):
@@ -39,7 +36,7 @@ def create_openpi_asgi_app(
     """
     metadata = metadata or {}
 
-    async def healthz(request: Request) -> PlainTextResponse:
+    async def healthz(_request: Request) -> PlainTextResponse:
         return PlainTextResponse("OK\n")
 
     async def websocket_handler(websocket: WebSocket) -> None:
@@ -67,7 +64,7 @@ def create_openpi_asgi_app(
                 prev_total_time = time.monotonic() - start_time
 
             except WebSocketDisconnect:
-                logger.info("Connection closed")
+                print("Connection closed")
                 break
             except Exception:
                 await websocket.send_bytes(traceback.format_exc().encode())

@@ -25,7 +25,7 @@ def load_json_config(config_cls: type[_T], config_path: str | None = None) -> _T
     path = pathlib.Path(config_path)
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         data = json.load(f)
     return config_cls(**data)
 
@@ -38,7 +38,6 @@ class ServiceConfig(BaseModel):
     # which is an external runtime dependency — not a finite set we can encode as a Literal.
     model_config_name: str
     checkpoint_dir: str  # local path or gs:// URI
-    model_version: str
     default_prompt: str | None = None
 
     # Server settings

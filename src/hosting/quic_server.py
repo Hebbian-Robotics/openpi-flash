@@ -125,8 +125,8 @@ class QuicPolicyServer:
                 portal = self._create_portal()
 
                 serve_quic_connection(portal, self._policy, self._metadata, log=_log)
-            except PortalError as e:
-                _log(f"[quic-server] Portal error, will retry: {e}")
+            except PortalError as exc:
+                _log(f"[quic-server] Portal error, will retry: {exc}")
             except Exception:
                 _log(f"[quic-server] Error, will retry:\n{traceback.format_exc()}")
             finally:

@@ -16,6 +16,7 @@ from typing_extensions import override
 
 from hosting.quic_protocol import (
     DEFAULT_TRANSPORT_OPTIONS,
+    RECV_TIMEOUT_MS,
     make_direct_quic_handshake_message,
     recv_data,
     send_data,
@@ -46,7 +47,7 @@ class DirectQuicClientPolicy(_base_policy.BasePolicy):
         logger.info("Sent direct QUIC handshake")
 
         # First response from server is metadata.
-        metadata = recv_data(self._portal, timeout_ms=30_000)
+        metadata = recv_data(self._portal, timeout_ms=RECV_TIMEOUT_MS)
         if metadata is None:
             raise ConnectionError("Timeout waiting for server metadata")
         self._server_metadata = metadata
@@ -59,7 +60,7 @@ class DirectQuicClientPolicy(_base_policy.BasePolicy):
     def infer(self, obs: dict) -> dict:
         send_data(self._portal, self._packer.pack(obs))
 
-        response = recv_data(self._portal, timeout_ms=30_000)
+        response = recv_data(self._portal, timeout_ms=RECV_TIMEOUT_MS)
         if response is None:
             raise ConnectionError("QUIC connection lost (recv returned None)")
         return response

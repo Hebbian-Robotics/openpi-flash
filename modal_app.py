@@ -40,7 +40,6 @@ openpi_image = create_openpi_image()
 class OpenPIInference:
     model_config_name: str = modal.parameter(default=DEFAULT_MODEL_CONFIG_NAME)
     checkpoint_dir: str = modal.parameter(default=DEFAULT_CHECKPOINT_DIR)
-    model_version: str = modal.parameter(default="pi05_v1")
     default_prompt: str = modal.parameter(default="")
 
     @modal.enter(snap=True)

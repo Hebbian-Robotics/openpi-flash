@@ -133,8 +133,7 @@ def serve_quic_connection(
     """Handle a single QUIC client connection until it disconnects.
 
     Sends metadata as the first message, then enters a recv-infer-send loop.
-    Used by both the direct QUIC server (serve.py) and the NAT-traversal
-    QUIC server (quic_server.py).
+    Used by the Modal NAT-traversal QUIC server in ``quic_server.py``.
     """
     packer = msgpack_numpy.Packer()
 

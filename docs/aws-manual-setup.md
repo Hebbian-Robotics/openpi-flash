@@ -256,7 +256,6 @@ cat > config.json << 'EOF'
 {
   "model_config_name": "pi05_aloha",
   "checkpoint_dir": "s3://openpi-checkpoints-us-west-2/pi05_base_pytorch",
-  "model_version": "pi05_v1",
   "port": 8000,
   "max_concurrent_requests": 1
 }

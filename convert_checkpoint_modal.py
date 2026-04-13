@@ -92,7 +92,6 @@ def convert_checkpoint(
     precision: Literal["bfloat16", "float16", "float32"] = "bfloat16",
 ) -> None:
     import importlib.util
-    import logging
     import pathlib
     import shutil
     import sys
@@ -118,9 +117,6 @@ def convert_checkpoint(
     import openpi.shared.download as download
     from openpi.training import config as _config
 
-    logging.basicConfig(level=logging.INFO)
-    logger = logging.getLogger(__name__)
-
     # Resolve the training config to get model config.
     train_config = _config.get_config(config_name)
     model_config = train_config.model
@@ -128,9 +124,9 @@ def convert_checkpoint(
         raise ValueError(f"Config {config_name} is not a Pi0Config")
 
     # Download the JAX checkpoint from GCS.
-    logger.info("Downloading JAX checkpoint from %s", checkpoint_dir)
+    print(f"Downloading JAX checkpoint from {checkpoint_dir}")
     local_checkpoint_dir = download.maybe_download(checkpoint_dir)
-    logger.info("Checkpoint downloaded to %s", local_checkpoint_dir)
+    print(f"Checkpoint downloaded to {local_checkpoint_dir}")
 
     # Import the conversion function from the bundled script.
     spec = importlib.util.spec_from_file_location(
@@ -143,7 +139,7 @@ def convert_checkpoint(
 
     # Run the conversion.
     output_path = pathlib.Path("/model-cache") / output_name
-    logger.info("Converting checkpoint to PyTorch format at %s", output_path)
+    print(f"Converting checkpoint to PyTorch format at {output_path}")
     convert_pi0_checkpoint(
         checkpoint_dir=str(local_checkpoint_dir),
         precision=precision,
@@ -159,12 +155,12 @@ def convert_checkpoint(
     import safetensors.torch as _safetensors_torch
 
     model_path = output_path / "model.safetensors"
-    logger.info("Applying selective mixed precision to %s", model_path)
+    print(f"Applying selective mixed precision to {model_path}")
     pi0_model = _pi0_pytorch.PI0Pytorch(model_config)
     _safetensors_torch.load_model(pi0_model, str(model_path))
     pi0_model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     _safetensors_torch.save_model(pi0_model, str(model_path))
-    logger.info("Mixed precision applied and checkpoint re-saved")
+    print("Mixed precision applied and checkpoint re-saved")
 
     # The conversion script copies assets from checkpoint_dir/../assets, which is
     # wrong for checkpoints downloaded via maybe_download. Copy assets from the
@@ -172,15 +168,15 @@ def convert_checkpoint(
     assets_source = local_checkpoint_dir / "assets"
     assets_dest = output_path / "assets"
     if assets_source.exists() and not assets_dest.exists():
-        logger.info("Copying assets from %s to %s", assets_source, assets_dest)
+        print(f"Copying assets from {assets_source} to {assets_dest}")
         shutil.copytree(assets_source, assets_dest)
     elif assets_dest.exists():
-        logger.info("Assets already present at %s", assets_dest)
+        print(f"Assets already present at {assets_dest}")
     else:
-        logger.warning("No assets directory found at %s", assets_source)
+        print(f"No assets directory found at {assets_source}")
 
     # Commit the volume so the data persists.
     model_weights_volume.commit()
 
-    logger.info("Conversion complete. Output at %s", output_path)
-    logger.info("Files: %s", list(output_path.iterdir()))
+    print(f"Conversion complete. Output at {output_path}")
+    print(f"Files: {list(output_path.iterdir())}")

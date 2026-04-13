@@ -19,8 +19,9 @@ Usage:
 
     # Client connects via the shared Modal Dict (no URL needed)
     from modal import Dict
+    from hosting.modal_dict_names import OPENPI_MODAL_QUIC_INFO_DICT_NAME
     from hosting.quic_client_policy import QuicClientPolicy
-    quic_dict = Dict.from_name("openpi-quic-info")
+    quic_dict = Dict.from_name(OPENPI_MODAL_QUIC_INFO_DICT_NAME)
     policy = QuicClientPolicy(portal_dict=quic_dict)
 """
 
@@ -28,6 +29,7 @@ import os
 
 import modal
 
+from hosting.modal_dict_names import OPENPI_MODAL_QUIC_INFO_DICT_NAME
 from hosting.modal_helpers import (
     DEFAULT_CHECKPOINT_DIR,
     DEFAULT_MODEL_CONFIG_NAME,
@@ -45,18 +47,21 @@ openpi_image = create_openpi_image(
     extra_pip_packages=["quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git"]
 )
 
-quic_dict = modal.Dict.from_name("openpi-quic-info", create_if_missing=True)
+quic_dict = modal.Dict.from_name(OPENPI_MODAL_QUIC_INFO_DICT_NAME, create_if_missing=True)
 
 # Inject QUIC_RELAY_IP into the container environment so the server can
 # fall back to the relay when direct hole punching fails.
 relay_secret = modal.Secret.from_dotenv()
 
 RELAY_PORT = 4433
+QUIC_RELAY_IP_ENV_VAR = "QUIC_RELAY_IP"
+QUIC_RELAY_ONLY_ENV_VAR = "QUIC_RELAY_ONLY"
+TRUTHY_ENV_VAR_VALUES = ("1", "true", "yes")
 
 
 def _get_relay_addr() -> tuple[str, int] | None:
     """Read QUIC_RELAY_IP from environment. Returns None if unset."""
-    relay_ip = os.environ.get("QUIC_RELAY_IP")
+    relay_ip = os.environ.get(QUIC_RELAY_IP_ENV_VAR)
     if not relay_ip:
         return None
     return (relay_ip.strip(), RELAY_PORT)
@@ -64,7 +69,7 @@ def _get_relay_addr() -> tuple[str, int] | None:
 
 def _is_relay_only() -> bool:
     """Check if QUIC_RELAY_ONLY is set to skip hole punching entirely."""
-    return os.environ.get("QUIC_RELAY_ONLY", "").strip().lower() in ("1", "true", "yes")
+    return os.environ.get(QUIC_RELAY_ONLY_ENV_VAR, "").strip().lower() in TRUTHY_ENV_VAR_VALUES
 
 
 @app.function(
@@ -107,7 +112,10 @@ def serve_quic(
         log_ip_location("Relay", relay_addr[0])
 
     # Serve over QUIC portal (blocks forever, handles reconnections).
-    print(f"\nQUIC portal server ready (Dict: 'openpi-quic-info', port: {QUIC_PORT})")
+    print(
+        f"\nQUIC portal server ready (Dict: '{OPENPI_MODAL_QUIC_INFO_DICT_NAME}', "
+        f"port: {QUIC_PORT})"
+    )
     if relay_only and relay_addr:
         print(f"Relay-only mode: {relay_addr[0]}:{relay_addr[1]}")
     elif relay_addr:

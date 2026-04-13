@@ -146,12 +146,6 @@ variable "openpi_pytorch_compile_mode" {
   default     = "default"
 }
 
-variable "model_version" {
-  description = "Model version written into the runtime config"
-  type        = string
-  default     = "pi05_v1"
-}
-
 variable "default_prompt" {
   description = "Optional default prompt for the server runtime config"
   type        = string

@@ -27,7 +27,7 @@ There are three deployment paths: local development, Docker on EC2, and Modal (s
 - `warmup.py` — Generates dummy ALOHA observations for the torch.compile warmup pass.
 - `local_policy_socket_server.py` — Unix socket server that the Rust sidecar connects to. Receives framed requests, calls `policy.infer()`, sends responses. This is the boundary between Rust (network) and Python (inference).
 - `direct_quic_client_policy.py` — Client for direct QUIC connections to EC2/Docker. Implements `BasePolicy` so it's a drop-in replacement in robot control loops.
-- `quic_protocol.py` — Shared QUIC wire format: message types, framing, handshake, and the `serve_quic_connection` loop used by both direct and NAT-traversal servers.
+- `quic_protocol.py` — Shared QUIC wire format: message types, framing, handshake helpers, and the `serve_quic_connection` loop used by the NAT-traversal server.
 - `quic_server.py` — QUIC server using quic-portal for Modal deployments (NAT traversal via STUN).
 - `quic_client_policy.py` — Client counterpart to `quic_server.py`, discovers server via Modal Dict.
 - `modal_asgi.py` — Adapts openpi's `WebsocketPolicyServer` into a Starlette ASGI app for Modal.

@@ -84,10 +84,10 @@ def run_benchmark(
     result = BenchmarkResult()
     action: dict[str, Any] = {}
 
-    for i in range(num_iterations):
-        start = time.monotonic()
+    for iteration_index in range(num_iterations):
+        iteration_start_time = time.monotonic()
         action = policy.infer(make_observation())
-        client_ms = 1000 * (time.monotonic() - start)
+        client_ms = 1000 * (time.monotonic() - iteration_start_time)
 
         sample = InferenceTimingSample(
             client_round_trip_ms=client_ms,
@@ -97,7 +97,7 @@ def run_benchmark(
         result.samples.append(sample)
 
         print(
-            f"  [{i + 1}/{num_iterations}]"
+            f"  [{iteration_index + 1}/{num_iterations}]"
             f" client={sample.client_round_trip_ms:.0f}ms"
             f"  server={sample.server_infer_ms:.0f}ms"
             f"  policy={sample.policy_forward_ms:.0f}ms"

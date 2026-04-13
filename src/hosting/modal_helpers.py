@@ -160,8 +160,8 @@ def log_ip_location(label: str, ip: str | None = None) -> None:
             f"{label} location: {info.get('city')}, {info.get('region')} "
             f"({info.get('country')}) — IP: {info.get('ip')}, org: {info.get('org')}"
         )
-    except Exception as e:
-        print(f"Could not determine {label.lower()} location: {e}")
+    except Exception as exc:
+        print(f"Could not determine {label.lower()} location: {exc}")
 
 
 def log_container_location() -> None:

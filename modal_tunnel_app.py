@@ -13,12 +13,14 @@ Usage:
 
     # Read the tunnel address from a client
     from modal import Dict
-    tunnel_dict = Dict.from_name("openpi-tunnel-info")
+    from hosting.modal_dict_names import OPENPI_MODAL_TUNNEL_INFO_DICT_NAME
+    tunnel_dict = Dict.from_name(OPENPI_MODAL_TUNNEL_INFO_DICT_NAME)
     print(tunnel_dict["address"])  # -> ("host", port)
 """
 
 import modal
 
+from hosting.modal_dict_names import OPENPI_MODAL_TUNNEL_INFO_DICT_NAME
 from hosting.modal_helpers import (
     DEFAULT_CHECKPOINT_DIR,
     DEFAULT_MODEL_CONFIG_NAME,
@@ -34,7 +36,7 @@ app = modal.App("openpi-inference-tunnel")
 
 openpi_image = create_openpi_image()
 
-tunnel_dict = modal.Dict.from_name("openpi-tunnel-info", create_if_missing=True)
+tunnel_dict = modal.Dict.from_name(OPENPI_MODAL_TUNNEL_INFO_DICT_NAME, create_if_missing=True)
 
 
 @app.function(
@@ -65,8 +67,8 @@ def serve_tunnel(
         try:
             relay_ip = socket.gethostbyname(host)
             log_ip_location("Relay", relay_ip)
-        except Exception as e:
-            print(f"Could not resolve relay location: {e}")
+        except Exception as exc:
+            print(f"Could not resolve relay location: {exc}")
 
         # Now load model + compile (the expensive part).
         policy, train_config = load_openpi_policy(

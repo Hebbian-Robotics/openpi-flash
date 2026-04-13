@@ -65,7 +65,6 @@ locals {
     {
       model_config_name       = var.model_config_name
       checkpoint_dir          = var.checkpoint_dir
-      model_version           = var.model_version
       default_prompt          = var.default_prompt
       port                    = 8000
       max_concurrent_requests = var.max_concurrent_requests

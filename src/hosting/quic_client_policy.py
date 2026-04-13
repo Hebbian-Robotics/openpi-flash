@@ -21,6 +21,7 @@ from typing_extensions import override
 from hosting.quic_protocol import (
     DEFAULT_STUN_SERVERS,
     DEFAULT_TRANSPORT_OPTIONS,
+    RECV_TIMEOUT_MS,
     PortalDictLike,
     UdpAddr,
     recv_data,
@@ -126,7 +127,7 @@ class QuicClientPolicy(_base_policy.BasePolicy):
                 portal = self._create_portal()
 
                 # First message from server is metadata.
-                metadata = recv_data(portal, timeout_ms=30_000)
+                metadata = recv_data(portal, timeout_ms=RECV_TIMEOUT_MS)
                 if metadata is None:
                     logger.warning(
                         "Timeout waiting for server metadata, retrying... (%d/%d)",

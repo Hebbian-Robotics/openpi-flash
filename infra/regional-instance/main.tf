@@ -45,7 +45,6 @@ module "regional_inference_instance" {
   instance_type                 = var.instance_type
   max_concurrent_requests       = var.max_concurrent_requests
   model_config_name             = var.model_config_name
-  model_version                 = var.model_version
   openpi_pytorch_compile_mode   = var.openpi_pytorch_compile_mode
   root_volume_size_gib          = var.root_volume_size_gib
   ssh_key_name                  = var.ssh_key_name
