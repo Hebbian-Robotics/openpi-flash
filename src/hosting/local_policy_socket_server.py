@@ -10,66 +10,20 @@ from __future__ import annotations
 
 import pathlib
 import socket
-import struct
 import time
 import traceback
 from collections.abc import Callable
-from enum import IntEnum
 from typing import Any
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 
-
-class SidecarRequestType(IntEnum):
-    """Request message types sent by the local sidecar."""
-
-    METADATA = 0x01
-    INFER = 0x02
-    RESET = 0x03
-
-
-class SidecarResponseType(IntEnum):
-    """Response message types returned to the local sidecar."""
-
-    METADATA = 0x11
-    INFER = 0x12
-    ERROR = 0x13
-    RESET = 0x14
-
-
-def _recv_exactly(stream_socket: socket.socket, num_bytes: int) -> bytes | None:
-    """Read exactly ``num_bytes`` from a stream socket or return None on EOF."""
-    received_chunks = bytearray()
-    while len(received_chunks) < num_bytes:
-        chunk = stream_socket.recv(num_bytes - len(received_chunks))
-        if not chunk:
-            return None
-        received_chunks.extend(chunk)
-    return bytes(received_chunks)
-
-
-def _recv_framed_message(stream_socket: socket.socket) -> bytes | None:
-    """Receive one length-prefixed message from a Unix stream socket."""
-    raw_length_prefix = _recv_exactly(stream_socket, 4)
-    if raw_length_prefix is None:
-        return None
-
-    message_length = struct.unpack(">I", raw_length_prefix)[0]
-    if message_length == 0:
-        return b""
-
-    payload = _recv_exactly(stream_socket, message_length)
-    if payload is None:
-        raise ConnectionError("Unexpected EOF while reading framed Unix-socket message")
-    return payload
-
-
-def _send_framed_message(stream_socket: socket.socket, payload: bytes) -> None:
-    """Send one length-prefixed message over a Unix stream socket."""
-    stream_socket.sendall(struct.pack(">I", len(payload)))
-    if payload:
-        stream_socket.sendall(payload)
+from hosting.local_sidecar_protocol import (
+    SidecarRequestType,
+    SidecarResponseType,
+    recv_framed_message,
+    send_framed_message,
+)
 
 
 class LocalPolicySocketServer:
@@ -123,7 +77,7 @@ class LocalPolicySocketServer:
         response_packer = msgpack_numpy.Packer()
 
         while True:
-            framed_request = _recv_framed_message(connection_socket)
+            framed_request = recv_framed_message(connection_socket)
             if framed_request is None:
                 self._log("[local-policy-socket] Sidecar disconnected")
                 break
@@ -134,7 +88,7 @@ class LocalPolicySocketServer:
             request_body = framed_request[1:]
 
             if request_type == SidecarRequestType.METADATA:
-                _send_framed_message(
+                send_framed_message(
                     connection_socket,
                     bytes([SidecarResponseType.METADATA]) + self._packed_metadata,
                 )
@@ -142,7 +96,7 @@ class LocalPolicySocketServer:
 
             if request_type == SidecarRequestType.RESET:
                 self._policy.reset()
-                _send_framed_message(connection_socket, bytes([SidecarResponseType.RESET]))
+                send_framed_message(connection_socket, bytes([SidecarResponseType.RESET]))
                 previous_total_duration_seconds = None
                 continue
 
@@ -162,13 +116,13 @@ class LocalPolicySocketServer:
                     server_timing["prev_total_ms"] = previous_total_duration_seconds * 1000
 
                 response_payload = response_packer.pack({**action, "server_timing": server_timing})
-                _send_framed_message(
+                send_framed_message(
                     connection_socket,
                     bytes([SidecarResponseType.INFER]) + response_payload,
                 )
                 previous_total_duration_seconds = time.monotonic() - request_start_time
             except Exception:
-                _send_framed_message(
+                send_framed_message(
                     connection_socket,
                     bytes([SidecarResponseType.ERROR]) + traceback.format_exc().encode("utf-8"),
                 )

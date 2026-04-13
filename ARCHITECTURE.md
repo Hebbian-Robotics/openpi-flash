@@ -26,7 +26,7 @@ There are three deployment paths: local development, Docker on EC2, and Modal (s
 - `compile_mode.py` — Resolves `OPENPI_PYTORCH_COMPILE_MODE` env var to a torch.compile mode string or `None` (eager).
 - `warmup.py` — Generates dummy ALOHA observations for the torch.compile warmup pass.
 - `local_policy_socket_server.py` — Unix socket server that the Rust sidecar connects to. Receives framed requests, calls `policy.infer()`, sends responses. This is the boundary between Rust (network) and Python (inference).
-- `direct_quic_client_policy.py` — Client for direct QUIC connections to EC2/Docker. Implements `BasePolicy` so it's a drop-in replacement in robot control loops.
+- `direct_quic_client_policy.py` — Python `BasePolicy` wrapper for direct QUIC connections to EC2/Docker. Spawns a local Rust sidecar client process so robot code keeps the normal `infer()` interface.
 - `quic_protocol.py` — Shared QUIC wire format: message types, framing, handshake helpers, and the `serve_quic_connection` loop used by the NAT-traversal server.
 - `quic_server.py` — QUIC server using quic-portal for Modal deployments (NAT traversal via STUN).
 - `quic_client_policy.py` — Client counterpart to `quic_server.py`, discovers server via Modal Dict.
@@ -37,7 +37,12 @@ There are three deployment paths: local development, Docker on EC2, and Modal (s
 
 ### quic-sidecar/ — Rust binary
 
-Single-file Rust binary (`src/main.rs`). Listens for QUIC connections on UDP 5555, connects to the Python backend via Unix socket. The wire protocol uses length-prefixed messages with type bytes: `0x01`/`0x11` for metadata, `0x02`/`0x12` for inference, `0x13` for errors. This exists because quic-portal (the Python QUIC library) can't run inside Docker containers reliably; the Rust sidecar is compiled in the first Dockerfile stage.
+Single-file Rust binary (`src/main.rs`) with two modes:
+
+- `server` — Listens for QUIC connections on UDP 5555 and connects to the Python backend via Unix socket.
+- `client` — Connects to a remote direct QUIC server and exposes the same local Unix-socket protocol to the Python client wrapper.
+
+The local sidecar protocol uses length-prefixed messages with type bytes: `0x01`/`0x11` for metadata, `0x02`/`0x12` for inference, `0x03`/`0x14` for reset, and `0x13` for errors. This exists because keeping QUIC in Rust gives a cleaner low-latency path on both sides while preserving the standard Python policy interface.
 
 ### tests/
 
@@ -55,7 +60,7 @@ Two-tier structure:
 
 - **No openpi modifications.** We import from openpi and openpi-client as-is. If something needs to change in openpi, it should be upstreamed.
 - **One policy, multiple transports.** The policy is loaded once and wrapped in `ThreadSafePolicy`. WebSocket and QUIC both call the same `infer()` behind a lock. Adding a transport means adding a thread, not duplicating model loading.
-- **Rust owns the network, Python owns inference.** In Docker/EC2, the Rust sidecar terminates QUIC and speaks a simple framed protocol over a Unix socket to Python. This boundary is `local_policy_socket_server.py` (Python side) and `main.rs` (Rust side).
+- **Rust owns the network, Python owns inference.** In Docker/EC2, the Rust sidecar terminates QUIC and speaks a simple framed protocol over a Unix socket to Python. The same local protocol is also used by the direct QUIC client wrapper, which spawns a local Rust sidecar process and keeps the Python `BasePolicy` API intact.
 - **Infrastructure is separated by blast radius.** Shared resources (ECR, S3, IAM) are in the Terraform root. Regional EC2 instances are in separate workspaces so you can destroy one region without affecting others.
 
 ## Cross-cutting concerns

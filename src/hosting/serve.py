@@ -141,6 +141,7 @@ def _run_rust_quic_sidecar(local_policy_socket_path: pathlib.Path) -> None:
     sidecar_binary_path = _get_rust_quic_sidecar_binary_path()
     sidecar_command = [
         str(sidecar_binary_path),
+        "server",
         "--listen-port",
         str(QUIC_PORT),
         "--backend-socket-path",

@@ -239,9 +239,11 @@ uv run modal volume ls openpi-model-weights
 
 ### QUIC (recommended for EC2/Docker)
 
-QUIC provides lower and more consistent latency than WebSocket for direct connections. Use it as the default transport for EC2/Docker deployments where the server has a stable public IP and UDP is not blocked.
+QUIC provides lower and more consistent latency than WebSocket for direct connections. Use it as the default transport for EC2/Docker deployments where the server has a stable public IP and UDP is not blocked. The Python client keeps the normal `policy.infer()` API, but direct QUIC now runs through a local Rust sidecar process on the client machine.
 
 > **Note:** On Modal, QUIC requires NAT traversal (STUN + UDP hole punching) which is unreliable — it fails frequently depending on the NAT type assigned to the container. Use WebSocket for Modal deployments.
+>
+> For direct QUIC, the client machine also needs the `openpi-quic-sidecar` binary installed. Set `OPENPI_QUIC_SIDECAR_BINARY` if it is not on the default path.
 
 ```python
 from hosting.direct_quic_client_policy import DirectQuicClientPolicy
