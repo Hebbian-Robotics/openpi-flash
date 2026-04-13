@@ -146,12 +146,6 @@ variable "openpi_pytorch_compile_mode" {
   default     = "default"
 }
 
-variable "openpi_quic_backend" {
-  description = "Value for OPENPI_QUIC_BACKEND inside the inference container"
-  type        = string
-  default     = "rust-sidecar"
-}
-
 variable "model_version" {
   description = "Model version written into the runtime config"
   type        = string

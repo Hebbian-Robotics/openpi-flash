@@ -16,7 +16,7 @@ This stack is intentionally separate from the shared [`../`](../README.md) infra
   - installs Docker, AWS CLI, and NVIDIA Container Toolkit
   - writes `/etc/openpi/config.json`
   - creates a systemd unit that logs in to ECR, pulls the image, and runs the container
-  - sets runtime env vars for PyTorch compile mode and QUIC backend
+  - sets runtime env vars for PyTorch compile mode
 
 ## Usage
 
@@ -31,7 +31,6 @@ terraform apply \
   -var subnet_id=subnet-xxxxxxxx \
   -var ssh_key_name=your-keypair \
   -var openpi_pytorch_compile_mode=max-autotune-no-cudagraphs \
-  -var openpi_quic_backend=rust-sidecar \
   -var='allowed_ssh_cidr_blocks=["203.0.113.10/32"]' \
   -var='allowed_websocket_cidr_blocks=["203.0.113.10/32"]' \
   -var='allowed_quic_cidr_blocks=["203.0.113.10/32"]'

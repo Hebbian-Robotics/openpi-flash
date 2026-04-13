@@ -19,7 +19,6 @@ import pathlib
 import subprocess
 import threading
 import time
-import traceback
 import urllib.parse
 
 from openpi.models import pi0_config as _pi0_config
@@ -28,20 +27,16 @@ from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 from openpi.shared import download as _download
 from openpi.training import config as _config
 from openpi_client import base_policy as _base_policy
-from quic_portal import Portal, PortalError
 
 from hosting.compile_mode import get_serving_pytorch_compile_mode
 from hosting.config import ServiceConfig, load_config
 from hosting.local_policy_socket_server import LocalPolicySocketServer
-from hosting.quic_protocol import DEFAULT_TRANSPORT_OPTIONS, serve_quic_connection
 from hosting.warmup import make_aloha_warmup_observation
 
 logger = logging.getLogger(__name__)
 
 QUIC_PORT = 5555
 DEFAULT_LOCAL_POLICY_SOCKET_PATH = pathlib.Path("/tmp/openpi-policy.sock")
-DEFAULT_QUIC_BACKEND_KIND = "portal"
-RUST_QUIC_BACKEND_KIND = "rust-sidecar"
 DEFAULT_RUST_QUIC_SIDECAR_BINARY_PATH = pathlib.Path("/usr/local/bin/openpi-quic-sidecar")
 
 
@@ -49,11 +44,6 @@ def _log_service_milestone(message: str) -> None:
     """Emit a concise startup milestone to stdout for container logs."""
     timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"{timestamp} {message}", flush=True)
-
-
-def _quic_log(msg: str) -> None:
-    """Log with UTC timestamp for correlating with relay/portal logs."""
-    _log_service_milestone(msg)
 
 
 class ThreadSafePolicy(_base_policy.BasePolicy):
@@ -136,38 +126,6 @@ def load_policy(
     return policy, train_config
 
 
-def _run_quic_server(policy: ThreadSafePolicy, metadata: dict) -> None:
-    """Block forever, accepting and serving one QUIC client at a time.
-
-    Uses Portal.listen() for direct connections — no STUN, no relay, no dict
-    coordination. Clients connect directly to <host>:<QUIC_PORT>.
-    """
-    while True:
-        try:
-            _quic_log(f"[quic-server] Listening on UDP port {QUIC_PORT}...")
-            portal = Portal()
-            portal.listen(QUIC_PORT, DEFAULT_TRANSPORT_OPTIONS)
-            _quic_log("[quic-server] Client connected")
-
-            serve_quic_connection(
-                portal,
-                policy,
-                metadata,
-                log=_quic_log,
-                client_initiates_handshake=True,
-            )
-        except PortalError as e:
-            _quic_log(f"[quic-server] Portal error, will retry: {e}")
-        except Exception:
-            _quic_log(f"[quic-server] Error, will retry:\n{traceback.format_exc()}")
-        finally:
-            time.sleep(1)  # Brief pause before accepting next client.
-
-
-def _get_quic_backend_kind() -> str:
-    return os.environ.get("OPENPI_QUIC_BACKEND", DEFAULT_QUIC_BACKEND_KIND)
-
-
 def _get_local_policy_socket_path() -> pathlib.Path:
     configured_socket_path = os.environ.get("OPENPI_LOCAL_POLICY_SOCKET_PATH")
     if configured_socket_path:
@@ -240,34 +198,20 @@ def main() -> None:
     websocket_thread.start()
     _log_service_milestone(f"WebSocket server thread started on TCP port {service_config.port}")
 
-    quic_backend_kind = _get_quic_backend_kind()
-    if quic_backend_kind == DEFAULT_QUIC_BACKEND_KIND:
-        _log_service_milestone(f"Starting QUIC server on UDP port {QUIC_PORT}")
-        _run_quic_server(thread_safe_policy, metadata)
-        return
-
-    if quic_backend_kind == RUST_QUIC_BACKEND_KIND:
-        local_policy_socket_path = _get_local_policy_socket_path()
-        local_policy_socket_server = LocalPolicySocketServer(
-            policy=thread_safe_policy,
-            socket_path=local_policy_socket_path,
-            metadata=metadata,
-            log=_log_service_milestone,
-        )
-        local_policy_socket_thread = threading.Thread(
-            target=local_policy_socket_server.serve_forever,
-            name="local-policy-socket-server",
-            daemon=True,
-        )
-        local_policy_socket_thread.start()
-        _run_rust_quic_sidecar(local_policy_socket_path)
-        return
-
-    raise ValueError(
-        "Unsupported QUIC backend kind "
-        f"{quic_backend_kind!r}. "
-        f"Expected {DEFAULT_QUIC_BACKEND_KIND!r} or {RUST_QUIC_BACKEND_KIND!r}."
+    local_policy_socket_path = _get_local_policy_socket_path()
+    local_policy_socket_server = LocalPolicySocketServer(
+        policy=thread_safe_policy,
+        socket_path=local_policy_socket_path,
+        metadata=metadata,
+        log=_log_service_milestone,
     )
+    local_policy_socket_thread = threading.Thread(
+        target=local_policy_socket_server.serve_forever,
+        name="local-policy-socket-server",
+        daemon=True,
+    )
+    local_policy_socket_thread.start()
+    _run_rust_quic_sidecar(local_policy_socket_path)
 
 
 if __name__ == "__main__":

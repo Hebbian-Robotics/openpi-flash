@@ -159,7 +159,6 @@ resource "aws_instance" "inference" {
       image_url                   = local.effective_image_url
       log_region                  = data.aws_region.current.name
       openpi_pytorch_compile_mode = var.openpi_pytorch_compile_mode
-      openpi_quic_backend         = var.openpi_quic_backend
     }
   )
 

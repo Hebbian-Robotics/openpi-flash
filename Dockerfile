@@ -74,8 +74,6 @@ ENV TORCHINDUCTOR_FX_GRAPH_CACHE=1
 
 # openpi data home for downloaded checkpoints and norm stats.
 ENV OPENPI_DATA_HOME=/cache/models
-ENV OPENPI_QUIC_BACKEND=rust-sidecar
-
 EXPOSE 5555/udp
 
 CMD ["python", "-m", "hosting.serve"]

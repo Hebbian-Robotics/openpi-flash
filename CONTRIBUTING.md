@@ -10,14 +10,6 @@ openpi-hosting is a hosted inference service that wraps OpenPI policy models in 
 # Local development
 INFERENCE_CONFIG_PATH=config.json uv run python -m hosting.serve
 
-# Local development with Rust QUIC sidecar
-cd quic-sidecar && cargo build
-cd ..
-OPENPI_QUIC_BACKEND=rust-sidecar \
-OPENPI_QUIC_SIDECAR_BINARY=$PWD/quic-sidecar/target/debug/openpi-quic-sidecar \
-INFERENCE_CONFIG_PATH=config.json \
-uv run python -m hosting.serve
-
 # Docker (requires config.json)
 docker compose up --build
 

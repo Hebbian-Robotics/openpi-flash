@@ -33,7 +33,6 @@ write_files:
         -v openpi-inference-cache:/cache \
         -e INFERENCE_CONFIG_PATH=/config/config.json \
         -e OPENPI_PYTORCH_COMPILE_MODE=${openpi_pytorch_compile_mode} \
-        -e OPENPI_QUIC_BACKEND=${openpi_quic_backend} \
         -p 8000:8000 \
         -p 5555:5555/udp \
         --name ${container_name} \

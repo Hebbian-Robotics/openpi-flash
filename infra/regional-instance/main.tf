@@ -47,7 +47,6 @@ module "regional_inference_instance" {
   model_config_name             = var.model_config_name
   model_version                 = var.model_version
   openpi_pytorch_compile_mode   = var.openpi_pytorch_compile_mode
-  openpi_quic_backend           = var.openpi_quic_backend
   root_volume_size_gib          = var.root_volume_size_gib
   ssh_key_name                  = var.ssh_key_name
   ssh_public_key                = var.ssh_public_key
