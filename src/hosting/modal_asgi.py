@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 import traceback
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
@@ -30,7 +30,7 @@ class OpenPIServerTiming(TypedDict, total=False):
 
 def create_openpi_asgi_app(
     policy: _base_policy.BasePolicy,
-    metadata: dict | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Starlette:
     """Create a Starlette ASGI app that serves an openpi policy over WebSocket.
 

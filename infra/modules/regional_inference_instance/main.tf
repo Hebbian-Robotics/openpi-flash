@@ -1,4 +1,13 @@
-data "aws_region" "current" {}
+terraform {
+  required_version = ">= 1.5"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
 
 # -- Default VPC/subnet discovery (used when subnet_id is not provided) --
 data "aws_vpc" "default" {
@@ -17,6 +26,14 @@ data "aws_subnets" "default_vpc" {
   filter {
     name   = "default-for-az"
     values = ["true"]
+  }
+
+  dynamic "filter" {
+    for_each = var.availability_zone != null ? [var.availability_zone] : []
+    content {
+      name   = "availability-zone"
+      values = [filter.value]
+    }
   }
 }
 
@@ -150,14 +167,12 @@ resource "aws_instance" "inference" {
   user_data = templatefile(
     "${path.module}/templates/user_data.yaml.tftpl",
     {
-      cloudwatch_log_group_name   = var.cloudwatch_log_group_name
       config_json                 = local.effective_service_config_json
       container_name              = var.container_name
       ecr_region                  = var.ecr_region
       ecr_registry_host           = local.ecr_registry_host
       extra_bootstrap_commands    = var.extra_bootstrap_commands
       image_url                   = local.effective_image_url
-      log_region                  = data.aws_region.current.name
       openpi_pytorch_compile_mode = var.openpi_pytorch_compile_mode
     }
   )

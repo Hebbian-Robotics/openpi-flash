@@ -28,24 +28,14 @@ terraform init
 terraform apply \
   -var aws_region=ap-northeast-2 \
   -var ecr_repository_url="$SHARED_ECR_REPOSITORY_URL" \
-  -var subnet_id=subnet-xxxxxxxx \
-  -var ssh_key_name=your-keypair \
-  -var openpi_pytorch_compile_mode=max-autotune-no-cudagraphs \
-  -var='allowed_ssh_cidr_blocks=["203.0.113.10/32"]' \
-  -var='allowed_websocket_cidr_blocks=["203.0.113.10/32"]' \
-  -var='allowed_quic_cidr_blocks=["203.0.113.10/32"]'
+  -var 'ssh_public_key=ssh-ed25519 AAAA... user@host' \
+  -var assign_elastic_ip=true \
+  -var openpi_pytorch_compile_mode=default
 ```
 
-### Minimal deploy (auto-discover subnet from default VPC)
+SSH, WebSocket, and QUIC ports default to open (`0.0.0.0/0`). Override with `allowed_ssh_cidr_blocks`, `allowed_websocket_cidr_blocks`, `allowed_quic_cidr_blocks` to restrict.
 
-```bash
-terraform apply \
-  -var aws_region=ap-southeast-5 \
-  -var ecr_repository_url="$SHARED_ECR_REPOSITORY_URL" \
-  -var 'ssh_public_key=ssh-ed25519 AAAA... user@host'
-```
-
-When `subnet_id` is omitted, the module discovers the default VPC's first public subnet in the target region. When `ssh_public_key` is provided instead of `ssh_key_name`, Terraform creates and manages the key pair.
+When `subnet_id` is omitted, the module discovers the default VPC's first public subnet. Use `availability_zone` to target a specific AZ (required in some regions where GPU instances aren't available in all AZs).
 
 ## Notes
 

@@ -45,9 +45,9 @@ uv run python main.py test quic localhost
 ## Code Quality
 
 ```bash
-uv run ruff check --fix  # Linting with auto-fix
-uv run ruff format       # Code formatting
-uv run ty check          # Type checking
+uv run ruff check --fix  
+uv run ruff format       
+uv run ty check          
 
 # Rust QUIC sidecar
 cd quic-sidecar && cargo fmt
@@ -56,10 +56,10 @@ cd quic-sidecar && cargo clippy --all-targets --all-features
 lychee -v .              # Markdown link checking
 hadolint Dockerfile      # Docker linting (brew install hadolint)
 
-# Terraform / OpenTofu (infra/)
-cd infra && tofu fmt     # Format .tf files (brew install opentofu)
-cd infra && tofu validate  # Validate configuration
-cd infra && tflint       # Lint Terraform (brew install tflint)
+# OpenTofu (infra/)
+cd infra && tofu fmt 
+cd infra && tofu validate 
+cd infra && tflint
 ```
 
 ## Code Style & Philosophy

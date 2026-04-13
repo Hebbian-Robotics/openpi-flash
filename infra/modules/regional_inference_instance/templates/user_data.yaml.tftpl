@@ -25,10 +25,6 @@ write_files:
       docker pull ${image_url}
 
       docker run -d --restart unless-stopped --gpus=all \
-        --log-driver=awslogs \
-        --log-opt awslogs-region=${log_region} \
-        --log-opt awslogs-group=${cloudwatch_log_group_name} \
-        --log-opt awslogs-create-group=true \
         -v /etc/openpi/config.json:/config/config.json:ro \
         -v openpi-inference-cache:/cache \
         -e INFERENCE_CONFIG_PATH=/config/config.json \

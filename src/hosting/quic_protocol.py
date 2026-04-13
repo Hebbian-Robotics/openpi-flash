@@ -125,7 +125,7 @@ RECV_TIMEOUT_MS = 30_000
 def serve_quic_connection(
     portal: Portal,
     policy: _base_policy.BasePolicy,
-    metadata: dict,
+    metadata: dict[str, Any],
     log: Callable[[str], None],
     *,
     client_initiates_handshake: bool = False,

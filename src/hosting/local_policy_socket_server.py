@@ -14,20 +14,28 @@ import struct
 import time
 import traceback
 from collections.abc import Callable
+from enum import IntEnum
+from typing import Any
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 
-# Request message types sent by the local sidecar.
-_REQUEST_TYPE_METADATA = 0x01
-_REQUEST_TYPE_INFER = 0x02
-_REQUEST_TYPE_RESET = 0x03
 
-# Response message types returned to the local sidecar.
-_RESPONSE_TYPE_METADATA = 0x11
-_RESPONSE_TYPE_INFER = 0x12
-_RESPONSE_TYPE_ERROR = 0x13
-_RESPONSE_TYPE_RESET = 0x14
+class SidecarRequestType(IntEnum):
+    """Request message types sent by the local sidecar."""
+
+    METADATA = 0x01
+    INFER = 0x02
+    RESET = 0x03
+
+
+class SidecarResponseType(IntEnum):
+    """Response message types returned to the local sidecar."""
+
+    METADATA = 0x11
+    INFER = 0x12
+    ERROR = 0x13
+    RESET = 0x14
 
 
 def _recv_exactly(stream_socket: socket.socket, num_bytes: int) -> bytes | None:
@@ -71,7 +79,7 @@ class LocalPolicySocketServer:
         self,
         policy: _base_policy.BasePolicy,
         socket_path: pathlib.Path,
-        metadata: dict,
+        metadata: dict[str, Any],
         log: Callable[[str], None],
     ) -> None:
         self._policy = policy
@@ -125,20 +133,20 @@ class LocalPolicySocketServer:
             request_type = framed_request[0]
             request_body = framed_request[1:]
 
-            if request_type == _REQUEST_TYPE_METADATA:
+            if request_type == SidecarRequestType.METADATA:
                 _send_framed_message(
                     connection_socket,
-                    bytes([_RESPONSE_TYPE_METADATA]) + self._packed_metadata,
+                    bytes([SidecarResponseType.METADATA]) + self._packed_metadata,
                 )
                 continue
 
-            if request_type == _REQUEST_TYPE_RESET:
+            if request_type == SidecarRequestType.RESET:
                 self._policy.reset()
-                _send_framed_message(connection_socket, bytes([_RESPONSE_TYPE_RESET]))
+                _send_framed_message(connection_socket, bytes([SidecarResponseType.RESET]))
                 previous_total_duration_seconds = None
                 continue
 
-            if request_type != _REQUEST_TYPE_INFER:
+            if request_type != SidecarRequestType.INFER:
                 raise RuntimeError(f"Unexpected sidecar request type: {request_type!r}")
 
             request_start_time = time.monotonic()
@@ -156,12 +164,12 @@ class LocalPolicySocketServer:
                 response_payload = response_packer.pack({**action, "server_timing": server_timing})
                 _send_framed_message(
                     connection_socket,
-                    bytes([_RESPONSE_TYPE_INFER]) + response_payload,
+                    bytes([SidecarResponseType.INFER]) + response_payload,
                 )
                 previous_total_duration_seconds = time.monotonic() - request_start_time
             except Exception:
                 _send_framed_message(
                     connection_socket,
-                    bytes([_RESPONSE_TYPE_ERROR]) + traceback.format_exc().encode("utf-8"),
+                    bytes([SidecarResponseType.ERROR]) + traceback.format_exc().encode("utf-8"),
                 )
                 previous_total_duration_seconds = None

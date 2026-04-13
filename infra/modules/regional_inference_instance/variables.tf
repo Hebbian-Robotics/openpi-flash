@@ -9,6 +9,12 @@ variable "subnet_id" {
   default     = null
 }
 
+variable "availability_zone" {
+  description = "Preferred availability zone. When set, subnet auto-discovery filters to this AZ. Ignored when subnet_id is provided."
+  type        = string
+  default     = null
+}
+
 variable "iam_instance_profile_name" {
   description = "Instance profile name for the EC2 host"
   type        = string
@@ -100,12 +106,6 @@ variable "docker_image_tag" {
   description = "Image tag to deploy from ECR"
   type        = string
   default     = "latest"
-}
-
-variable "cloudwatch_log_group_name" {
-  description = "CloudWatch Logs group for container stdout and stderr"
-  type        = string
-  default     = "/openpi/inference"
 }
 
 variable "container_name" {

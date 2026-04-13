@@ -12,7 +12,7 @@ For region-specific EC2 deployments, use [`regional-instance/`](./regional-insta
 | ECR lifecycle policy | Auto-cleanup: keeps `latest` + 3 most recent images |
 | IAM OIDC provider | GitHub Actions federates into AWS without static creds |
 | IAM role `github-actions-ecr-push` | CI pushes images to ECR |
-| IAM role `ec2-ecr-pull` + instance profile | EC2 pulls images from ECR, checkpoints from S3, writes CloudWatch logs |
+| IAM role `ec2-ecr-pull` + instance profile | EC2 pulls images from ECR, checkpoints from S3 |
 | S3 bucket | Stores pre-converted PyTorch model checkpoints |
 
 ## What's NOT managed

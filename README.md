@@ -135,14 +135,7 @@ uv run modal deploy modal_app.py \
 
 ### Changing the GPU
 
-Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()`:
-
-```python
-@app.cls(
-    gpu="A10G",  # or "L4", "L40S", "A100", "H100"
-    ...
-)
-```
+Edit `modal_app.py` and change the `gpu=` parameter on `@app.cls()` (`"L4"`, `"L40S"`, `"A10G"`, `"A100"`, `"H100"`).
 
 ### Converting checkpoints to PyTorch
 
@@ -223,31 +216,12 @@ The Modal app reads `.env` via `modal.Secret.from_dotenv()` and injects `QUIC_RE
 
 All test scripts run a warmup inference followed by 5 timed iterations, reporting per-iteration timing and a summary with mean/min/max.
 
-#### QUIC (recommended for EC2/Docker)
-
 ```bash
-uv run python main.py test quic localhost
-uv run python main.py test quic $EC2_HOST --quic-port 5555 --ws-port 8000
-```
-
-#### WebSocket (fallback, or Modal)
-
-```bash
-uv run python main.py test ws ws://localhost:8000          # EC2/Docker (plain)
-uv run python main.py test ws wss://$EC2_HTTPS_HOST   # EC2 with HTTPS
-uv run python main.py test ws wss://$MODAL_HOSTNAME   # Modal
-```
-
-#### Tunnel mode (`modal_tunnel_app.py`)
-
-```bash
-uv run python main.py test modal-tunnel
-```
-
-#### QUIC portal mode (`modal_quic_app.py`)
-
-```bash
-uv run python main.py test modal-quic
+uv run python main.py test quic <host>                # QUIC direct (recommended for EC2/Docker)
+uv run python main.py test ws ws://<host>:8000         # WebSocket (EC2/Docker)
+uv run python main.py test ws wss://$MODAL_HOSTNAME    # WebSocket (Modal)
+uv run python main.py test modal-tunnel                # Modal tunnel mode
+uv run python main.py test modal-quic                  # Modal QUIC portal
 ```
 
 ### Model weight caching
@@ -308,14 +282,6 @@ curl http://localhost:8000/healthz
 curl "https://$MODAL_HOSTNAME/healthz"
 ```
 
-## Linting and typechecking
-
-```bash
-uv run ruff check src/hosting/
-uv run ruff format src/hosting/
-uv run ty check src/hosting/
-```
-
 ## Deploying to AWS
 
 ### AWS infrastructure setup
@@ -372,31 +338,11 @@ docker run -d --restart unless-stopped --gpus=all \
 
 ### Updating to a new version
 
-```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
-
-aws ecr get-login-password --region us-west-2 | \
-  docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-docker pull "${ECR_REGISTRY}/openpi-flash:latest"
-docker stop openpi-inference && docker rm openpi-inference
-docker run -d --restart unless-stopped --gpus=all \
-  -v $(pwd)/config.json:/config/config.json:ro \
-  -e INFERENCE_CONFIG_PATH=/config/config.json \
-  -p 8000:8000 -p 5555:5555/udp \
-  --name openpi-inference \
-  "${ECR_REGISTRY}/openpi-flash:latest"
-```
-
-You can pin to a specific commit: `openpi-flash:<commit-sha>` instead of `:latest`.
+Re-run the ECR login, pull, stop, and run steps from above. You can pin to a specific commit: `openpi-flash:<commit-sha>` instead of `:latest`.
 
 ### Pushing dev images
 
 ```bash
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
-
-# Build and push with a dev tag
 docker build .. -t "${ECR_REGISTRY}/openpi-flash:dev" -f Dockerfile
 docker push "${ECR_REGISTRY}/openpi-flash:dev"
 ```
@@ -411,6 +357,8 @@ ECR keeps `latest` plus the 3 most recent images; older ones are cleaned up auto
 
 ## Architecture
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed codemap, invariants, and how the pieces fit together.
+
 ```
               QUIC (UDP 5555, recommended)
 client ─┬──────────────────────────────────> QUIC sidecar ─┐
@@ -421,7 +369,3 @@ client ─┬──────────────────────�
                                                +-- server_timing (infer_ms, prev_total_ms)
                                                +-- msgpack binary protocol
 ```
-
-Both transports share the same policy and use msgpack binary protocol. QUIC is the recommended transport for direct connections — it provides lower and more consistent latency than WebSocket. Fall back to WebSocket if UDP is blocked or when connecting from a browser.
-
-The server reuses openpi's `create_trained_policy()` and `Policy.infer()` directly. No openpi code is modified. Both JAX and PyTorch checkpoints are supported (auto-detected).

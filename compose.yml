@@ -20,11 +20,6 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
-    logging:
-      driver: awslogs
-      options:
-        awslogs-group: /openpi/inference
-        awslogs-create-group: "true"
 
 volumes:
   inference-cache:

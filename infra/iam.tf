@@ -116,26 +116,6 @@ resource "aws_iam_role_policy" "ec2_s3_checkpoint_read" {
   })
 }
 
-resource "aws_iam_role_policy" "ec2_cloudwatch_logs" {
-  name = "cloudwatch-logs"
-  role = aws_iam_role.ec2_inference.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "logs:CreateLogGroup",
-          "logs:CreateLogStream",
-          "logs:PutLogEvents",
-        ]
-        Resource = "arn:aws:logs:*:${data.aws_caller_identity.current.account_id}:log-group:/openpi/*"
-      }
-    ]
-  })
-}
-
 resource "aws_iam_instance_profile" "ec2_inference" {
   name = "ec2-ecr-pull"
   role = aws_iam_role.ec2_inference.name

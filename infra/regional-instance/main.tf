@@ -28,12 +28,12 @@ module "regional_inference_instance" {
   allowed_quic_cidr_blocks      = var.allowed_quic_cidr_blocks
   allowed_ssh_cidr_blocks       = var.allowed_ssh_cidr_blocks
   allowed_websocket_cidr_blocks = var.allowed_websocket_cidr_blocks
+  availability_zone             = var.availability_zone
   ami_id                        = var.ami_id
   dlami_ssm_slug                = var.dlami_ssm_slug
   associate_public_ip_address   = var.associate_public_ip_address
   assign_elastic_ip             = var.assign_elastic_ip
   checkpoint_dir                = var.checkpoint_dir
-  cloudwatch_log_group_name     = var.cloudwatch_log_group_name
   container_name                = var.container_name
   default_prompt                = var.default_prompt
   deployment_name               = var.deployment_name

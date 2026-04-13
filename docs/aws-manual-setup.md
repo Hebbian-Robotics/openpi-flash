@@ -137,23 +137,6 @@ aws iam put-role-policy \
     }]
   }'
 
-# CloudWatch logs permissions
-aws iam put-role-policy \
-  --role-name ec2-ecr-pull \
-  --policy-name cloudwatch-logs \
-  --policy-document "{
-    \"Version\": \"2012-10-17\",
-    \"Statement\": [{
-      \"Effect\": \"Allow\",
-      \"Action\": [
-        \"logs:CreateLogGroup\",
-        \"logs:CreateLogStream\",
-        \"logs:PutLogEvents\"
-      ],
-      \"Resource\": \"arn:aws:logs:*:${ACCOUNT_ID}:log-group:/openpi/*\"
-    }]
-  }"
-
 # Create instance profile and attach the role
 aws iam create-instance-profile --instance-profile-name ec2-ecr-pull
 aws iam add-role-to-instance-profile \

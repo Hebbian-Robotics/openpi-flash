@@ -13,15 +13,47 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tracing::{info, warn};
 
-const REQUEST_TYPE_METADATA: u8 = 0x01;
-const REQUEST_TYPE_INFER: u8 = 0x02;
+#[repr(u8)]
+enum RequestType {
+    Metadata = 0x01,
+    Infer = 0x02,
+}
 
-const RESPONSE_TYPE_METADATA: u8 = 0x11;
-const RESPONSE_TYPE_INFER: u8 = 0x12;
-const RESPONSE_TYPE_ERROR: u8 = 0x13;
+#[repr(u8)]
+#[derive(PartialEq, Eq)]
+enum ResponseType {
+    Metadata = 0x11,
+    Infer = 0x12,
+    Error = 0x13,
+}
 
-const QUIC_MESSAGE_TYPE_DATA: u8 = 0x00;
-const QUIC_MESSAGE_TYPE_ERROR: u8 = 0x01;
+impl ResponseType {
+    fn from_u8(value: u8) -> Result<Self> {
+        match value {
+            0x11 => Ok(Self::Metadata),
+            0x12 => Ok(Self::Infer),
+            0x13 => Ok(Self::Error),
+            _ => bail!("Unknown response type: {value:#x}"),
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(PartialEq, Eq)]
+enum QuicMessageType {
+    Data = 0x00,
+    Error = 0x01,
+}
+
+impl QuicMessageType {
+    fn from_u8(value: u8) -> Result<Self> {
+        match value {
+            0x00 => Ok(Self::Data),
+            0x01 => Ok(Self::Error),
+            _ => bail!("Unknown QUIC message type: {value:#x}"),
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -180,19 +212,19 @@ async fn handle_client_connection(
             }
         };
 
-        let (quic_message_type, quic_message_body) =
+        let (raw_quic_message_type, quic_message_body) =
             split_message_type_and_body(&quic_message_payload).context("Invalid QUIC message")?;
-        if quic_message_type == QUIC_MESSAGE_TYPE_ERROR {
-            bail!(
-                "Client sent QUIC error message: {}",
-                String::from_utf8_lossy(quic_message_body)
-            );
-        }
-        if quic_message_type != QUIC_MESSAGE_TYPE_DATA {
-            bail!("Unexpected QUIC message type: {quic_message_type:#x}");
+        match QuicMessageType::from_u8(raw_quic_message_type)? {
+            QuicMessageType::Error => {
+                bail!(
+                    "Client sent QUIC error message: {}",
+                    String::from_utf8_lossy(quic_message_body)
+                );
+            }
+            QuicMessageType::Data => {}
         }
 
-        write_local_backend_request(&mut backend_stream, REQUEST_TYPE_INFER, quic_message_body)
+        write_local_backend_request(&mut backend_stream, RequestType::Infer, quic_message_body)
             .await
             .context("Failed to forward inference request to backend")?;
         let backend_response = read_local_backend_response(&mut backend_stream)
@@ -233,14 +265,15 @@ async fn handle_quic_message_handshake(
     let client_handshake_payload = read_length_prefixed_message(recv_stream)
         .await?
         .ok_or_else(|| anyhow!("Client disconnected before sending handshake"))?;
-    let (quic_message_type, _quic_message_body) =
+    let (raw_quic_message_type, _quic_message_body) =
         split_message_type_and_body(&client_handshake_payload)
             .context("Invalid handshake payload")?;
-    if quic_message_type != QUIC_MESSAGE_TYPE_DATA {
-        bail!("Expected handshake DATA message, got type {quic_message_type:#x}");
+    match QuicMessageType::from_u8(raw_quic_message_type).context("Invalid handshake payload")? {
+        QuicMessageType::Data => {}
+        QuicMessageType::Error => bail!("Client sent error during handshake"),
     }
 
-    write_local_backend_request(backend_stream, REQUEST_TYPE_METADATA, &[])
+    write_local_backend_request(backend_stream, RequestType::Metadata, &[])
         .await
         .context("Failed to request metadata from backend")?;
     let backend_response = read_local_backend_response(backend_stream)
@@ -257,26 +290,23 @@ async fn forward_backend_response_to_quic(
     backend_response: &BackendResponse,
 ) -> Result<()> {
     match backend_response.response_type {
-        RESPONSE_TYPE_METADATA | RESPONSE_TYPE_INFER => {
+        ResponseType::Metadata | ResponseType::Infer => {
             let mut quic_payload = Vec::with_capacity(1 + backend_response.response_body.len());
-            quic_payload.push(QUIC_MESSAGE_TYPE_DATA);
+            quic_payload.push(QuicMessageType::Data as u8);
             quic_payload.extend_from_slice(&backend_response.response_body);
             write_length_prefixed_message(send_stream, &quic_payload).await
         }
-        RESPONSE_TYPE_ERROR => {
+        ResponseType::Error => {
             let mut quic_payload = Vec::with_capacity(1 + backend_response.response_body.len());
-            quic_payload.push(QUIC_MESSAGE_TYPE_ERROR);
+            quic_payload.push(QuicMessageType::Error as u8);
             quic_payload.extend_from_slice(&backend_response.response_body);
             write_length_prefixed_message(send_stream, &quic_payload).await
-        }
-        unexpected_response_type => {
-            bail!("Unexpected local backend response type: {unexpected_response_type:#x}")
         }
     }
 }
 
 struct BackendResponse {
-    response_type: u8,
+    response_type: ResponseType,
     response_body: Vec<u8>,
 }
 
@@ -284,8 +314,10 @@ async fn read_local_backend_response(backend_stream: &mut UnixStream) -> Result<
     let response_payload = read_length_prefixed_message(backend_stream)
         .await?
         .ok_or_else(|| anyhow!("Backend disconnected unexpectedly"))?;
-    let (response_type, response_body) =
+    let (raw_response_type, response_body) =
         split_message_type_and_body(&response_payload).context("Invalid backend response")?;
+    let response_type =
+        ResponseType::from_u8(raw_response_type).context("Invalid backend response type")?;
     Ok(BackendResponse {
         response_type,
         response_body: response_body.to_vec(),
@@ -294,11 +326,11 @@ async fn read_local_backend_response(backend_stream: &mut UnixStream) -> Result<
 
 async fn write_local_backend_request(
     backend_stream: &mut UnixStream,
-    request_type: u8,
+    request_type: RequestType,
     request_body: &[u8],
 ) -> Result<()> {
     let mut framed_request = Vec::with_capacity(1 + request_body.len());
-    framed_request.push(request_type);
+    framed_request.push(request_type as u8);
     framed_request.extend_from_slice(request_body);
     write_length_prefixed_message(backend_stream, &framed_request).await
 }
