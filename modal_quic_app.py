@@ -114,7 +114,7 @@ def serve_quic(
         print(f"Relay fallback: {relay_addr[0]}:{relay_addr[1]}")
     else:
         print("No relay configured — direct hole punch only")
-    print("Test with: uv run python test_modal_quic.py")
+    print("Test with: uv run python main.py test modal-quic")
 
     server = QuicPolicyServer(
         policy=policy,

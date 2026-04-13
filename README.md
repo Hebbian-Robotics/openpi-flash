@@ -1,6 +1,6 @@
-# openpi-hosting
+# openpi-flash
 
-Hosted inference service for [openpi](https://github.com/Physical-Intelligence/openpi). Wraps openpi's policy inference in a WebSocket server with concurrency control, health checks, and optional QUIC transport. Supports deployment on AWS EC2 (Docker) or [Modal](https://modal.com).
+Real-time inference engine for [openpi](https://github.com/Physical-Intelligence/openpi). Optimized for low-latency policy serving over QUIC and WebSocket, with torch.compile acceleration, concurrency control, and health monitoring. Deploy on AWS EC2 (Docker) or [Modal](https://modal.com).
 
 ## Prerequisites
 
@@ -14,13 +14,13 @@ Clone both repos side by side under a shared parent directory:
 
 ```bash
 git clone https://github.com/Physical-Intelligence/openpi
-git clone https://github.com/Hebbian-Robotics/openpi-hosting
+git clone https://github.com/Hebbian-Robotics/openpi-flash
 ```
 
 Then install dependencies:
 
 ```bash
-cd openpi-hosting
+cd openpi-flash
 uv venv --python 3.11
 uv sync
 ```
@@ -48,7 +48,7 @@ cp config.example.json config.json
 ## Running locally
 
 ```bash
-INFERENCE_CONFIG_PATH=config.json uv run python -m hosting.serve
+uv run python main.py serve --config config.json
 ```
 
 Set `OPENPI_PYTORCH_COMPILE_MODE` to override the serving compile mode at runtime.
@@ -61,15 +61,14 @@ cd quic-sidecar && cargo build
 cd ..
 OPENPI_QUIC_BACKEND=rust-sidecar \
 OPENPI_QUIC_SIDECAR_BINARY=$PWD/quic-sidecar/target/debug/openpi-quic-sidecar \
-INFERENCE_CONFIG_PATH=config.json \
-uv run python -m hosting.serve
+uv run python main.py serve --config config.json
 ```
 
 ## Running with Docker
 
 ```bash
 # Build (from this directory)
-docker build .. -t openpi-hosted -f Dockerfile
+docker build .. -t openpi-flash -f Dockerfile
 
 # Run
 docker run --rm --gpus=all \
@@ -77,7 +76,7 @@ docker run --rm --gpus=all \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 \
   -p 5555:5555/udp \
-  openpi-hosted
+  openpi-flash
 ```
 
 Or with Docker Compose:
@@ -180,7 +179,7 @@ uv run modal run modal_tunnel_app.py
 
 The tunnel address is stored in a Modal Dict (`openpi-tunnel-info`) so clients can discover it automatically.
 
-### QUIC portal mode (experimental)
+### QUIC portal mode (experimental, unreliable)
 
 `modal_quic_app.py` uses [quic-portal](https://github.com/Hebbian-Robotics/quic-portal) for direct peer-to-peer QUIC transport with automatic NAT traversal via STUN + UDP hole punching. This avoids TCP head-of-line blocking for potentially lower latency than the tunnel mode.
 
@@ -188,7 +187,9 @@ The tunnel address is stored in a Modal Dict (`openpi-tunnel-info`) so clients c
 uv run modal run modal_quic_app.py
 ```
 
-Connection is coordinated through a shared Modal Dict (`openpi-quic-info`) — no URL or port to manage. Note: NAT traversal only works with "easy" NATs. Fall back to the tunnel mode if connectivity issues arise.
+Connection is coordinated through a shared Modal Dict (`openpi-quic-info`) — no URL or port to manage.
+
+> **Warning:** NAT traversal on Modal is unreliable. Modal containers are assigned unpredictable NAT types, and hole punching frequently fails. Expect connection failures. For reliable QUIC, deploy on EC2 where the server has a stable public IP. For Modal, use WebSocket or the tunnel mode instead.
 
 ### QUIC relay fallback (WIP)
 
@@ -222,31 +223,31 @@ The Modal app reads `.env` via `modal.Secret.from_dotenv()` and injects `QUIC_RE
 
 All test scripts run a warmup inference followed by 5 timed iterations, reporting per-iteration timing and a summary with mean/min/max.
 
-#### EC2/Docker or Modal ASGI
+#### QUIC (recommended for EC2/Docker)
 
 ```bash
-uv run python test_server.py ws://localhost:8000          # EC2/Docker (plain)
-uv run python test_server.py wss://$EC2_HTTPS_HOST   # EC2 with HTTPS
-uv run python test_server.py wss://$MODAL_HOSTNAME   # Modal
+uv run python main.py test quic localhost
+uv run python main.py test quic $EC2_HOST --quic-port 5555 --ws-port 8000
 ```
 
-#### Direct QUIC on EC2/Docker
+#### WebSocket (fallback, or Modal)
 
 ```bash
-uv run python test_quic.py localhost
-uv run python test_quic.py $EC2_HOST --quic-port 5555 --ws-port 8000
+uv run python main.py test ws ws://localhost:8000          # EC2/Docker (plain)
+uv run python main.py test ws wss://$EC2_HTTPS_HOST   # EC2 with HTTPS
+uv run python main.py test ws wss://$MODAL_HOSTNAME   # Modal
 ```
 
 #### Tunnel mode (`modal_tunnel_app.py`)
 
 ```bash
-uv run python test_modal_tunnel.py
+uv run python main.py test modal-tunnel
 ```
 
 #### QUIC portal mode (`modal_quic_app.py`)
 
 ```bash
-uv run python test_modal_quic.py
+uv run python main.py test modal-quic
 ```
 
 ### Model weight caching
@@ -261,7 +262,23 @@ uv run modal volume ls openpi-model-weights
 
 ## Connecting
 
-Use the standard `openpi-client`:
+### QUIC (recommended for EC2/Docker)
+
+QUIC provides lower and more consistent latency than WebSocket for direct connections. Use it as the default transport for EC2/Docker deployments where the server has a stable public IP and UDP is not blocked.
+
+> **Note:** On Modal, QUIC requires NAT traversal (STUN + UDP hole punching) which is unreliable — it fails frequently depending on the NAT type assigned to the container. Use WebSocket for Modal deployments.
+
+```python
+from hosting.direct_quic_client_policy import DirectQuicClientPolicy
+
+client = DirectQuicClientPolicy(host="your-ec2-ip", port=5555)
+action = client.infer(observation)
+client.close()
+```
+
+### WebSocket (fallback)
+
+If QUIC doesn't work (e.g. UDP blocked by firewall, or connecting from a browser), fall back to WebSocket:
 
 ```python
 from openpi_client import websocket_client_policy as wcp
@@ -344,13 +361,13 @@ aws ecr get-login-password --region us-west-2 | \
   docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
 # Pull and run
-docker pull "${ECR_REGISTRY}/openpi-hosted:latest"
+docker pull "${ECR_REGISTRY}/openpi-flash:latest"
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
-  "${ECR_REGISTRY}/openpi-hosted:latest"
+  "${ECR_REGISTRY}/openpi-flash:latest"
 ```
 
 ### Updating to a new version
@@ -361,17 +378,17 @@ ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
 
 aws ecr get-login-password --region us-west-2 | \
   docker login --username AWS --password-stdin "${ECR_REGISTRY}"
-docker pull "${ECR_REGISTRY}/openpi-hosted:latest"
+docker pull "${ECR_REGISTRY}/openpi-flash:latest"
 docker stop openpi-inference && docker rm openpi-inference
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
-  "${ECR_REGISTRY}/openpi-hosted:latest"
+  "${ECR_REGISTRY}/openpi-flash:latest"
 ```
 
-You can pin to a specific commit: `openpi-hosted:<commit-sha>` instead of `:latest`.
+You can pin to a specific commit: `openpi-flash:<commit-sha>` instead of `:latest`.
 
 ### Pushing dev images
 
@@ -380,8 +397,8 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.us-west-2.amazonaws.com"
 
 # Build and push with a dev tag
-docker build .. -t "${ECR_REGISTRY}/openpi-hosted:dev" -f Dockerfile
-docker push "${ECR_REGISTRY}/openpi-hosted:dev"
+docker build .. -t "${ECR_REGISTRY}/openpi-flash:dev" -f Dockerfile
+docker push "${ECR_REGISTRY}/openpi-flash:dev"
 ```
 
 ECR keeps `latest` plus the 3 most recent images; older ones are cleaned up automatically.
@@ -395,11 +412,16 @@ ECR keeps `latest` plus the 3 most recent images; older ones are cleaned up auto
 ## Architecture
 
 ```
-client -> WebSocket -> WebsocketPolicyServer -> Policy.infer() -> response
-                         |
-                         +-- /healthz endpoint (HTTP 200)
-                         +-- server_timing (infer_ms, prev_total_ms)
-                         +-- msgpack binary protocol
+              QUIC (UDP 5555, recommended)
+client ─┬──────────────────────────────────> QUIC sidecar ─┐
+        │                                                   ├─> Policy.infer() -> response
+        └─ WebSocket (TCP 8000, fallback) ─> WS server ────┘
+                                               |
+                                               +-- /healthz endpoint (HTTP 200)
+                                               +-- server_timing (infer_ms, prev_total_ms)
+                                               +-- msgpack binary protocol
 ```
+
+Both transports share the same policy and use msgpack binary protocol. QUIC is the recommended transport for direct connections — it provides lower and more consistent latency than WebSocket. Fall back to WebSocket if UDP is blocked or when connecting from a browser.
 
 The server reuses openpi's `create_trained_policy()` and `Policy.infer()` directly. No openpi code is modified. Both JAX and PyTorch checkpoints are supported (auto-detected).

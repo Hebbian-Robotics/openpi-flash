@@ -1,7 +1,7 @@
 [project]
-name = "openpi-hosting"
+name = "openpi-flash"
 version = "0.1.0"
-description = "Hosted inference service for openpi"
+description = "Real-time inference engine for openpi"
 license = { file = "LICENSE" }
 authors = [{ name = "Hebbian Robotics" }]
 requires-python = ">=3.11,<3.13"
@@ -14,6 +14,7 @@ dependencies = [
     "gsutil>=5.36",
     "quic-portal>=0.1.13",
     "python-dotenv>=1.2.2",
+    "typer>=0.15.0",
 ]
 
 [tool.uv]
@@ -73,5 +74,5 @@ unused-ignore-comment = "error"
 possibly-unresolved-reference = "error"
 
 [tool.ty.src]
-# Test scripts use runtime sys.path manipulation that ty cannot resolve.
-exclude = ["test_server.py", "test_modal_tunnel.py", "test_modal_quic.py", "test_quic.py"]
+# Test scripts import from openpi which is a sibling-repo editable dependency.
+exclude = ["tests/"]

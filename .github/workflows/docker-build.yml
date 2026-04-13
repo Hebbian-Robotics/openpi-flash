@@ -10,7 +10,7 @@ on:
 
 env:
   AWS_REGION: us-west-2
-  ECR_REPOSITORY: openpi-hosted
+  ECR_REPOSITORY: openpi-flash
   ECR_REGISTRY: ${{ vars.AWS_ECR_REGISTRY }}
   AWS_ROLE_TO_ASSUME: ${{ vars.AWS_ROLE_TO_ASSUME }}
 

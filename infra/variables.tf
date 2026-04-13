@@ -19,13 +19,13 @@ variable "github_org" {
 variable "github_repo" {
   description = "GitHub repository name for CI/CD access"
   type        = string
-  default     = "openpi-hosting"
+  default     = "openpi-flash"
 }
 
 variable "ecr_repository_name" {
   description = "Name of the ECR repository for Docker images"
   type        = string
-  default     = "openpi-hosted"
+  default     = "openpi-flash"
 }
 
 variable "checkpoint_bucket_name" {

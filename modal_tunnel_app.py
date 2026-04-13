@@ -94,7 +94,7 @@ def serve_tunnel(
         tunnel_dict["url"] = f"ws://{host}:{port}"
 
         print(f"\nTunnel available at: ws://{host}:{port}")
-        print("Test with: uv run python test_modal_tunnel.py")
+        print("Test with: uv run python main.py test modal-tunnel")
 
         # Keep alive until timeout or killed.
         server_thread.join()

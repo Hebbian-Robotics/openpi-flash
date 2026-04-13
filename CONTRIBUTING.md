@@ -2,13 +2,13 @@
 
 ## Project Overview
 
-openpi-hosting is a hosted inference service that wraps OpenPI policy models in WebSocket and QUIC transports. It supports deployment on AWS EC2 (Docker Compose) and Modal (serverless).
+openpi-flash is a real-time inference engine that serves OpenPI policy models over QUIC and WebSocket transports with torch.compile acceleration. It supports deployment on AWS EC2 (Docker Compose) and Modal (serverless).
 
 ## Running Locally
 
 ```bash
 # Local development
-INFERENCE_CONFIG_PATH=config.json uv run python -m hosting.serve
+uv run python main.py serve --config config.json
 
 # Docker (requires config.json)
 docker compose up --build
@@ -30,16 +30,16 @@ uv run modal run modal_quic_app.py
 
 ```bash
 # Smoke test against a running instance
-uv run python test_server.py ws://localhost:8000
+uv run python main.py test ws ws://localhost:8000
 
 # Smoke test tunnel variant
-uv run python test_modal_tunnel.py
+uv run python main.py test modal-tunnel
 
 # Smoke test QUIC portal variant (no URL needed — discovery via Modal Dict)
-uv run python test_modal_quic.py
+uv run python main.py test modal-quic
 
 # Smoke test direct QUIC for EC2/Docker
-uv run python test_quic.py localhost
+uv run python main.py test quic localhost
 ```
 
 ## Code Quality

@@ -1,4 +1,4 @@
-"""Hosted inference server: WebSocket (TCP) + QUIC (UDP).
+"""openpi-flash inference server: WebSocket (TCP) + QUIC (UDP).
 
 Loads the policy once and serves it over both transports simultaneously.
 WebSocket runs on the configured port (default 8000, TCP), QUIC listens on
@@ -8,7 +8,7 @@ transports.
 For Modal deployments, use the dedicated modal_*.py entry points instead.
 
 Usage:
-    INFERENCE_CONFIG_PATH=config.json python -m hosting.serve
+    uv run python main.py serve --config config.json
 """
 
 import dataclasses

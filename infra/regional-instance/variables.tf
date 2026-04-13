@@ -78,19 +78,19 @@ variable "assign_elastic_ip" {
 variable "allowed_ssh_cidr_blocks" {
   description = "CIDR blocks allowed to SSH to the instance"
   type        = list(string)
-  default     = []
+  default     = ["0.0.0.0/0"]
 }
 
 variable "allowed_websocket_cidr_blocks" {
   description = "CIDR blocks allowed to reach TCP 8000"
   type        = list(string)
-  default     = []
+  default     = ["0.0.0.0/0"]
 }
 
 variable "allowed_quic_cidr_blocks" {
   description = "CIDR blocks allowed to reach UDP 5555"
   type        = list(string)
-  default     = []
+  default     = ["0.0.0.0/0"]
 }
 
 variable "allowed_https_cidr_blocks" {

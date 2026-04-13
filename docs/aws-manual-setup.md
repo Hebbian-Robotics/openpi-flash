@@ -10,12 +10,12 @@ These resources are created once in your primary region and shared across all de
 
 ```bash
 aws ecr create-repository \
-  --repository-name openpi-hosted \
+  --repository-name openpi-flash \
   --region us-west-2
 
 # Lifecycle policy: keep latest + 3 most recent images
 aws ecr put-lifecycle-policy \
-  --repository-name openpi-hosted \
+  --repository-name openpi-flash \
   --region us-west-2 \
   --lifecycle-policy-text '{
     "rules": [{
@@ -64,7 +64,7 @@ aws iam create-role \
           \"token.actions.githubusercontent.com:aud\": \"sts.amazonaws.com\"
         },
         \"StringLike\": {
-          \"token.actions.githubusercontent.com:sub\": \"repo:Hebbian-Robotics/openpi-hosting:*\"
+          \"token.actions.githubusercontent.com:sub\": \"repo:Hebbian-Robotics/openpi-flash:*\"
         }
       }
     }]
@@ -93,7 +93,7 @@ aws iam put-role-policy \
           \"ecr:PutImage\",
           \"ecr:UploadLayerPart\"
         ],
-        \"Resource\": \"arn:aws:ecr:us-west-2:${ACCOUNT_ID}:repository/openpi-hosted\"
+        \"Resource\": \"arn:aws:ecr:us-west-2:${ACCOUNT_ID}:repository/openpi-flash\"
       }
     ]
   }"
@@ -265,7 +265,7 @@ aws ecr get-login-password --region us-west-2 | \
   docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
 # Pull
-docker pull "${ECR_REGISTRY}/openpi-hosted:latest"
+docker pull "${ECR_REGISTRY}/openpi-flash:latest"
 
 # Create config
 mkdir -p ~/openpi && cd ~/openpi
@@ -285,7 +285,7 @@ docker run -d --restart unless-stopped --gpus=all \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \
-  "${ECR_REGISTRY}/openpi-hosted:latest"
+  "${ECR_REGISTRY}/openpi-flash:latest"
 ```
 
 ### 4. Optional: Elastic IP

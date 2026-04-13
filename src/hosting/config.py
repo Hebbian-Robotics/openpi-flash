@@ -1,4 +1,4 @@
-"""Service configuration for the hosted inference server."""
+"""Service configuration for the openpi-flash inference engine."""
 
 import json
 import os
@@ -31,7 +31,7 @@ def load_json_config(config_cls: type[_T], config_path: str | None = None) -> _T
 
 
 class ServiceConfig(BaseModel):
-    """Top-level configuration for the hosted inference service."""
+    """Top-level configuration for the openpi-flash inference engine."""
 
     # Model settings
     # Exception: kept as str because valid names are defined by the openpi registry,

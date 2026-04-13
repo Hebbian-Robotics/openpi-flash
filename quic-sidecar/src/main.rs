@@ -26,7 +26,7 @@ const QUIC_MESSAGE_TYPE_ERROR: u8 = 0x01;
 #[derive(Parser, Debug)]
 #[command(
     name = "openpi-quic-sidecar",
-    about = "Rust QUIC sidecar for openpi-hosting"
+    about = "Rust QUIC sidecar for openpi-flash"
 )]
 struct Args {
     /// UDP port to listen on for direct QUIC clients.

@@ -1,15 +1,15 @@
-# Dockerfile for the hosted inference service.
+# Dockerfile for the openpi-flash inference engine.
 # Based on openpi's scripts/docker/serve_policy.Dockerfile
 #
 # Build (from ~/openpi/hosting/):
-#   docker build .. -t openpi-hosted -f Dockerfile
+#   docker build .. -t openpi-flash -f Dockerfile
 #
 # Run:
 #   docker run --rm -it --gpus=all \
 #     -v ./config.json:/config/config.json:ro \
 #     -e INFERENCE_CONFIG_PATH=/config/config.json \
 #     -p 8000:8000 -p 5555:5555/udp \
-#     openpi-hosted
+#     openpi-flash
 
 FROM rust:1.88-bookworm AS quic-sidecar-builder
 
@@ -65,6 +65,7 @@ RUN /.venv/bin/python -c "import transformers; print(transformers.__file__)" | x
 COPY openpi/src /app/openpi-src
 COPY openpi/packages/openpi-client/src /app/openpi-client-src
 COPY hosting/src /app/hosting-src
+COPY hosting/main.py /app/main.py
 ENV PYTHONPATH="/app/openpi-src:/app/openpi-client-src:/app/hosting-src"
 
 # PyTorch inductor cache — persists within container lifetime (use a volume
@@ -76,4 +77,4 @@ ENV TORCHINDUCTOR_FX_GRAPH_CACHE=1
 ENV OPENPI_DATA_HOME=/cache/models
 EXPOSE 5555/udp
 
-CMD ["python", "-m", "hosting.serve"]
+CMD ["python", "main.py", "serve"]

@@ -2,7 +2,7 @@
 name = "openpi-quic-sidecar"
 version = "0.1.0"
 edition = "2021"
-description = "Rust QUIC transport sidecar for openpi-hosting"
+description = "Rust QUIC transport sidecar for openpi-flash"
 license = "MIT"
 authors = ["Hebbian Robotics"]
 
