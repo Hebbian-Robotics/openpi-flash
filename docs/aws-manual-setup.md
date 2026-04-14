@@ -99,7 +99,7 @@ aws iam put-role-policy \
   }"
 ```
 
-### 4. IAM role for EC2 instances (ECR pull + S3 read)
+### 4. IAM role for EC2 instances (ECR pull)
 
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -121,51 +121,11 @@ aws iam attach-role-policy \
   --role-name ec2-ecr-pull \
   --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
 
-# S3 checkpoint read permissions
-aws iam put-role-policy \
-  --role-name ec2-ecr-pull \
-  --policy-name s3-checkpoint-read \
-  --policy-document '{
-    "Version": "2012-10-17",
-    "Statement": [{
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:ListBucket"],
-      "Resource": [
-        "arn:aws:s3:::openpi-checkpoints-us-west-2",
-        "arn:aws:s3:::openpi-checkpoints-us-west-2/*"
-      ]
-    }]
-  }'
-
 # Create instance profile and attach the role
 aws iam create-instance-profile --instance-profile-name ec2-ecr-pull
 aws iam add-role-to-instance-profile \
   --instance-profile-name ec2-ecr-pull \
   --role-name ec2-ecr-pull
-```
-
-### 5. S3 bucket for checkpoints
-
-```bash
-aws s3 mb s3://openpi-checkpoints-us-west-2 --region us-west-2
-
-# Enable versioning
-aws s3api put-bucket-versioning \
-  --bucket openpi-checkpoints-us-west-2 \
-  --versioning-configuration Status=Enabled
-
-# Enable encryption
-aws s3api put-bucket-encryption \
-  --bucket openpi-checkpoints-us-west-2 \
-  --server-side-encryption-configuration '{
-    "Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]
-  }'
-
-# Block public access
-aws s3api put-public-access-block \
-  --bucket openpi-checkpoints-us-west-2 \
-  --public-access-block-configuration \
-    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 ```
 
 ## Per-instance setup
@@ -255,14 +215,22 @@ mkdir -p ~/openpi && cd ~/openpi
 cat > config.json << 'EOF'
 {
   "model_config_name": "pi05_aloha",
-  "checkpoint_dir": "s3://openpi-checkpoints-us-west-2/pi05_base_pytorch",
+  "checkpoint_dir": "/cache/models/pi05_base_openpi",
   "port": 8000
 }
 EOF
 
+# Prepare local checkpoint cache from upstream sources
+docker volume create openpi-inference-cache
+docker run --rm \
+  -v openpi-inference-cache:/cache \
+  "${ECR_REGISTRY}/openpi-flash:latest" \
+  python main.py prepare-checkpoint
+
 # Run
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
+  -v openpi-inference-cache:/cache \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \

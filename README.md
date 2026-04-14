@@ -50,8 +50,14 @@ Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-
 ## Running locally
 
 ```bash
+# Prepare the default local checkpoint from upstream sources
+uv run python main.py prepare-checkpoint
+
+# Serve
 uv run python main.py serve --config config.json
 ```
+
+For non-Docker local runs, point `checkpoint_dir` at the prepared checkpoint in your local OpenPI cache, typically `$HOME/.cache/openpi/pi05_base_openpi`.
 
 Local serving uses the Rust QUIC sidecar for direct QUIC. If you are not using the Docker image, build the sidecar locally and point the server at the binary:
 
@@ -68,9 +74,17 @@ uv run python main.py serve --config config.json
 # Build (from this directory)
 docker build .. -t openpi-flash -f Dockerfile
 
+# Prepare the checkpoint cache once
+docker volume create openpi-inference-cache
+docker run --rm \
+  -v openpi-inference-cache:/cache \
+  openpi-flash \
+  python main.py prepare-checkpoint
+
 # Run
 docker run --rm --gpus=all \
   -v ./config.json:/config/config.json:ro \
+  -v openpi-inference-cache:/cache \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 \
   -p 5555:5555/udp \
@@ -289,29 +303,31 @@ curl "https://$MODAL_HOSTNAME/healthz"
 
 ### AWS infrastructure setup
 
-The shared AWS resources (ECR, IAM roles, S3 bucket) can be set up with Terraform or manually:
+The shared AWS resources (ECR and IAM roles) can be set up with Terraform or manually:
 
 - **Terraform/OpenTofu (recommended):** See [`infra/`](infra/) — run `terraform apply` to create everything
 - **Manual CLI:** See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md) for step-by-step `aws` commands
 
-### PyTorch checkpoint
+### Docker checkpoint preparation
 
-The Docker image runs PyTorch inference, which requires a pre-converted checkpoint. The default JAX checkpoints from `gs://openpi-assets` won't work in the Docker image (no JAX dependencies).
+EC2 and Docker deployments prepare a local OpenPI-compatible checkpoint in `/cache/models/pi05_base_openpi` before the inference server starts.
 
-A pre-converted checkpoint is stored in S3:
+The preparation step combines:
 
-```json
-{
-  "checkpoint_dir": "s3://openpi-checkpoints-us-west-2/pi05_base_pytorch"
-}
-```
+- Hugging Face weights from `lerobot/pi05_base`
+- normalization stats from `gs://openpi-assets/checkpoints/pi05_base/assets`
 
-The checkpoint is downloaded on first startup and cached in `/cache/models`. To convert a different model, see [Converting checkpoints to PyTorch](#converting-checkpoints-to-pytorch) and upload to S3:
+Run it manually with:
 
 ```bash
-modal volume get openpi-model-weights <output-name> /tmp/<output-name>
-aws s3 sync /tmp/<output-name>/<output-name>/ s3://openpi-checkpoints-us-west-2/<output-name>/
+docker volume create openpi-inference-cache
+docker run --rm \
+  -v openpi-inference-cache:/cache \
+  "${ECR_REGISTRY}/openpi-flash:latest" \
+  python main.py prepare-checkpoint
 ```
+
+`docker compose --profile openpi up --build` and the Terraform EC2 bootstrap run this preparation step automatically.
 
 ### Launching an EC2 instance
 
@@ -319,7 +335,7 @@ See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md) for full details. The
 
 1. Launch a **g6e.xlarge** (L40S GPU) with **Ubuntu 24.04**, **100 GiB** gp3, IAM profile `ec2-ecr-pull`
 2. Install Docker + NVIDIA Container Toolkit
-3. Pull and run:
+3. Pull, prepare the checkpoint, and run:
 
 ```bash
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -331,8 +347,14 @@ aws ecr get-login-password --region us-west-2 | \
 
 # Pull and run
 docker pull "${ECR_REGISTRY}/openpi-flash:latest"
+docker volume create openpi-inference-cache
+docker run --rm \
+  -v openpi-inference-cache:/cache \
+  "${ECR_REGISTRY}/openpi-flash:latest" \
+  python main.py prepare-checkpoint
 docker run -d --restart unless-stopped --gpus=all \
   -v $(pwd)/config.json:/config/config.json:ro \
+  -v openpi-inference-cache:/cache \
   -e INFERENCE_CONFIG_PATH=/config/config.json \
   -p 8000:8000 -p 5555:5555/udp \
   --name openpi-inference \

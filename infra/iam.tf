@@ -69,7 +69,7 @@ resource "aws_iam_role_policy" "github_actions_ecr_push" {
 }
 
 # ---------------------------------------------------------------------------
-# EC2 role: instances pull images from ECR and checkpoints from S3
+# EC2 role: instances pull images from ECR
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "ec2_inference" {
@@ -92,28 +92,6 @@ resource "aws_iam_role" "ec2_inference" {
 resource "aws_iam_role_policy_attachment" "ec2_ecr_pull_read_only" {
   role       = aws_iam_role.ec2_inference.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-resource "aws_iam_role_policy" "ec2_s3_checkpoint_read" {
-  name = "s3-checkpoint-read"
-  role = aws_iam_role.ec2_inference.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:ListBucket",
-        ]
-        Resource = [
-          aws_s3_bucket.checkpoints.arn,
-          "${aws_s3_bucket.checkpoints.arn}/*",
-        ]
-      }
-    ]
-  })
 }
 
 resource "aws_iam_instance_profile" "ec2_inference" {

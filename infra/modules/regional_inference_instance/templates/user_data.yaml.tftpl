@@ -23,6 +23,16 @@ write_files:
       docker rm -f ${container_name} || true
       docker volume create openpi-inference-cache || true
       docker pull ${image_url}
+%{ if prepare_checkpoint ~}
+
+      docker run --rm \
+        -v openpi-inference-cache:/cache \
+        ${image_url} \
+        python main.py prepare-checkpoint \
+        --model-id ${checkpoint_prep_model_id} \
+        --openpi-assets-uri ${checkpoint_prep_openpi_assets_uri} \
+        --output-dir ${checkpoint_prep_output_dir}
+%{ endif ~}
 
       docker run -d --restart unless-stopped --gpus=all \
         -v /etc/openpi/config.json:/config/config.json:ro \

@@ -121,8 +121,32 @@ variable "model_config_name" {
 }
 
 variable "checkpoint_dir" {
-  description = "Checkpoint directory for the model, typically an s3:// path"
+  description = "Checkpoint directory for the model, typically the locally prepared path in /cache/models"
   type        = string
+}
+
+variable "prepare_checkpoint" {
+  description = "Whether to run the one-shot Docker checkpoint preparation step before starting inference"
+  type        = bool
+  default     = true
+}
+
+variable "checkpoint_prep_model_id" {
+  description = "Hugging Face model ID used by the Docker checkpoint preparation step"
+  type        = string
+  default     = "lerobot/pi05_base"
+}
+
+variable "checkpoint_prep_openpi_assets_uri" {
+  description = "OpenPI assets URI containing normalization stats used by the Docker checkpoint preparation step"
+  type        = string
+  default     = "gs://openpi-assets/checkpoints/pi05_base/assets"
+}
+
+variable "checkpoint_prep_output_dir" {
+  description = "Output directory written by the Docker checkpoint preparation step"
+  type        = string
+  default     = "/cache/models/pi05_base_openpi"
 }
 
 variable "openpi_pytorch_compile_mode" {

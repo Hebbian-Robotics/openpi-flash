@@ -1,6 +1,7 @@
 """openpi-flash CLI: unified entrypoint for serve and test commands.
 
 Usage:
+    uv run python main.py prepare-checkpoint
     uv run python main.py serve [--config config.json]
     uv run python main.py test ws <url>
     uv run python main.py test quic <host> [--quic-port 5555] [--ws-port 8000]
@@ -9,6 +10,7 @@ Usage:
 """
 
 import os
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -20,6 +22,36 @@ app = typer.Typer(
 )
 test_app = typer.Typer(help="Run smoke tests against a running server.", no_args_is_help=True)
 app.add_typer(test_app, name="test")
+
+
+@app.command(name="prepare-checkpoint")
+def prepare_checkpoint(
+    model_id: Annotated[
+        str,
+        typer.Option(help="Hugging Face model ID for the upstream LeRobot checkpoint."),
+    ] = "lerobot/pi05_base",
+    openpi_assets_uri: Annotated[
+        str,
+        typer.Option(help="OpenPI assets URI containing normalization statistics."),
+    ] = "gs://openpi-assets/checkpoints/pi05_base/assets",
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(help="Local directory where the assembled checkpoint should be written."),
+    ] = None,
+    force_download: Annotated[
+        bool,
+        typer.Option(help="Re-download upstream files and rebuild the prepared checkpoint."),
+    ] = False,
+) -> None:
+    """Prepare a local OpenPI-compatible checkpoint from upstream sources."""
+    from hosting.prepare_checkpoint import prepare_openpi_compatible_checkpoint
+
+    prepare_openpi_compatible_checkpoint(
+        model_id=model_id,
+        openpi_assets_uri=openpi_assets_uri,
+        output_dir=output_dir,
+        force_download=force_download,
+    )
 
 
 @app.command()

@@ -1,9 +1,21 @@
 services:
+  prepare-checkpoint:
+    profiles: ["openpi"]
+    build:
+      context: ..
+      dockerfile: hosting/Dockerfile
+    command: ["python", "main.py", "prepare-checkpoint"]
+    volumes:
+      - inference-cache:/cache
+
   inference:
     profiles: ["openpi"]
     build:
       context: ..
       dockerfile: hosting/Dockerfile
+    depends_on:
+      prepare-checkpoint:
+        condition: service_completed_successfully
     environment:
       - INFERENCE_CONFIG_PATH=/config/config.json
     volumes:

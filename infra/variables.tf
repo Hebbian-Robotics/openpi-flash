@@ -28,12 +28,6 @@ variable "ecr_repository_name" {
   default     = "openpi-flash"
 }
 
-variable "checkpoint_bucket_name" {
-  description = "S3 bucket name for PyTorch model checkpoints"
-  type        = string
-  default     = "openpi-checkpoints-us-west-2"
-}
-
 variable "ecr_max_untagged_images" {
   description = "Number of recent untagged images to keep (in addition to 'latest')"
   type        = number

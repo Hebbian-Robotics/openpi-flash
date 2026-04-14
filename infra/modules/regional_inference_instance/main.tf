@@ -63,11 +63,11 @@ locals {
 
   effective_service_config_json = jsonencode(
     {
-      model_config_name       = var.model_config_name
-      checkpoint_dir          = var.checkpoint_dir
-      default_prompt          = var.default_prompt
-      port                    = 8000
-      quic_port               = 5555
+      model_config_name = var.model_config_name
+      checkpoint_dir    = var.checkpoint_dir
+      default_prompt    = var.default_prompt
+      port              = 8000
+      quic_port         = 5555
     }
   )
 
@@ -166,13 +166,17 @@ resource "aws_instance" "inference" {
   user_data = templatefile(
     "${path.module}/templates/user_data.yaml.tftpl",
     {
-      config_json                 = local.effective_service_config_json
-      container_name              = var.container_name
-      ecr_region                  = var.ecr_region
-      ecr_registry_host           = local.ecr_registry_host
-      extra_bootstrap_commands    = var.extra_bootstrap_commands
-      image_url                   = local.effective_image_url
-      openpi_pytorch_compile_mode = var.openpi_pytorch_compile_mode
+      config_json                       = local.effective_service_config_json
+      checkpoint_prep_model_id          = var.checkpoint_prep_model_id
+      checkpoint_prep_openpi_assets_uri = var.checkpoint_prep_openpi_assets_uri
+      checkpoint_prep_output_dir        = var.checkpoint_prep_output_dir
+      container_name                    = var.container_name
+      ecr_region                        = var.ecr_region
+      ecr_registry_host                 = local.ecr_registry_host
+      extra_bootstrap_commands          = var.extra_bootstrap_commands
+      image_url                         = local.effective_image_url
+      openpi_pytorch_compile_mode       = var.openpi_pytorch_compile_mode
+      prepare_checkpoint                = var.prepare_checkpoint
     }
   )
 

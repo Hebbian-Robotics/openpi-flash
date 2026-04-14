@@ -2,7 +2,7 @@
 
 Terraform configs for the shared AWS infrastructure that supports openpi-flash. These resources are created once and shared across all EC2 inference instances.
 
-For region-specific EC2 deployments, use [`regional-instance/`](./regional-instance/). Keep the shared root and the regional EC2 root separate so you can deploy the same server shape into different regions without duplicating ECR, S3, or IAM resources.
+For region-specific EC2 deployments, use [`regional-instance/`](./regional-instance/). Keep the shared root and the regional EC2 root separate so you can deploy the same server shape into different regions without duplicating ECR or IAM resources.
 
 ## What's managed
 
@@ -12,8 +12,7 @@ For region-specific EC2 deployments, use [`regional-instance/`](./regional-insta
 | ECR lifecycle policy | Auto-cleanup: keeps `latest` + 3 most recent images |
 | IAM OIDC provider | GitHub Actions federates into AWS without static creds |
 | IAM role `github-actions-ecr-push` | CI pushes images to ECR |
-| IAM role `ec2-ecr-pull` + instance profile | EC2 pulls images from ECR, checkpoints from S3 |
-| S3 bucket | Stores pre-converted PyTorch model checkpoints |
+| IAM role `ec2-ecr-pull` + instance profile | EC2 pulls images from ECR |
 
 ## What's NOT managed
 
@@ -52,10 +51,6 @@ terraform import aws_iam_role.github_actions_ecr_push github-actions-ecr-push
 terraform import aws_iam_role.ec2_inference ec2-ecr-pull
 terraform import aws_iam_role_policy_attachment.ec2_ecr_pull_read_only ec2-ecr-pull/arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
 terraform import aws_iam_instance_profile.ec2_inference ec2-ecr-pull
-terraform import aws_s3_bucket.checkpoints openpi-checkpoints-us-west-2
-terraform import aws_s3_bucket_versioning.checkpoints openpi-checkpoints-us-west-2
-terraform import aws_s3_bucket_server_side_encryption_configuration.checkpoints openpi-checkpoints-us-west-2
-terraform import aws_s3_bucket_public_access_block.checkpoints openpi-checkpoints-us-west-2
 ```
 
 After importing, run `terraform plan` to verify no unexpected changes.
@@ -69,7 +64,6 @@ aws_region             = "us-west-2"
 aws_profile            = "your-profile"
 github_org             = "Hebbian-Robotics"
 github_repo            = "openpi-flash"
-checkpoint_bucket_name = "openpi-checkpoints-us-west-2"
 ```
 
 ### Outputs
@@ -79,7 +73,6 @@ After applying, Terraform prints values needed by CI and EC2 setup:
 ```bash
 terraform output
 # ecr_repository_url        = "<account-id>.dkr.ecr.us-west-2.amazonaws.com/openpi-flash"
-# checkpoint_bucket_name    = "openpi-checkpoints-us-west-2"
 # github_actions_role_arn   = "arn:aws:iam::<account-id>:role/github-actions-ecr-push"
 # ec2_instance_profile_name = "ec2-ecr-pull"
 ```
