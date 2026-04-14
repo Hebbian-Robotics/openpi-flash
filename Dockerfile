@@ -48,13 +48,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-install-project --no-dev
 
 # Install hosting dependencies.
+# - typer: CLI entrypoint used by `main.py`
 # - huggingface_hub: download authoritative lerobot checkpoint snapshots
 # - pydantic: config validation
 # - gsutil: download checkpoints from gs://openpi-assets (openpi's download
 #   module shells out to gsutil for this bucket; without it falls back to gcsfs
 #   which requires explicit GCP credentials)
 # - s3fs: kept for backwards-compatible manual configs that still reference s3://
-RUN uv pip install huggingface_hub pydantic gsutil s3fs "quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git" pytest
+RUN uv pip install typer huggingface_hub pydantic gsutil s3fs "quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git" pytest
 
 # Copy transformers_replace files (required for PyTorch models).
 COPY openpi/src/openpi/models_pytorch/transformers_replace/ /tmp/transformers_replace/
