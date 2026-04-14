@@ -231,11 +231,11 @@ def load_openpi_model(
     print(f"Model loaded in {load_elapsed:.1f}s")
 
     # Warmup inference to trigger torch.compile and populate inductor cache.
-    from hosting.warmup import make_aloha_warmup_observation
+    from hosting.warmup import make_warmup_observation
 
     print("Compiling model (warmup inference) ...")
     compile_start = time.monotonic()
-    policy.infer(make_aloha_warmup_observation())
+    policy.infer(make_warmup_observation(train_config))
     compile_elapsed = time.monotonic() - compile_start
     print(f"Compilation done in {compile_elapsed:.1f}s")
 

@@ -43,7 +43,6 @@ cp config.example.json config.json
 | `default_prompt` | Optional default text prompt if not provided per-request |
 | `port` | WebSocket server port (default: 8000) |
 | `quic_port` | QUIC server port (default: 5555) |
-| `max_concurrent_requests` | Max simultaneous inferences (default: 1) |
 
 Set `OPENPI_PYTORCH_COMPILE_MODE` to override the serving compile mode at runtime.
 Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`. In our testing, `default` gives a good balance of compile time (~80s) and inference speed (~2x faster than eager). `max-autotune-no-cudagraphs` can be slightly faster at inference but takes significantly longer to compile (~5 min); this could be worth it when optimizing for inference time.

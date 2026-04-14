@@ -63,6 +63,8 @@ impl LocalResponseType {
 enum QuicMessageType {
     Data = 0x00,
     Error = 0x01,
+    ResetRequest = 0x02,
+    ResetAck = 0x03,
 }
 
 impl QuicMessageType {
@@ -70,6 +72,8 @@ impl QuicMessageType {
         match value {
             0x00 => Ok(Self::Data),
             0x01 => Ok(Self::Error),
+            0x02 => Ok(Self::ResetRequest),
+            0x03 => Ok(Self::ResetAck),
             _ => bail!("Unknown QUIC message type: {value:#x}"),
         }
     }
@@ -378,19 +382,27 @@ async fn handle_server_connection(
                     String::from_utf8_lossy(quic_message_body)
                 );
             }
-            QuicMessageType::Data => {}
+            QuicMessageType::Data => {
+                write_local_backend_request(
+                    &mut backend_stream,
+                    LocalRequestType::Infer,
+                    quic_message_body,
+                )
+                .await
+                .context("Failed to forward inference request to backend")?;
+            }
+            QuicMessageType::ResetRequest => {
+                write_local_backend_request(&mut backend_stream, LocalRequestType::Reset, &[])
+                    .await
+                    .context("Failed to forward reset request to backend")?;
+            }
+            QuicMessageType::ResetAck => {
+                bail!("Client sent unexpected reset acknowledgment");
+            }
         }
-
-        write_local_backend_request(
-            &mut backend_stream,
-            LocalRequestType::Infer,
-            quic_message_body,
-        )
-        .await
-        .context("Failed to forward inference request to backend")?;
         let backend_response = read_local_backend_response(&mut backend_stream)
             .await
-            .context("Failed to read backend inference response")?;
+            .context("Failed to read backend response")?;
         forward_backend_response_to_quic(&mut send_stream, &backend_response)
             .await
             .context("Failed to forward backend response to QUIC client")?;
@@ -415,6 +427,9 @@ async fn handle_server_handshake(
     match QuicMessageType::from_u8(raw_quic_message_type).context("Invalid handshake payload")? {
         QuicMessageType::Data => {}
         QuicMessageType::Error => bail!("Client sent error during handshake"),
+        QuicMessageType::ResetRequest | QuicMessageType::ResetAck => {
+            bail!("Client sent unexpected control message during handshake")
+        }
     }
 
     write_local_backend_request(backend_stream, LocalRequestType::Metadata, &[])
@@ -447,6 +462,9 @@ async fn perform_client_handshake(
             "Remote server returned error during handshake: {}",
             String::from_utf8_lossy(metadata_body)
         ),
+        QuicMessageType::ResetRequest | QuicMessageType::ResetAck => {
+            bail!("Remote server returned unexpected control message during handshake")
+        }
     }
 }
 
@@ -517,6 +535,7 @@ async fn serve_local_client_connection(
                 .await?;
             }
             LocalRequestType::Reset => {
+                forward_reset_request_to_remote_quic(send_stream, recv_stream).await?;
                 write_local_response(local_client_stream, LocalResponseType::Reset, &[]).await?;
             }
             LocalRequestType::Infer => {
@@ -560,6 +579,36 @@ async fn forward_inference_request_to_remote_quic(
             LocalResponseType::Error,
             remote_response_body,
         )),
+        QuicMessageType::ResetRequest | QuicMessageType::ResetAck => {
+            bail!("Remote QUIC server returned invalid response type for inference")
+        }
+    }
+}
+
+async fn forward_reset_request_to_remote_quic(
+    send_stream: &mut SendStream,
+    recv_stream: &mut RecvStream,
+) -> Result<()> {
+    write_length_prefixed_message(send_stream, &[QuicMessageType::ResetRequest as u8])
+        .await
+        .context("Failed to forward local reset request to remote QUIC server")?;
+
+    let remote_response_payload = read_length_prefixed_message(recv_stream)
+        .await?
+        .ok_or_else(|| anyhow!("Remote QUIC server disconnected during reset"))?;
+    let (raw_quic_message_type, remote_response_body) =
+        split_message_type_and_body(&remote_response_payload)
+            .context("Invalid remote QUIC reset response payload")?;
+
+    match QuicMessageType::from_u8(raw_quic_message_type)? {
+        QuicMessageType::ResetAck => Ok(()),
+        QuicMessageType::Error => bail!(
+            "Remote QUIC server returned reset error: {}",
+            String::from_utf8_lossy(remote_response_body)
+        ),
+        QuicMessageType::Data | QuicMessageType::ResetRequest => {
+            bail!("Remote QUIC server returned invalid response type for reset")
+        }
     }
 }
 
@@ -581,7 +630,7 @@ async fn forward_backend_response_to_quic(
             write_length_prefixed_message(send_stream, &quic_payload).await
         }
         LocalResponseType::Reset => {
-            bail!("Server backend returned unexpected RESET response")
+            write_length_prefixed_message(send_stream, &[QuicMessageType::ResetAck as u8]).await
         }
     }
 }

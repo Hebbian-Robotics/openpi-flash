@@ -30,7 +30,7 @@ from openpi_client import base_policy as _base_policy
 from hosting.compile_mode import get_serving_pytorch_compile_mode
 from hosting.config import ServiceConfig, load_config
 from hosting.local_policy_socket_server import LocalPolicySocketServer
-from hosting.warmup import make_aloha_warmup_observation
+from hosting.warmup import make_warmup_observation
 
 DEFAULT_LOCAL_POLICY_SOCKET_PATH = pathlib.Path("/tmp/openpi-policy.sock")
 DEFAULT_RUST_QUIC_SIDECAR_BINARY_PATH = pathlib.Path("/usr/local/bin/openpi-quic-sidecar")
@@ -115,7 +115,7 @@ def load_policy(
     # so the first real client request doesn't block for minutes.
     _log_service_milestone("Starting warmup inference for torch.compile")
     compile_start = time.monotonic()
-    policy.infer(make_aloha_warmup_observation())
+    policy.infer(make_warmup_observation(train_config))
     compile_elapsed = time.monotonic() - compile_start
     _log_service_milestone(f"Warmup inference complete in {compile_elapsed:.1f}s")
 
@@ -170,10 +170,7 @@ def _run_rust_quic_sidecar(local_policy_socket_path: pathlib.Path, quic_port: in
 def main() -> None:
     _log_service_milestone("Loading service configuration")
     service_config = load_config()
-    _log_service_milestone(
-        "Service configuration loaded "
-        f"(port={service_config.port}, max_concurrent_requests={service_config.max_concurrent_requests})"
-    )
+    _log_service_milestone(f"Service configuration loaded (port={service_config.port})")
     policy, train_config = load_policy(service_config)
 
     thread_safe_policy = ThreadSafePolicy(policy)

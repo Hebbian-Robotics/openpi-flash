@@ -137,12 +137,6 @@ variable "default_prompt" {
   default     = null
 }
 
-variable "max_concurrent_requests" {
-  description = "Maximum concurrent requests allowed by the service config"
-  type        = number
-  default     = 1
-}
-
 variable "extra_bootstrap_commands" {
   description = "Optional extra shell commands appended to the cloud-init bootstrap"
   type        = string
