@@ -3,5 +3,6 @@
   "checkpoint_dir": "s3://openpi-checkpoints-us-west-2/pi05_base_pytorch",
   "default_prompt": null,
   "port": 8000,
+  "quic_port": 5555,
   "max_concurrent_requests": 1
 }

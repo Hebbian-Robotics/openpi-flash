@@ -41,17 +41,18 @@ cp config.example.json config.json
 | `model_config_name` | openpi training config name (e.g. `pi05_aloha`, `pi0_aloha_sim`, `pi05_droid`) |
 | `checkpoint_dir` | Local path, `gs://`, or `s3://` URI to model checkpoint |
 | `default_prompt` | Optional default text prompt if not provided per-request |
-| `port` | Server port (default: 8000) |
+| `port` | WebSocket server port (default: 8000) |
+| `quic_port` | QUIC server port (default: 5555) |
 | `max_concurrent_requests` | Max simultaneous inferences (default: 1) |
+
+Set `OPENPI_PYTORCH_COMPILE_MODE` to override the serving compile mode at runtime.
+Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`. In our testing, `default` gives a good balance of compile time (~80s) and inference speed (~2x faster than eager). `max-autotune-no-cudagraphs` can be slightly faster at inference but takes significantly longer to compile (~5 min); this could be worth it when optimizing for inference time.
 
 ## Running locally
 
 ```bash
 uv run python main.py serve --config config.json
 ```
-
-Set `OPENPI_PYTORCH_COMPILE_MODE` to override the serving compile mode at runtime.
-Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`.
 
 Local serving uses the Rust QUIC sidecar for direct QUIC. If you are not using the Docker image, build the sidecar locally and point the server at the binary:
 

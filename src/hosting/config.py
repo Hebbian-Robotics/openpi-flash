@@ -42,6 +42,7 @@ class ServiceConfig(BaseModel):
 
     # Server settings
     port: int = 8000
+    quic_port: int = 5555
     max_concurrent_requests: int = 1
 
     @field_validator("model_config_name")

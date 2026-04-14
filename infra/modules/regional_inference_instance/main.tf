@@ -67,6 +67,7 @@ locals {
       checkpoint_dir          = var.checkpoint_dir
       default_prompt          = var.default_prompt
       port                    = 8000
+      quic_port               = 5555
       max_concurrent_requests = var.max_concurrent_requests
     }
   )

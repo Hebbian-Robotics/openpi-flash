@@ -32,7 +32,6 @@ from hosting.config import ServiceConfig, load_config
 from hosting.local_policy_socket_server import LocalPolicySocketServer
 from hosting.warmup import make_aloha_warmup_observation
 
-QUIC_PORT = 5555
 DEFAULT_LOCAL_POLICY_SOCKET_PATH = pathlib.Path("/tmp/openpi-policy.sock")
 DEFAULT_RUST_QUIC_SIDECAR_BINARY_PATH = pathlib.Path("/usr/local/bin/openpi-quic-sidecar")
 
@@ -137,20 +136,20 @@ def _get_rust_quic_sidecar_binary_path() -> pathlib.Path:
     return DEFAULT_RUST_QUIC_SIDECAR_BINARY_PATH
 
 
-def _run_rust_quic_sidecar(local_policy_socket_path: pathlib.Path) -> None:
+def _run_rust_quic_sidecar(local_policy_socket_path: pathlib.Path, quic_port: int) -> None:
     sidecar_binary_path = _get_rust_quic_sidecar_binary_path()
     sidecar_command = [
         str(sidecar_binary_path),
         "server",
         "--listen-port",
-        str(QUIC_PORT),
+        str(quic_port),
         "--backend-socket-path",
         str(local_policy_socket_path),
     ]
 
     while True:
         _log_service_milestone(
-            f"Starting Rust QUIC sidecar ({sidecar_binary_path}) on UDP port {QUIC_PORT}"
+            f"Starting Rust QUIC sidecar ({sidecar_binary_path}) on UDP port {quic_port}"
         )
         try:
             sidecar_process = subprocess.Popen(sidecar_command)
@@ -205,7 +204,7 @@ def main() -> None:
         name="local-policy-socket-server",
         daemon=True,
     ).start()
-    _run_rust_quic_sidecar(local_policy_socket_path)
+    _run_rust_quic_sidecar(local_policy_socket_path, service_config.quic_port)
 
 
 if __name__ == "__main__":
