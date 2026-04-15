@@ -45,6 +45,8 @@ RUN uv venv --python 3.11.9 $UV_PROJECT_ENVIRONMENT
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=hosting/uv.lock,target=/build/hosting/uv.lock \
     --mount=type=bind,source=hosting/pyproject.toml,target=/build/hosting/pyproject.toml \
+    --mount=type=bind,source=openpi/LICENSE,target=/build/openpi/LICENSE \
+    --mount=type=bind,source=openpi/README.md,target=/build/openpi/README.md \
     --mount=type=bind,source=openpi/pyproject.toml,target=/build/openpi/pyproject.toml \
     --mount=type=bind,source=openpi/src,target=/build/openpi/src \
     --mount=type=bind,source=openpi/packages/openpi-client/pyproject.toml,target=/build/openpi/packages/openpi-client/pyproject.toml \
