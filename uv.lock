@@ -2477,6 +2477,7 @@ dependencies = [
     { name = "openpi" },
     { name = "openpi-client" },
     { name = "pydantic" },
+    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "quic-portal" },
     { name = "s3fs" },
@@ -2486,7 +2487,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
 ]
@@ -2499,6 +2499,7 @@ requires-dist = [
     { name = "openpi", editable = "../openpi" },
     { name = "openpi-client", editable = "../openpi/packages/openpi-client" },
     { name = "pydantic", specifier = ">=2.13.0" },
+    { name = "pytest", specifier = ">=9.0.3" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "quic-portal", git = "https://github.com/Hebbian-Robotics/quic-portal.git" },
     { name = "s3fs", specifier = ">=2026.2.0,<2026.3.0" },
@@ -2508,7 +2509,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pytest", specifier = ">=9.0.3" },
     { name = "ruff", specifier = ">=0.15.10" },
     { name = "ty", specifier = ">=0.0.30" },
 ]
@@ -3809,7 +3809,7 @@ name = "triton"
 version = "3.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "setuptools", marker = "sys_platform == 'linux'" },
+    { name = "setuptools", marker = "platform_machine != 'aarch64' and sys_platform == 'linux'" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/21/2f/3e56ea7b58f80ff68899b1dbe810ff257c9d177d288c6b0f55bf2fe4eb50/triton-3.3.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b31e3aa26f8cb3cc5bf4e187bf737cbacf17311e1112b781d4a059353dfd731b", size = 155689937, upload-time = "2025-05-29T23:39:44.182Z" },
