@@ -38,24 +38,18 @@ ENV UV_LINK_MODE=copy
 ENV UV_PROJECT_ENVIRONMENT=/.venv
 ENV PATH="/.venv/bin:$PATH"
 
-# Install openpi dependencies using its lockfile.
+# Install hosting dependencies using the hosting lockfile as the single source
+# of truth. The hosting project depends on the sibling openpi checkout via
+# path dependencies, so we recreate that relative layout under /build.
 RUN uv venv --python 3.11.9 $UV_PROJECT_ENVIRONMENT
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=openpi/uv.lock,target=uv.lock \
-    --mount=type=bind,source=openpi/pyproject.toml,target=pyproject.toml \
-    --mount=type=bind,source=openpi/packages/openpi-client/pyproject.toml,target=packages/openpi-client/pyproject.toml \
-    --mount=type=bind,source=openpi/packages/openpi-client/src,target=packages/openpi-client/src \
-    GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-install-project --no-dev
-
-# Install hosting dependencies.
-# - typer: CLI entrypoint used by `main.py`
-# - huggingface_hub: download authoritative lerobot checkpoint snapshots
-# - pydantic: config validation
-# - gsutil: download checkpoints from gs://openpi-assets (openpi's download
-#   module shells out to gsutil for this bucket; without it falls back to gcsfs
-#   which requires explicit GCP credentials)
-# - s3fs: kept for backwards-compatible manual configs that still reference s3://
-RUN uv pip install typer huggingface_hub pydantic gsutil s3fs "quic-portal @ git+https://github.com/Hebbian-Robotics/quic-portal.git" pytest
+    --mount=type=bind,source=hosting/uv.lock,target=/build/hosting/uv.lock \
+    --mount=type=bind,source=hosting/pyproject.toml,target=/build/hosting/pyproject.toml \
+    --mount=type=bind,source=openpi/pyproject.toml,target=/build/openpi/pyproject.toml \
+    --mount=type=bind,source=openpi/src,target=/build/openpi/src \
+    --mount=type=bind,source=openpi/packages/openpi-client/pyproject.toml,target=/build/openpi/packages/openpi-client/pyproject.toml \
+    --mount=type=bind,source=openpi/packages/openpi-client/src,target=/build/openpi/packages/openpi-client/src \
+    cd /build/hosting && GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-install-project --no-dev
 
 # Copy transformers_replace files (required for PyTorch models).
 COPY openpi/src/openpi/models_pytorch/transformers_replace/ /tmp/transformers_replace/
