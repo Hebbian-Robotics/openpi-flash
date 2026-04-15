@@ -4,14 +4,13 @@ version = "0.1.0"
 description = "Real-time inference engine for openpi"
 license = { file = "LICENSE" }
 authors = [{ name = "Hebbian Robotics" }]
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "openpi",
     "openpi-client",
     "huggingface-hub>=0.36.2,<1.0",
     "pydantic>=2.13.0",
     "modal>=1.4.1",
-    "pytest>=9.0.3",
     "s3fs>=2026.2.0,<2026.3.0",
     "starlette>=1.0.0",
     "gsutil>=5.36",
@@ -39,6 +38,7 @@ build-backend = "hatchling.build"
 dev = [
     "ruff>=0.15.10", #
     "ty>=0.0.30",
+    "pytest>=9.0.3",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -75,7 +75,3 @@ division-by-zero = "error"
 deprecated = "error"
 unused-ignore-comment = "error"
 possibly-unresolved-reference = "error"
-
-[tool.ty.src]
-# Test scripts import from openpi which is a sibling-repo editable dependency.
-exclude = ["tests/"]
