@@ -49,7 +49,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=openpi/src,target=/build/openpi/src \
     --mount=type=bind,source=openpi/packages/openpi-client/pyproject.toml,target=/build/openpi/packages/openpi-client/pyproject.toml \
     --mount=type=bind,source=openpi/packages/openpi-client/src,target=/build/openpi/packages/openpi-client/src \
-    cd /build/hosting && GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen --no-install-project --no-dev
+    GIT_LFS_SKIP_SMUDGE=1 uv sync --project /build/hosting --frozen --no-install-project --no-dev
 
 # Copy transformers_replace files (required for PyTorch models).
 COPY openpi/src/openpi/models_pytorch/transformers_replace/ /tmp/transformers_replace/

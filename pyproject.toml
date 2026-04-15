@@ -8,10 +8,10 @@ requires-python = ">=3.11,<3.13"
 dependencies = [
     "openpi",
     "openpi-client",
-    "huggingface-hub>=0.35.0",
+    "huggingface-hub>=0.36.2,<1.0",
     "pydantic>=2.13.0",
     "modal>=1.4.1",
-    "s3fs>=2025.10.0",
+    "s3fs>=2026.2.0,<2026.3.0",
     "starlette>=1.0.0",
     "gsutil>=5.36",
     "quic-portal>=0.1.13",
@@ -38,7 +38,7 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.10", #
-    "ty>=0.0.29",
+    "ty>=0.0.30",
 ]
 
 [tool.hatch.build.targets.wheel]
