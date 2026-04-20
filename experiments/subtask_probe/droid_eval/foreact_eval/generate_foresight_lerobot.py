@@ -133,7 +133,51 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--image_guidance_scale", type=float, default=1.5)
     parser.add_argument("--num_inference_steps", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--force_task",
+        type=str,
+        default=None,
+        help=(
+            "Override the per-episode task label with this text for every processed "
+            "episode. Use when rendering a linked chain where later sub-episodes are "
+            "labeled 'Finish.' but are really continuations of the earlier task."
+        ),
+    )
+    parser.add_argument(
+        "--task_schedule",
+        type=str,
+        default=None,
+        help=(
+            "Path to a JSON file mapping (episode, frame-range) -> subtask text. "
+            "Expected shape: list of {episode, start_frame, end_frame, task}. "
+            "Frames are source-frame indices (pre-stride). A frame is conditioned "
+            "on the first matching entry. Overrides --force_task when both are set."
+        ),
+    )
     return parser.parse_args()
+
+
+def _load_task_schedule(path: str | None) -> list[dict[str, Any]] | None:
+    if path is None:
+        return None
+    with Path(path).open() as f:
+        schedule = json.load(f)
+    for entry in schedule:
+        required = {"episode", "start_frame", "end_frame", "task"}
+        if not required.issubset(entry):
+            raise ValueError(f"task_schedule entry missing keys {required - entry.keys()}: {entry}")
+    return schedule
+
+
+def _lookup_scheduled_task(
+    schedule: list[dict[str, Any]] | None, ep_idx: int, frame_idx: int
+) -> str | None:
+    if schedule is None:
+        return None
+    for entry in schedule:
+        if entry["episode"] == ep_idx and entry["start_frame"] <= frame_idx <= entry["end_frame"]:
+            return entry["task"]
+    return None
 
 
 def main() -> None:
@@ -169,16 +213,22 @@ def main() -> None:
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
+    schedule = _load_task_schedule(args.task_schedule)
+
     generation_records: list[dict[str, Any]] = []
     for ep_idx in episode_indices:
         meta = episode_meta[ep_idx]
         tasks: list[str] = meta.get("tasks") or []
-        # Skip episodes whose label is the "Finish." filler used as a between-
-        # task reset signal (task_index=1 in tasks.jsonl).
-        if not tasks or tasks[0].strip().lower().rstrip(".") == "finish":
+        episode_fallback_task: str | None
+        if args.force_task is not None:
+            episode_fallback_task = args.force_task
+        elif tasks and tasks[0].strip().lower().rstrip(".") != "finish":
+            episode_fallback_task = tasks[0]
+        elif schedule is not None and any(e["episode"] == ep_idx for e in schedule):
+            episode_fallback_task = None  # schedule will supply the text
+        else:
             logger.info("Skipping episode %d (task=%r)", ep_idx, tasks)
             continue
-        subtask_text = tasks[0]
         video_path = (
             dataset_root / "videos" / "chunk-000" / args.camera_key / f"episode_{ep_idx:06d}.mp4"
         )
@@ -189,11 +239,12 @@ def main() -> None:
         logger.info("Decoding %s ...", video_path)
         frames = _decode_mp4_frames(video_path, stride=args.stride)
         logger.info(
-            "Episode %d: %d strided frames (length=%d) — subtask=%r",
+            "Episode %d: %d strided frames (length=%d) — fallback subtask=%r (schedule=%s)",
             ep_idx,
             len(frames),
             meta.get("length"),
-            subtask_text,
+            episode_fallback_task,
+            "yes" if schedule is not None else "no",
         )
 
         episode_dir = output_dir / f"episode_{ep_idx:06d}"
@@ -208,11 +259,20 @@ def main() -> None:
             frame_idx = step_idx * args.stride
             Image.fromarray(frame_rgb).save(src_dir / f"frame_{frame_idx:05d}.png")
             seed = (args.seed, ep_idx, frame_idx).__hash__() & 0x7FFFFFFF
+            scheduled = _lookup_scheduled_task(schedule, ep_idx, frame_idx)
+            per_frame_task = scheduled if scheduled is not None else episode_fallback_task
+            if per_frame_task is None:
+                logger.warning(
+                    "No task text for ep%d frame %d (no schedule match + no fallback); skipping",
+                    ep_idx,
+                    frame_idx,
+                )
+                continue
             try:
                 image, elapsed = _process_frame(
                     pipeline,
                     frame_rgb,
-                    subtask_text,
+                    per_frame_task,
                     guidance_scale=args.guidance_scale,
                     image_guidance_scale=args.image_guidance_scale,
                     num_inference_steps=args.num_inference_steps,
@@ -228,7 +288,7 @@ def main() -> None:
                 {
                     "episode_index": ep_idx,
                     "frame_idx": frame_idx,
-                    "subtask_text": subtask_text,
+                    "subtask_text": per_frame_task,
                     "output": str(out_path.relative_to(output_dir)),
                     "generation_time_s": round(elapsed, 3),
                     "seed": seed,

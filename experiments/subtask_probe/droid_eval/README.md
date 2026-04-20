@@ -71,7 +71,7 @@ uv run python -m experiments.subtask_probe.droid_eval.extract_droid_samples \
   --min_duration_s 60 --require_multi_step \
   --output_dir ./.experiments_cache/droid_eval_2min
 
-# Phase 1: Generate subtasks (~14s per frame with JAX)
+# Phase 1: Generate subtasks (JAX subtask generator, ~1s per frame warm)
 uv run python experiments/subtask_probe/droid_eval/generate_subtasks.py \
   --samples_dir ./.experiments_cache/droid_eval \
   --output ./.experiments_cache/droid_eval/subtasks.json

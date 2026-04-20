@@ -275,9 +275,9 @@ Previous Modal attempt (2026-04-14) hit import bugs and client disconnect issues
 
 ### Production integration
 
-9. **Two-process serving architecture** — JAX subtask service (port 8001) + PyTorch action service (port 8000) behind the existing QUIC endpoint. The action service calls the subtask service on localhost before each action generation cycle.
+9. **Single-process combined-mode serving** — one openpi-flash process loads both slots, exposes the action policy on ports 8000 (WebSocket) / 5555 (QUIC) and the JAX planner on ports 8002 / 5556, and shares one `SubtaskGenerator` instance between them. The action endpoint calls the planner first and splices the subtask into the prompt before action inference. See `src/hosting/serve.py`, `src/hosting/subtask_policy.py`, and the README's *Subtask generation (planner)* section.
 
-10. **Subtask caching and refresh policy** — decide how often to re-generate subtasks. Options: every action chunk, every N steps, or when visual change exceeds a threshold. @LisavilaLee's code caches by prompt only (never refreshes), but the paper's Figure 7 shows it should update with the scene.
+10. **Subtask caching and refresh policy** — decide how often to re-generate subtasks. Options: every action chunk, every N steps, or when visual change exceeds a threshold. @LisavilaLee's code caches by prompt only (never refreshes), but the paper's Figure 7 shows it should update with the scene. Today combined mode regenerates on every action `infer()` call unless the client opts out with `obs["mode"] = "action_only"`.
 
 ### Future optimization: Flash attention for prefix forward
 
@@ -611,9 +611,17 @@ Latency was 0.47-0.68s/frame on L40S (bf16), consistent with the DROID run.
   - `.experiments_cache/droid_eval_ah15/foresight_foreact/{ep_0000..ep_0004}/frame_*.png` (475 PNGs @ 640×480)
   - `.experiments_cache/droid_eval_ah15/foreact_html/*.html` (5 per-episode reports, exterior | wrist | foresight | subtask)
   - `.experiments_cache/droid_eval_ah15/foreact_videos/*.mp4` (5 per-episode mp4s at 2 fps)
-- ForeActDataset / Galaxea R1 Lite in-distribution:
-  - `.experiments_cache/droid_eval_ah15/foresight_picksveg/episode_{000000,000003}/frame_*.png` (12 PNGs) + `actual/` subdirs with source frames
-  - `.experiments_cache/droid_eval_ah15/foresight_picksveg/picksveg_report.html` (single side-by-side HTML)
+- ForeActDataset / Galaxea R1 Lite in-distribution (moved to its own cache dir since it's not a DROID run):
+  - `.experiments_cache/foreact_eval/foresight_picksveg/` (first 2-episode stride=15 test, with `picksveg_report.html`)
+  - `.experiments_cache/foreact_eval/foresight_picksveg_dense/` (5 episodes at stride=5, with per-episode mp4s)
+  - `.experiments_cache/foreact_eval/foresight_chain_eggplant/` (full 3-sub-episode chain ep[0,1,2], unified subtask text, seed=42 — apple-morphing artifact in placement phase)
+  - `.experiments_cache/foreact_eval/foresight_chain_eggplant_v2/` (**golden** — ep0+ep1 use `Pick up the eggplant`, ep2 uses `Place the eggplant into the plate`, seed=123; see `chain_eggplant_v2.mp4` / `chain_eggplant_v2.html`)
+
+Ablations tried for the golden chain (all drifted worse than v2, deleted):
+- ep1+ep2 both `Place the eggplant into the plate` — drifted the eggplant identity starting mid-ep1
+- mid-ep1 swap at frame 55 — same drift starting at the swap point
+
+Takeaway on labeling: the generator was trained to predict *half-a-subtask ahead*, so the right text for a given frame describes the state ~2.5 s ahead, not the *current* motion phase. For ep1 mid-frames that future state is still "arm holding eggplant over plate" → a pick-phase description. Switching to `Place ...` before the arm is actually descending onto the plate creates a text-vs-image conflict and drifts the eggplant identity.
 
 ## Open Questions
 
@@ -622,7 +630,5 @@ Latency was 0.47-0.68s/frame on L40S (bf16), consistent with the DROID run.
 3. Is the short output (3-4 tokens) an inherent limitation of the base checkpoint, or a prompt format / missing-images issue?
 4. Does the ~100 gradient step fine-tuning need real robot data, or would LLM-generated subtask decompositions work?
 5. How much does subtask conditioning improve action quality for long-horizon tasks (the paper reports it's significant)?
-6. Can JIT compilation reduce JAX subtask latency from 14s to <1s? The prefix forward is fixed-shape and should JIT well, but the AR loop's growing KV cache is a challenge.
-7. Is 32GB system RAM sufficient for dual-runtime JIT, or do we need g6e.2xlarge (64GB)?
-8. For the hybrid prompt approach (no retraining), does injecting subtask text into the action format produce *better* actions with real images, or just *different* ones?
-9. Does ASCII vocabulary masking eliminate Unicode garbage and preserve English subtask quality? (pending re-run)
+6. For the hybrid prompt approach (no retraining), does injecting subtask text into the action format produce *better* actions with real images, or just *different* ones?
+7. Does ASCII vocabulary masking eliminate Unicode garbage and preserve English subtask quality? (pending re-run)
