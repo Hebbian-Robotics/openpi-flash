@@ -70,58 +70,61 @@ DEFAULT_MODEL = "gemini-3.1-flash-image-preview"
 SCENE_RULES_TEMPLATE = """\
 You will be given TWO images followed by a subtask instruction.
 
-IMAGE 1 — REFERENCE FRAME. The scene in its starting state with all objects \
-clearly visible. Use this STRICTLY as a reference for OBJECT IDENTITY — \
-especially what the small dark-purple eggplant looks like, since it will be \
-occluded in later frames. Do NOT output this frame as the future; it is \
-only for identity anchoring.
+IMAGE 1 — IDENTITY REFERENCE. An early frame of this scene, used ONLY to \
+show you what each object in the scene looks like (color, shape, size, \
+texture). It is NOT a target state to restore to, and object positions \
+shown here may be out of date. Never use IMAGE 1 to determine where an \
+object currently is.
 
-IMAGE 2 — CURRENT OBSERVATION. This is the frame from which you will \
-predict the scene's FUTURE state. The future image must preserve this \
-frame's camera viewpoint, lighting, table surface, and background walls \
-EXACTLY; only what the subtask requires should change.
+IMAGE 2 — CURRENT OBSERVATION. The exact current state of the scene. Its \
+pixels are the ground truth for every object's current position and \
+for the camera, lighting, surfaces, and background. Your prediction must \
+preserve IMAGE 2 exactly except where the current subtask requires a \
+change.
 
-SCENE INVENTORY (left to right, as shown in the reference frame): green \
-leek with white base on the far left; small red chili pepper next to the \
-leek; empty blue plate in the middle of the table; small dark-purple \
-eggplant (oval, glossy dark-purple skin, with a short stem); green \
-zucchini; yellow corn on the far right.
+SCENE OBJECTS: the set of objects in the scene is exactly the set of \
+objects visible in IMAGE 1. Do not add, remove, or substitute any \
+object. Use IMAGE 2 for every object's current position.
 
-ROBOT: Galaxea R1 Lite right arm. Enters from the UPPER-RIGHT EDGE of the \
-frame and is always continuous to that edge — no floating grippers. \
-Orange-red upper-arm segment connected to the top-right corner, black \
-forearm, black parallel-finger gripper with exactly two parallel fingers \
-(not a claw). Grasps oblong objects by their stem, so a held object hangs \
-BELOW the closed fingers as a visible silhouette.
-
-SUBTASK SEMANTICS: subtask instructions name actions the ROBOT ARM takes, \
-not actions that undo previous work. Specifically, "return to home \
-position" or "go home" means the ARM RETRACTS upward/out of frame — it \
-does NOT mean moving any object back. Once an object is in the blue \
-plate, it stays in the plate unless a future subtask explicitly says to \
-move it somewhere else. Only the subtask in "CURRENT SUBTASK" below is \
-active; do not reverse earlier subtasks.
-
-WORLD PRESERVATION RULE (strict): anything the current subtask does NOT \
-explicitly act on must appear in the output image EXACTLY as it does in \
-IMAGE 2 — same position, same orientation, same color, same condition. \
-Do not delete, duplicate, relocate, or alter any object the subtask does \
-not touch. If an object (including the eggplant, the blue plate, or any \
-vegetable) is visible in IMAGE 2, it must be visible in the same place \
-in the output unless the subtask explicitly moves it. The world is \
-static except where the robot arm is actively manipulating something.
+ROBOT: the scene contains one robot arm that enters from one side of \
+the frame and is always continuous to that edge — no floating grippers \
+or arms that appear disconnected from the frame boundary. If the arm's \
+anatomy is visible in IMAGE 2, match its visual style exactly; if the \
+arm is not in IMAGE 2, follow the same visual style used in other \
+frames of this episode. The gripper grasps oblong objects by their \
+stem, so a held oblong object hangs BELOW the closed fingers as a \
+visible silhouette.
 
 CURRENT SUBTASK: {subtask}
 
-TASK: Predict the scene at roughly the half-subtask-ahead point of this \
-subtask (the paper's "t + 0.5 times subtask duration" target). If the subtask \
-involves moving the eggplant, the predicted frame should show that motion \
-well underway or complete; if the eggplant ends up inside the blue plate, \
-render it as the SAME dark-purple eggplant shown in IMAGE 1 (do not morph \
-it to an apple, plum, or any other fruit). If the eggplant is occluded \
-inside the closed gripper, do NOT draw it on the table or invent a \
-substitute. The four non-target vegetables stay in their exact positions \
-from IMAGE 2 unless the subtask says otherwise.
+SUBTASK SEMANTICS: a subtask describes one action the ROBOT ARM takes \
+next. It never undoes previous work, and it never moves any object \
+unless that object is explicitly named as being moved to a specific \
+location. A subtask of the form "move X to Y" names both an object (X) \
+and a destination (Y); any other subtask — for example "return to home", \
+"go home", "retract", "finish", "idle" — names neither, so nothing \
+moves except the arm. An object's location at the moment the current \
+subtask starts is the location it keeps, unless the current subtask \
+explicitly relocates it.
+
+OUTPUT RULES (strict pixel preservation): treat IMAGE 2 as the baseline. \
+Only two kinds of change are allowed between IMAGE 2 and the output: \
+(1) the robot arm's pose may update to reflect progress through the \
+current subtask; (2) any object the current subtask explicitly names as \
+being moved may change position accordingly. Everything else — every \
+other object, the background, the surface, the lighting, the camera — \
+must match IMAGE 2 exactly. An object contained inside another object \
+in IMAGE 2 stays contained. An object resting on a surface in IMAGE 2 \
+stays on that surface. If the current subtask does not explicitly name \
+an object as being moved, that object does not move.
+
+IDENTITY ANCHORING: if an object is occluded or hard to see in IMAGE 2 \
+(e.g. hidden inside the closed gripper), use IMAGE 1 to recall its \
+identity so you do not hallucinate a different-looking object in its \
+place. Do not morph an object into a different type.
+
+PREDICTION HORIZON: predict the scene at roughly the half-subtask-ahead \
+point — partway through or at the end of the current subtask's action.
 """
 
 
