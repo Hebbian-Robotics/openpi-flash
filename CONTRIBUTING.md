@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-openpi-flash is a real-time inference engine that serves OpenPI policy models over QUIC and WebSocket transports with torch.compile acceleration. It supports deployment on AWS EC2 (Docker Compose) and Modal (serverless).
+openpi-flash is a real-time inference engine that serves OpenPI models over QUIC and WebSocket transports with torch.compile acceleration. It has two optional component slots — an **action** slot (PyTorch or JAX policy) and a **planner** slot (JAX subtask generator for pi0.5 two-phase inference) — and picks one of three modes at startup based on which slots are configured: `action_only`, `planner_only`, or `combined`. See the [README](README.md#subtask-generation-planner) for the planner's config / endpoints / modes. It supports deployment on AWS EC2 (Docker Compose) and Modal (serverless).
 
 For terraform use `tofu` not `terraform` CLI for consistency.
 
@@ -31,17 +31,28 @@ uv run modal run modal_quic_app.py
 ## Testing
 
 ```bash
-# Smoke test against a running instance
+# Action endpoint (default slot — ports 8000/5555)
 uv run python main.py test ws ws://localhost:8000
-
-# Smoke test tunnel variant
-uv run python main.py test modal-tunnel
-
-# Smoke test QUIC portal variant (no URL needed — discovery via Modal Dict)
-uv run python main.py test modal-quic
-
-# Smoke test direct QUIC for EC2/Docker
 uv run python main.py test quic localhost
+
+# Modal variants
+uv run python main.py test modal-tunnel
+uv run python main.py test modal-quic                 # discovery via Modal Dict
+```
+
+If the planner slot is loaded, the planner endpoint is on its own transport triple (WebSocket 8002 / QUIC 5556). It doesn't have a `main.py test` helper yet; smoke-test it with a direct Python client:
+
+```bash
+uv run python -c "
+from openpi_client import websocket_client_policy as wcp
+import numpy as np
+client = wcp.WebsocketClientPolicy(host='localhost', port=8002)
+print(client.infer({'prompt': 'pick up the red cup',
+                    'images': {'cam_high': np.zeros((224,224,3), dtype=np.uint8)}}))"
+
+# Admin endpoint (only started with the planner slot; port 8001, bind to 127.0.0.1)
+curl http://localhost:8001/health
+curl http://localhost:8001/config
 ```
 
 ## Code Quality

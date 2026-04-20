@@ -145,9 +145,11 @@ These steps are repeated for each EC2 instance you launch.
 5. Key pair: select or create one for SSH access
 6. Network: create/select a security group allowing:
    - SSH (TCP 22) from your IP
-   - TCP 8000 for WebSocket inference
-   - UDP 5555 for QUIC transport
+   - TCP 8000 + UDP 5555 for the action slot (WebSocket + QUIC)
+   - TCP 8002 + UDP 5556 for the planner slot (only if you enable subtask generation)
    - TCP 443 if using HTTPS (Caddy or ALB)
+
+   The planner admin HTTP endpoint (TCP 8001) should not be exposed publicly — it runs without auth. Bind it to `127.0.0.1` on the host and reach it via SSH port forwarding.
 7. Storage: **200 GiB** gp3 root volume
 8. Advanced > IAM instance profile: **ec2-ecr-pull**
 9. Launch
@@ -210,13 +212,14 @@ aws ecr get-login-password --region us-west-2 | \
 # Pull
 docker pull "${ECR_REGISTRY}/openpi-flash:latest"
 
-# Create config
+# Create config (action-only; for combined mode, see the planner section below)
 mkdir -p ~/openpi && cd ~/openpi
 cat > config.json << 'EOF'
 {
-  "model_config_name": "pi05_aloha",
-  "checkpoint_dir": "/cache/models/pi05_base_openpi",
-  "port": 8000
+  "action": {
+    "model_config_name": "pi05_aloha",
+    "checkpoint_dir": "/cache/models/pi05_base_openpi"
+  }
 }
 EOF
 
@@ -236,6 +239,8 @@ docker run -d --restart unless-stopped --gpus=all \
   --name openpi-inference \
   "${ECR_REGISTRY}/openpi-flash:latest"
 ```
+
+If you enable the planner slot (combined mode), add a `"planner"` block to `config.json` (see [`config.example.planner.json`](../config.example.planner.json) and the README's *Subtask generation (planner)* section) and extend the `docker run` with `-p 8002:8002 -p 5556:5556/udp -p 127.0.0.1:8001:8001`. Publishing the admin port on `127.0.0.1` keeps it off the public internet — reach it via `ssh -L 8001:127.0.0.1:8001 ubuntu@<instance-ip>`.
 
 ### 4. Optional: Elastic IP
 

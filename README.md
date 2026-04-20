@@ -29,23 +29,131 @@ This installs the hosting service and pulls in `openpi` and `openpi-client` (fro
 
 ## Configuration
 
-Copy [`config.example.json`](config.example.json) and edit it:
+The server has two optional component slots — `action` (PyTorch or JAX action policy) and `planner` (JAX subtask generator). At least one must be set. Which slots are present determines the mode:
+
+- `action_only` — serves actions only (the default; matches every example in this README up to the "Subtask generation" section below).
+- `planner_only` — serves subtask text only; no PyTorch action model is loaded.
+- `combined` — both slots; the action endpoint auto-augments prompts with generated subtasks, and the planner endpoint is independently callable.
+
+Copy [`config.example.json`](config.example.json) (action-only) or [`config.example.planner.json`](config.example.planner.json) (combined) and edit it:
 
 ```bash
 cp config.example.json config.json
 # Edit config.json: set your model and checkpoint
 ```
 
+### Action slot (`action.*`)
+
 | Field | Description |
 |-------|-------------|
 | `model_config_name` | openpi training config name (e.g. `pi05_aloha`, `pi0_aloha_sim`, `pi05_droid`) |
 | `checkpoint_dir` | Local path, `gs://`, or `s3://` URI to model checkpoint |
 | `default_prompt` | Optional default text prompt if not provided per-request |
-| `port` | WebSocket server port (default: 8000) |
-| `quic_port` | QUIC server port (default: 5555) |
+
+### Planner slot (`planner.*`)
+
+See the [Subtask generation (planner)](#subtask-generation-planner) section below for end-to-end usage.
+
+| Field | Description |
+|-------|-------------|
+| `checkpoint_dir` | JAX Orbax checkpoint path (local or `gs://`). JAX-only. |
+| `max_generation_tokens` | Max tokens per subtask decode (default: `20`) |
+| `generation_prompt_format` | Prompt passed to the planner. Must contain `{task}`. Default: `"Task: {task}. Subtask: "` |
+| `action_prompt_template` | Template that splices the generated subtask back into the action prompt in combined mode. Must contain `{task}` and `{subtask}`. Default: `"{task}. Subtask: {subtask}"` |
+
+### Transports
+
+Each loaded slot gets its own port triple (WebSocket + QUIC + unix socket). Defaults:
+
+| Slot | WebSocket | QUIC (UDP) | Unix socket |
+|------|-----------|------------|-------------|
+| `action` | `8000` | `5555` | `/tmp/openpi-action.sock` |
+| `planner` | `8002` | `5556` | `/tmp/openpi-planner.sock` |
+
+The admin HTTP endpoint (port `8001`) is started only when the planner slot is loaded. Override any of these under the `action_transport` / `planner_transport` keys in `config.json`. Environment variables prefixed with `OPENPI_` (e.g. `OPENPI_ACTION__CHECKPOINT_DIR`) override JSON values on a deployed box — nested fields use `__` as the delimiter.
 
 Set `OPENPI_PYTORCH_COMPILE_MODE` to override the serving compile mode at runtime.
 Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-cudagraphs`. In our testing, `default` gives a good balance of compile time (~80s) and inference speed (~2x faster than eager). `max-autotune-no-cudagraphs` can be slightly faster at inference but takes significantly longer to compile (~5 min); this could be worth it when optimizing for inference time.
+
+## Subtask generation (planner)
+
+The planner slot runs pi0.5 two-phase inference: from `(task, images)` it generates a short subtask string (e.g. `"pick up cup"` from `"pick up the red cup"`), which can either be returned directly or spliced into the action prompt before action inference. See pi0.5 paper §V.E, Figure 7 for the architecture. The planner is **JAX-only** today — point `planner.checkpoint_dir` at a JAX Orbax checkpoint such as `gs://openpi-assets/checkpoints/pi05_base/params`.
+
+### Example combined-mode config
+
+```json
+{
+  "action": {
+    "model_config_name": "pi05_aloha",
+    "checkpoint_dir": "/cache/models/pi05_base_openpi"
+  },
+  "planner": {
+    "checkpoint_dir": "gs://openpi-assets/checkpoints/pi05_base/params",
+    "max_generation_tokens": 20
+  }
+}
+```
+
+Start the server exactly as in [Running locally](#running-locally) / [Running with Docker](#running-with-docker). At startup you should see:
+
+```
+Service ready (mode=combined, slots=['action', 'planner'])
+```
+
+### Client: planner-only endpoint
+
+Clients connect to port `8002` (WebSocket) or `5556` (QUIC) and receive `{"subtask": {"text": ..., "ms": ...}}` — no `actions` field.
+
+```python
+from openpi_client import websocket_client_policy as wcp
+
+client = wcp.WebsocketClientPolicy(host="localhost", port=8002)
+result = client.infer({
+    "prompt": "pick up the red cup",
+    "images": {"cam_high": image_array},
+})
+print(result["subtask"]["text"])   # e.g. "pick up cup"
+print(result["subtask"]["ms"])     # generation latency
+```
+
+For QUIC, use the planner port:
+
+```python
+from hosting.flash_transport_policy import FlashTransportPolicy
+
+client = FlashTransportPolicy(host="your-ec2-ip", port=5556)
+result = client.infer(observation)
+```
+
+### Client: combined mode on the action endpoint
+
+In combined mode the action endpoint (port `8000` / `5555`) transparently runs the planner first and augments the prompt using `action_prompt_template` before action inference. The response shape adds a `subtask` field alongside the usual `actions`. Client code needs no changes beyond pointing at the action port.
+
+An optional `obs["mode"]` switches behavior on the action endpoint:
+
+| `mode` | Behavior | Response |
+|--------|----------|----------|
+| `"default"` (or omitted) | Run planner, then action with augmented prompt | `actions` + `subtask` |
+| `"subtask_only"` | Run planner only; skip action inference | `subtask` only |
+| `"action_only"` | Skip planner; run action with the original prompt | `actions` only |
+
+### Admin HTTP endpoint
+
+When the planner is loaded, a small FastAPI admin server listens on port `8001`. It lets you mutate the decode prompt without a restart:
+
+```bash
+curl http://localhost:8001/config
+curl -X PATCH http://localhost:8001/config \
+  -H 'content-type: application/json' \
+  -d '{"generation_prompt_format": "Task: {task}. Subtask: "}'
+```
+
+Swagger UI is available at `http://localhost:8001/docs`. In Docker/EC2 deploys, bind this port to `127.0.0.1` only so it's not internet-reachable.
+
+### Caveats
+
+- Planner is JAX-only. PyTorch is not supported today.
+- `generation_prompt_format` must contain `{task}`; `action_prompt_template` must contain both `{task}` and `{subtask}`. Invalid templates fail at config-load time.
 
 ## Running locally
 
@@ -96,6 +204,14 @@ docker run --rm --gpus=all \
   -p 8000:8000 \
   -p 5555:5555/udp \
   openpi-flash
+```
+
+When the planner slot is enabled, also publish its transport triple (and the admin port, bound to localhost):
+
+```bash
+  -p 8002:8002 \
+  -p 5556:5556/udp \
+  -p 127.0.0.1:8001:8001 \
 ```
 
 Or with Docker Compose:
@@ -368,6 +484,8 @@ docker run -d --restart unless-stopped --gpus=all \
   "${ECR_REGISTRY}/openpi-flash:latest"
 ```
 
+If the planner slot is enabled, also add `-p 8002:8002 -p 5556:5556/udp -p 127.0.0.1:8001:8001` to the `docker run` command.
+
 ### Updating to a new version
 
 Re-run the ECR login, pull, stop, and run steps from above. You can pin to a specific commit: `openpi-flash:<commit-sha>` instead of `:latest`.
@@ -392,12 +510,23 @@ ECR keeps `latest` plus the 3 most recent images; older ones are cleaned up auto
 See [ARCHITECTURE.md](ARCHITECTURE.md) for a detailed codemap, invariants, and how the pieces fit together.
 
 ```
-              QUIC (UDP 5555, recommended)
+                                                                  Action slot
+              QUIC (UDP 5555, recommended)                        (PyTorch or JAX)
 client ─┬──────────────────────────────────> QUIC sidecar ─┐
-        │                                                   ├─> Policy.infer() -> response
+        │                                                   ├─> action Policy.infer() -> {actions, [subtask]}
         └─ WebSocket (TCP 8000, fallback) ─> WS server ────┘
                                                |
                                                +-- /healthz endpoint (HTTP 200)
                                                +-- server_timing (infer_ms, prev_total_ms)
                                                +-- msgpack binary protocol
+
+                                                                  Planner slot (optional, JAX)
+              QUIC (UDP 5556)
+client ─┬──────────────────────────────────> QUIC sidecar ─┐
+        │                                                   ├─> PlannerPolicy.infer() -> {subtask}
+        └─ WebSocket (TCP 8002) ───────────> WS server ────┘
+                                               |
+                                               +-- admin HTTP (port 8001): GET/PATCH /config, /docs
 ```
+
+In combined mode both slots load from the same process; the action endpoint's `Policy.infer()` internally calls the shared `SubtaskGenerator` before running action inference, which is why the action response can include a `subtask` field.

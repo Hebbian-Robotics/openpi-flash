@@ -1,0 +1,10 @@
+{
+  "action": {
+    "model_config_name": "pi05_aloha",
+    "checkpoint_dir": "/cache/models/pi05_base_openpi"
+  },
+  "planner": {
+    "checkpoint_dir": "gs://openpi-assets/checkpoints/pi05_base/params",
+    "max_generation_tokens": 20
+  }
+}
