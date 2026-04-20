@@ -17,7 +17,6 @@ import contextlib
 import pathlib
 import socket
 import subprocess
-import tempfile
 import time
 import uuid
 
@@ -38,6 +37,11 @@ from hosting.local_transport_protocol import (
 DEFAULT_TRANSPORT_STARTUP_TIMEOUT_SECONDS = 30.0
 DEFAULT_TRANSPORT_POLL_INTERVAL_SECONDS = 0.1
 
+# Unix sockets must fit in sun_path (104 bytes on macOS, 108 on Linux), so we
+# can't use tempfile.gettempdir() here — macOS's default $TMPDIR is a long
+# /var/folders/... path that overflows once the UUID filename is appended.
+_UNIX_SOCKET_DIR = pathlib.Path("/tmp")
+
 
 class FlashTransportPolicy(_base_policy.BasePolicy):
     """Connects to a direct QUIC server through a local ``openpi-flash-transport`` subprocess."""
@@ -52,10 +56,7 @@ class FlashTransportPolicy(_base_policy.BasePolicy):
         if transport_options is not None:
             raise ValueError(f"Custom transport_options are not supported by {BINARY_NAME} yet")
 
-        self._socket_path = pathlib.Path(
-            tempfile.gettempdir(),
-            f"{BINARY_NAME}-client-{uuid.uuid4().hex}.sock",
-        )
+        self._socket_path = _UNIX_SOCKET_DIR / f"{BINARY_NAME}-client-{uuid.uuid4().hex}.sock"
         self._transport_process = self._spawn_transport_process(
             host=host,
             port=port,

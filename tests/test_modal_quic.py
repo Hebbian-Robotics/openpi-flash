@@ -11,14 +11,14 @@ from hosting.quic_client_policy import QuicClientPolicy
 from tests.helpers import random_observation_aloha
 
 
-def run() -> None:
+def run(mode: str | None = None) -> None:
     print(f"Connecting via QUIC portal (Dict: '{OPENPI_MODAL_QUIC_INFO_DICT_NAME}') ...")
     quic_dict = Dict.from_name(OPENPI_MODAL_QUIC_INFO_DICT_NAME)
 
     policy = QuicClientPolicy(portal_dict=quic_dict)
     print(f"Server metadata: {policy.get_server_metadata()}")
 
-    result = run_benchmark(policy, random_observation_aloha)
+    result = run_benchmark(policy, lambda: random_observation_aloha(mode=mode))
     result.print_summary()
 
     policy.close()

@@ -11,7 +11,12 @@ DEFAULT_QUIC_PORT = 5555
 DEFAULT_WS_PORT = 8000
 
 
-def run(host: str, quic_port: int = DEFAULT_QUIC_PORT, ws_port: int = DEFAULT_WS_PORT) -> None:
+def run(
+    host: str,
+    quic_port: int = DEFAULT_QUIC_PORT,
+    ws_port: int = DEFAULT_WS_PORT,
+    mode: str | None = None,
+) -> None:
     health_url = f"http://{host}:{ws_port}/healthz"
     wait_for_server(health_url)
 
@@ -19,7 +24,7 @@ def run(host: str, quic_port: int = DEFAULT_QUIC_PORT, ws_port: int = DEFAULT_WS
     policy = FlashTransportPolicy(host=host, port=quic_port)
     print(f"Server metadata: {policy.get_server_metadata()}")
 
-    result = run_benchmark(policy, random_observation_aloha)
+    result = run_benchmark(policy, lambda: random_observation_aloha(mode=mode))
     result.print_summary()
 
     policy.close()

@@ -14,7 +14,6 @@ dependencies = [
     "fastapi>=0.136.0",
     "httpx>=0.28.1",
     "modal>=1.4.2",
-    "s3fs>=2026.2.0,<2026.3.0",
     "starlette>=1.0.0",
     "uvicorn>=0.32.0",
     "gsutil>=5.36",

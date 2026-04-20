@@ -13,7 +13,7 @@ from hosting.modal_dict_names import OPENPI_MODAL_TUNNEL_INFO_DICT_NAME
 from tests.helpers import random_observation_aloha, wait_for_server
 
 
-def run() -> None:
+def run(mode: str | None = None) -> None:
     print("Reading tunnel address from Modal Dict ...")
     tunnel_dict = Dict.from_name(OPENPI_MODAL_TUNNEL_INFO_DICT_NAME)
     ws_url = tunnel_dict["url"]
@@ -26,5 +26,8 @@ def run() -> None:
     policy = _websocket_client_policy.WebsocketClientPolicy(host=ws_url)
     print(f"Server metadata: {policy.get_server_metadata()}")
 
-    result = run_benchmark(cast(InferablePolicy, policy), random_observation_aloha)
+    result = run_benchmark(
+        cast(InferablePolicy, policy),
+        lambda: random_observation_aloha(mode=mode),
+    )
     result.print_summary()

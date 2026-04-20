@@ -1,5 +1,5 @@
 variable "aws_region" {
-  description = "AWS region for shared infrastructure (ECR, S3, IAM)"
+  description = "AWS region for shared infrastructure (ECR and IAM)"
   type        = string
   default     = "us-west-2"
 }

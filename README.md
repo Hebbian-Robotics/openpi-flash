@@ -47,7 +47,7 @@ cp config.example.json config.json
 | Field | Description |
 |-------|-------------|
 | `model_config_name` | openpi training config name (e.g. `pi05_aloha`, `pi0_aloha_sim`, `pi05_droid`) |
-| `checkpoint_dir` | Local path, `gs://`, or `s3://` URI to model checkpoint |
+| `checkpoint_dir` | Local path, `gs://`, or `hf://` URI to model checkpoint |
 | `default_prompt` | Optional default text prompt if not provided per-request |
 
 ### Planner slot (`planner.*`)

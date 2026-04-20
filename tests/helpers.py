@@ -11,9 +11,16 @@ SERVER_READINESS_TIMEOUT_SECONDS: Final[float] = 300.0
 SERVER_READINESS_POLL_INTERVAL_SECONDS: Final[float] = 5.0
 
 
-def random_observation_aloha() -> dict:
-    """Generate a random ALOHA observation for smoke testing."""
-    return make_aloha_observation(prompt="do something")
+def random_observation_aloha(mode: str | None = None) -> dict:
+    """Generate a random ALOHA observation for smoke testing.
+
+    When ``mode`` is set (e.g. ``"action_only"``), the value is added under
+    ``obs["mode"]`` so combined-mode servers can skip the planner phase.
+    """
+    observation = make_aloha_observation(prompt="do something")
+    if mode is not None:
+        observation["mode"] = mode
+    return observation
 
 
 def wait_for_server(

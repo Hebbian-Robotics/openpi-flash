@@ -11,7 +11,7 @@ Usage:
 
 import os
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 
@@ -79,14 +79,24 @@ def serve(
     serve_main()
 
 
+InferenceModeChoice = Literal["default", "action_only", "subtask_only"]
+
+_MODE_OPTION_HELP = (
+    "Inference mode sent in the observation. Lets benchmarks target one phase "
+    "of a combined-mode server: 'action_only' skips the planner, 'subtask_only' "
+    "skips the action policy. Omit for the server default."
+)
+
+
 @test_app.command(name="ws")
 def test_websocket(
     url: Annotated[str, typer.Argument(help="WebSocket URL (ws://host:port or wss://host).")],
+    mode: Annotated[InferenceModeChoice | None, typer.Option(help=_MODE_OPTION_HELP)] = None,
 ) -> None:
     """Smoke test against a WebSocket server (EC2, Docker, or Modal ASGI)."""
     from tests.test_ws import run
 
-    run(url)
+    run(url, mode=mode)
 
 
 @test_app.command(name="quic")
@@ -96,27 +106,32 @@ def test_quic(
     ws_port: Annotated[
         int, typer.Option(help="Server WebSocket/TCP port (for health check).")
     ] = 8000,
+    mode: Annotated[InferenceModeChoice | None, typer.Option(help=_MODE_OPTION_HELP)] = None,
 ) -> None:
     """Smoke test against a direct QUIC server (EC2 or Docker)."""
     from tests.test_quic import run
 
-    run(host, quic_port=quic_port, ws_port=ws_port)
+    run(host, quic_port=quic_port, ws_port=ws_port, mode=mode)
 
 
 @test_app.command(name="modal-tunnel")
-def test_modal_tunnel() -> None:
+def test_modal_tunnel(
+    mode: Annotated[InferenceModeChoice | None, typer.Option(help=_MODE_OPTION_HELP)] = None,
+) -> None:
     """Smoke test against a Modal tunnel deployment."""
     from tests.test_tunnel import run
 
-    run()
+    run(mode=mode)
 
 
 @test_app.command(name="modal-quic")
-def test_modal_quic() -> None:
+def test_modal_quic(
+    mode: Annotated[InferenceModeChoice | None, typer.Option(help=_MODE_OPTION_HELP)] = None,
+) -> None:
     """Smoke test against a Modal QUIC portal deployment."""
     from tests.test_modal_quic import run
 
-    run()
+    run(mode=mode)
 
 
 if __name__ == "__main__":
