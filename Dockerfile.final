@@ -1,0 +1,5 @@
+# Final layer: adds the pre-built openpi-flash-transport binary to the base image.
+# Used by CI after building the base image and the binary in parallel.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY openpi-flash-transport /usr/local/bin/openpi-flash-transport

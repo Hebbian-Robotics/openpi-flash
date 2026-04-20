@@ -61,15 +61,42 @@ locals {
     },
   )
 
-  effective_service_config_json = jsonencode(
-    {
-      model_config_name = var.model_config_name
-      checkpoint_dir    = var.checkpoint_dir
-      default_prompt    = var.default_prompt
-      port              = 8000
-      quic_port         = 5555
-    }
-  )
+  # Derived mode flags — mirror the Python server's _resolve_mode().
+  action_enabled  = var.action != null
+  planner_enabled = var.planner != null
+
+  # Service config JSON mirrors src/hosting/config.py:ServiceConfig. Pydantic
+  # validates the nested schema at process startup — only pass through what's
+  # set so defaults in the Python layer apply.
+  effective_service_config_json = jsonencode(merge(
+    local.action_enabled ? {
+      action = merge(
+        {
+          model_config_name = var.action.model_config_name
+          checkpoint_dir    = var.action.checkpoint_dir
+        },
+        var.action.default_prompt == null ? {} : {
+          default_prompt = var.action.default_prompt
+        },
+      )
+    } : {},
+    local.planner_enabled ? {
+      planner = merge(
+        {
+          checkpoint_dir = var.planner.checkpoint_dir
+        },
+        var.planner.max_generation_tokens == null ? {} : {
+          max_generation_tokens = var.planner.max_generation_tokens
+        },
+        var.planner.generation_prompt_format == null ? {} : {
+          generation_prompt_format = var.planner.generation_prompt_format
+        },
+        var.planner.action_prompt_template == null ? {} : {
+          action_prompt_template = var.planner.action_prompt_template
+        },
+      )
+    } : {},
+  ))
 
   ecr_registry_host   = split("/", var.ecr_repository_url)[0]
   effective_image_url = "${var.ecr_repository_url}:${var.docker_image_tag}"
@@ -82,6 +109,13 @@ resource "aws_security_group" "inference" {
   vpc_id      = data.aws_subnet.selected.vpc_id
 
   tags = local.effective_tags
+
+  lifecycle {
+    precondition {
+      condition     = local.action_enabled || local.planner_enabled
+      error_message = "At least one of var.action or var.planner must be non-null. The Python server will refuse to boot otherwise."
+    }
+  }
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ssh" {
@@ -95,26 +129,52 @@ resource "aws_vpc_security_group_ingress_rule" "ssh" {
   description       = "SSH access"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "websocket" {
-  for_each = toset(var.allowed_websocket_cidr_blocks)
+# -- Action slot: TCP 8000 (WebSocket) + UDP 5555 (QUIC) --
+
+resource "aws_vpc_security_group_ingress_rule" "action_websocket" {
+  for_each = local.action_enabled ? toset(var.allowed_websocket_cidr_blocks) : toset([])
 
   security_group_id = aws_security_group.inference.id
   cidr_ipv4         = each.value
   from_port         = 8000
   to_port           = 8000
   ip_protocol       = "tcp"
-  description       = "OpenPI WebSocket and health access"
+  description       = "OpenPI action-slot WebSocket/health"
 }
 
-resource "aws_vpc_security_group_ingress_rule" "quic" {
-  for_each = toset(var.allowed_quic_cidr_blocks)
+resource "aws_vpc_security_group_ingress_rule" "action_quic" {
+  for_each = local.action_enabled ? toset(var.allowed_quic_cidr_blocks) : toset([])
 
   security_group_id = aws_security_group.inference.id
   cidr_ipv4         = each.value
   from_port         = 5555
   to_port           = 5555
   ip_protocol       = "udp"
-  description       = "OpenPI QUIC access"
+  description       = "OpenPI action-slot QUIC"
+}
+
+# -- Planner slot: TCP 8002 (WebSocket) + UDP 5556 (QUIC) --
+
+resource "aws_vpc_security_group_ingress_rule" "planner_websocket" {
+  for_each = local.planner_enabled ? toset(var.allowed_websocket_cidr_blocks) : toset([])
+
+  security_group_id = aws_security_group.inference.id
+  cidr_ipv4         = each.value
+  from_port         = 8002
+  to_port           = 8002
+  ip_protocol       = "tcp"
+  description       = "OpenPI planner-slot WebSocket"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "planner_quic" {
+  for_each = local.planner_enabled ? toset(var.allowed_quic_cidr_blocks) : toset([])
+
+  security_group_id = aws_security_group.inference.id
+  cidr_ipv4         = each.value
+  from_port         = 5556
+  to_port           = 5556
+  ip_protocol       = "udp"
+  description       = "OpenPI planner-slot QUIC"
 }
 
 resource "aws_vpc_security_group_ingress_rule" "https" {
@@ -177,6 +237,9 @@ resource "aws_instance" "inference" {
       image_url                         = local.effective_image_url
       openpi_pytorch_compile_mode       = var.openpi_pytorch_compile_mode
       prepare_checkpoint                = var.prepare_checkpoint
+      xla_python_client_mem_fraction    = var.xla_python_client_mem_fraction
+      action_enabled                    = local.action_enabled
+      planner_enabled                   = local.planner_enabled
     }
   )
 

@@ -1,8 +1,29 @@
+use openpi_flash_transport::{arrow_codec, chunk_cache, image_preprocess, local_format, metadata};
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::chunk_cache::{ChunkCache, StepResult};
+use crate::image_preprocess::ImageSpec;
+use crate::local_format::ServerTiming;
+
+const ENV_OPEN_LOOP_HORIZON: &str = "OPENPI_OPEN_LOOP_HORIZON";
+
+fn read_open_loop_horizon_env() -> Result<Option<NonZeroUsize>> {
+    let Ok(value) = std::env::var(ENV_OPEN_LOOP_HORIZON) else {
+        return Ok(None);
+    };
+    let parsed: usize = value
+        .trim()
+        .parse()
+        .with_context(|| format!("{ENV_OPEN_LOOP_HORIZON}={value} is not a positive integer"))?;
+    let non_zero = NonZeroUsize::new(parsed)
+        .ok_or_else(|| anyhow!("{ENV_OPEN_LOOP_HORIZON} must be >= 1, got 0"))?;
+    Ok(Some(non_zero))
+}
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -38,7 +59,7 @@ impl LocalRequestType {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalResponseType {
     Metadata = 0x11,
     Infer = 0x12,
@@ -79,10 +100,61 @@ impl QuicMessageType {
     }
 }
 
+/// Client-side: transform an INFER request from Python into the QUIC wire
+/// payload. Decodes the local binary frame, applies any advertised image
+/// preprocessing, and re-encodes as Arrow IPC Streaming Format.
+fn transform_request_local_to_wire(body: &[u8], image_specs: &[ImageSpec]) -> Result<Vec<u8>> {
+    let mut frame = local_format::decode_local_frame(body)
+        .context("Failed to decode local frame from Python")?;
+
+    if !image_specs.is_empty() {
+        for array_index in 0..frame.arrays.len() {
+            let path = frame.arrays[array_index].path.clone();
+            let Some(spec) = image_specs.iter().find(|spec| spec.path == path) else {
+                continue;
+            };
+            if let Some(replacement) =
+                image_preprocess::maybe_preprocess(&frame.arrays[array_index], spec)
+                    .with_context(|| format!("Failed to preprocess image {path:?}"))?
+            {
+                frame.arrays[array_index] = replacement;
+            }
+        }
+    }
+
+    arrow_codec::encode_arrow_ipc(&frame).context("Failed to encode Arrow IPC for QUIC")
+}
+
+/// Transform an INFER payload from the QUIC wire back to local Python framing.
+fn transform_wire_to_local(body: &[u8]) -> Result<Vec<u8>> {
+    let frame =
+        arrow_codec::decode_arrow_ipc(body).context("Failed to decode Arrow IPC from QUIC")?;
+    local_format::encode_local_frame(&frame).context("Failed to encode local frame for Python")
+}
+
+/// Transform an INFER *response* from local Python framing to the QUIC wire,
+/// injecting `server_timing` measured by the server sidecar.
+fn transform_infer_response_to_wire(
+    body: &[u8],
+    server_timing: Option<ServerTiming>,
+) -> Result<Vec<u8>> {
+    let mut frame = local_format::decode_local_frame(body)
+        .context("Failed to decode response local frame from Python")?;
+    if let Some(timing) = server_timing {
+        local_format::inject_server_timing(&mut frame, timing)
+            .context("Failed to inject server_timing into response")?;
+    }
+    arrow_codec::encode_arrow_ipc(&frame).context("Failed to encode response Arrow IPC for QUIC")
+}
+
+fn duration_to_millis(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
+}
+
 #[derive(Parser, Debug)]
 #[command(
-    name = "openpi-quic-sidecar",
-    about = "Rust QUIC transport sidecar for openpi-flash"
+    name = "openpi-flash-transport",
+    about = "Transport layer (QUIC + Arrow IPC + preprocessing) for openpi-flash"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -357,9 +429,14 @@ async fn handle_server_connection(
         .await
         .context("Failed during QUIC handshake")?;
 
+    // Tracks total wall-clock for the previous INFER request so we can fill
+    // `server_timing.prev_total_ms` on the next response. None on the first
+    // response of the connection.
+    let mut prev_total_duration: Option<Duration> = None;
+
     loop {
         let quic_message_payload = match read_length_prefixed_message(&mut recv_stream).await {
-            Ok(Some(quic_message_payload)) => quic_message_payload,
+            Ok(Some(payload)) => payload,
             Ok(None) => {
                 info!("Client {remote_address} disconnected");
                 break;
@@ -373,44 +450,103 @@ async fn handle_server_connection(
             }
         };
 
-        let (raw_quic_message_type, quic_message_body) =
-            split_message_type_and_body(&quic_message_payload).context("Invalid QUIC message")?;
-        match QuicMessageType::from_u8(raw_quic_message_type)? {
-            QuicMessageType::Error => {
-                bail!(
-                    "Client sent QUIC error message: {}",
-                    String::from_utf8_lossy(quic_message_body)
-                );
-            }
-            QuicMessageType::Data => {
-                write_local_backend_request(
-                    &mut backend_stream,
-                    LocalRequestType::Infer,
-                    quic_message_body,
-                )
-                .await
-                .context("Failed to forward inference request to backend")?;
-            }
-            QuicMessageType::ResetRequest => {
-                write_local_backend_request(&mut backend_stream, LocalRequestType::Reset, &[])
-                    .await
-                    .context("Failed to forward reset request to backend")?;
-            }
-            QuicMessageType::ResetAck => {
-                bail!("Client sent unexpected reset acknowledgment");
-            }
+        let outcome = handle_server_message(
+            &quic_message_payload,
+            &mut send_stream,
+            &mut backend_stream,
+            prev_total_duration,
+        )
+        .await?;
+
+        if let ServerMessageOutcome::InferCompleted { total_duration } = outcome {
+            prev_total_duration = Some(total_duration);
         }
-        let backend_response = read_local_backend_response(&mut backend_stream)
-            .await
-            .context("Failed to read backend response")?;
-        forward_backend_response_to_quic(&mut send_stream, &backend_response)
-            .await
-            .context("Failed to forward backend response to QUIC client")?;
     }
 
     let _ = send_stream.finish();
     quic_connection.close(0_u32.into(), b"client disconnected");
     Ok(())
+}
+
+/// Observable side-effect of processing one QUIC message, so the outer loop
+/// can carry `prev_total_ms` forward only when we actually completed an
+/// inference round-trip (not for control messages like handshake or reset).
+enum ServerMessageOutcome {
+    InferCompleted { total_duration: Duration },
+    ControlMessageHandled,
+}
+
+/// Dispatch one QUIC message on the server sidecar and — when applicable —
+/// drive the full "forward to backend, collect response, inject timing,
+/// reply" round-trip. Extracted from `handle_server_connection` so the
+/// per-message dispatch stays focused and the connection loop just handles
+/// read-framing and state carry-over.
+async fn handle_server_message(
+    quic_message_payload: &[u8],
+    send_stream: &mut SendStream,
+    backend_stream: &mut UnixStream,
+    prev_total_duration: Option<Duration>,
+) -> Result<ServerMessageOutcome> {
+    let (raw_quic_message_type, quic_message_body) =
+        split_message_type_and_body(quic_message_payload).context("Invalid QUIC message")?;
+    let request_received_at = Instant::now();
+
+    match QuicMessageType::from_u8(raw_quic_message_type)? {
+        QuicMessageType::Error => {
+            bail!(
+                "Client sent QUIC error message: {}",
+                String::from_utf8_lossy(quic_message_body)
+            );
+        }
+        QuicMessageType::Data => {
+            let backend_body = match transform_wire_to_local(quic_message_body) {
+                Ok(body) => body,
+                Err(error) => {
+                    let message = format!("Wire-to-local transform failed: {error:#}");
+                    warn!("{message}");
+                    send_quic_error(send_stream, &message).await?;
+                    return Ok(ServerMessageOutcome::ControlMessageHandled);
+                }
+            };
+            write_local_backend_request(backend_stream, LocalRequestType::Infer, &backend_body)
+                .await
+                .context("Failed to forward inference request to backend")?;
+        }
+        QuicMessageType::ResetRequest => {
+            write_local_backend_request(backend_stream, LocalRequestType::Reset, &[])
+                .await
+                .context("Failed to forward reset request to backend")?;
+        }
+        QuicMessageType::ResetAck => {
+            bail!("Client sent unexpected control message: {raw_quic_message_type:#x}");
+        }
+    }
+
+    let backend_response = read_local_backend_response(backend_stream)
+        .await
+        .context("Failed to read backend response")?;
+
+    // Build the timing snapshot for this request before sending. `infer_ms`
+    // is the sidecar's view of "Python backend wall time" (includes Unix
+    // socket + local-frame work), which is more honest than the
+    // policy.infer()-only number Python used to report.
+    let server_timing =
+        (backend_response.response_type == LocalResponseType::Infer).then(|| ServerTiming {
+            infer_ms: duration_to_millis(request_received_at.elapsed()),
+            prev_total_ms: prev_total_duration.map(duration_to_millis),
+        });
+
+    forward_backend_response_to_quic(send_stream, &backend_response, server_timing)
+        .await
+        .context("Failed to forward backend response to QUIC client")?;
+
+    if backend_response.response_type == LocalResponseType::Infer {
+        Ok(ServerMessageOutcome::InferCompleted {
+            total_duration: request_received_at.elapsed(),
+        })
+    } else {
+        Ok(ServerMessageOutcome::ControlMessageHandled)
+    }
 }
 
 async fn handle_server_handshake(
@@ -438,7 +574,10 @@ async fn handle_server_handshake(
     let backend_response = read_local_backend_response(backend_stream)
         .await
         .context("Failed to read backend metadata response")?;
-    forward_backend_response_to_quic(send_stream, &backend_response)
+    // Metadata is a msgpack blob produced by openpi; the sidecar forwards its
+    // bytes verbatim. Server timing applies to INFER responses only, so we
+    // pass `None` here.
+    forward_backend_response_to_quic(send_stream, &backend_response, None)
         .await
         .context("Failed to send metadata to QUIC client")?;
     Ok(())
@@ -486,6 +625,52 @@ async fn serve_local_client_socket(
         local_socket_path.display()
     );
 
+    // Parse image preprocessing rules from the server's metadata once;
+    // they're stable for the lifetime of the QUIC connection.
+    let image_specs = match metadata::parse_image_specs(server_metadata) {
+        Ok(specs) => {
+            if !specs.is_empty() {
+                info!(
+                    "Image preprocessing enabled for {} field(s) advertised by server",
+                    specs.len()
+                );
+            }
+            specs
+        }
+        Err(error) => {
+            warn!("Failed to parse server image_specs metadata; preprocessing disabled: {error:#}");
+            Vec::new()
+        }
+    };
+
+    // Action chunking is opt-in: customer sets OPENPI_OPEN_LOOP_HORIZON to
+    // ask the sidecar to serve N steps from each server response before
+    // re-querying. The server must also advertise an action_horizon in
+    // metadata so we know which arrays to slice.
+    let open_loop_horizon = read_open_loop_horizon_env()?;
+    let action_horizon = match metadata::parse_action_horizon(server_metadata) {
+        Ok(horizon) => horizon,
+        Err(error) => {
+            warn!("Failed to parse server action_horizon metadata; chunking disabled: {error:#}");
+            None
+        }
+    };
+    let chunking_enabled = match (open_loop_horizon, action_horizon) {
+        (Some(open_loop), Some(horizon)) => {
+            info!(
+                "Action chunking enabled: action_horizon={horizon}, open_loop_horizon={open_loop}",
+            );
+            Some((horizon, open_loop))
+        }
+        (Some(_), None) => {
+            warn!(
+                "{ENV_OPEN_LOOP_HORIZON} set but server did not advertise action_horizon; chunking disabled",
+            );
+            None
+        }
+        _ => None,
+    };
+
     loop {
         let (mut local_client_stream, _) = local_listener
             .accept()
@@ -493,11 +678,16 @@ async fn serve_local_client_socket(
             .context("Failed to accept local Python client connection")?;
         info!("Local Python client connected");
 
+        let mut chunk_cache =
+            chunking_enabled.map(|(horizon, open_loop)| ChunkCache::new(horizon, open_loop));
+
         if let Err(error) = serve_local_client_connection(
             &mut local_client_stream,
             send_stream,
             recv_stream,
             server_metadata,
+            &image_specs,
+            chunk_cache.as_mut(),
         )
         .await
         {
@@ -513,6 +703,8 @@ async fn serve_local_client_connection(
     send_stream: &mut SendStream,
     recv_stream: &mut RecvStream,
     server_metadata: &[u8],
+    image_specs: &[ImageSpec],
+    mut chunk_cache: Option<&mut ChunkCache>,
 ) -> Result<()> {
     loop {
         let Some(local_request_payload) = read_length_prefixed_message(local_client_stream).await?
@@ -535,18 +727,90 @@ async fn serve_local_client_connection(
                 .await?;
             }
             LocalRequestType::Reset => {
+                if let Some(cache) = chunk_cache.as_deref_mut() {
+                    cache.reset();
+                }
                 forward_reset_request_to_remote_quic(send_stream, recv_stream).await?;
                 write_local_response(local_client_stream, LocalResponseType::Reset, &[]).await?;
             }
             LocalRequestType::Infer => {
-                let remote_response = forward_inference_request_to_remote_quic(
+                let response_to_python = handle_infer(
                     send_stream,
                     recv_stream,
                     local_request_body,
+                    image_specs,
+                    chunk_cache.as_deref_mut(),
                 )
                 .await?;
-                write_framed_message(local_client_stream, &remote_response).await?;
+                write_framed_message(local_client_stream, &response_to_python).await?;
             }
+        }
+    }
+}
+
+/// Handle one INFER request from Python with optional chunk caching.
+///
+/// When chunking is active, we only forward to the server when the cache is
+/// empty/exhausted. Each call returns a single-step slice from the cached
+/// chunk. When chunking is disabled, we always forward and return the full
+/// response.
+async fn handle_infer(
+    send_stream: &mut SendStream,
+    recv_stream: &mut RecvStream,
+    request_body: &[u8],
+    image_specs: &[ImageSpec],
+    chunk_cache: Option<&mut ChunkCache>,
+) -> Result<Vec<u8>> {
+    let Some(cache) = chunk_cache else {
+        return forward_inference_request_to_remote_quic(
+            send_stream,
+            recv_stream,
+            request_body,
+            image_specs,
+        )
+        .await;
+    };
+
+    // Try to serve from the cache first. On `RefreshNeeded` we fetch a new
+    // chunk and try again; a second `RefreshNeeded` after a successful
+    // `store()` would mean the cache is broken (open_loop_horizon < 1, which
+    // `ChunkCache::new` prevents).
+    if let StepResult::Served(sliced_frame) = cache.next_step()? {
+        let sliced_body = local_format::encode_local_frame(&sliced_frame)
+            .context("Failed to re-encode cached chunk step for Python")?;
+        return Ok(make_local_response(LocalResponseType::Infer, &sliced_body));
+    }
+
+    let raw_response = forward_inference_request_to_remote_quic(
+        send_stream,
+        recv_stream,
+        request_body,
+        image_specs,
+    )
+    .await?;
+    let (response_type, response_body) =
+        split_message_type_and_body(&raw_response).context("Invalid sidecar response")?;
+    let response_type = LocalResponseType::from_u8(response_type)?;
+    if response_type != LocalResponseType::Infer {
+        // Pass error / unexpected types straight through; Python will
+        // surface them. Don't poison the cache.
+        return Ok(raw_response);
+    }
+    let frame = local_format::decode_local_frame(response_body)
+        .context("Failed to decode response for chunk cache")?;
+    cache.store(frame);
+
+    match cache.next_step()? {
+        StepResult::Served(sliced_frame) => {
+            let sliced_body = local_format::encode_local_frame(&sliced_frame)
+                .context("Failed to re-encode sliced chunk step for Python")?;
+            Ok(make_local_response(LocalResponseType::Infer, &sliced_body))
+        }
+        // `ChunkCache::new` enforces open_loop_horizon >= 1, so a freshly
+        // stored chunk always has at least one step available. Reaching
+        // this branch would mean the invariant was violated.
+        StepResult::RefreshNeeded => {
+            bail!("chunk cache exhausted immediately after store(); this is a bug")
         }
     }
 }
@@ -555,10 +819,13 @@ async fn forward_inference_request_to_remote_quic(
     send_stream: &mut SendStream,
     recv_stream: &mut RecvStream,
     request_body: &[u8],
+    image_specs: &[ImageSpec],
 ) -> Result<Vec<u8>> {
-    let mut quic_payload = Vec::with_capacity(1 + request_body.len());
+    let wire_body = transform_request_local_to_wire(request_body, image_specs)
+        .context("Failed to convert local frame to QUIC wire payload")?;
+    let mut quic_payload = Vec::with_capacity(1 + wire_body.len());
     quic_payload.push(QuicMessageType::Data as u8);
-    quic_payload.extend_from_slice(request_body);
+    quic_payload.extend_from_slice(&wire_body);
     write_length_prefixed_message(send_stream, &quic_payload)
         .await
         .context("Failed to forward local inference request to remote QUIC server")?;
@@ -571,10 +838,11 @@ async fn forward_inference_request_to_remote_quic(
             .context("Invalid remote QUIC response payload")?;
 
     match QuicMessageType::from_u8(raw_quic_message_type)? {
-        QuicMessageType::Data => Ok(make_local_response(
-            LocalResponseType::Infer,
-            remote_response_body,
-        )),
+        QuicMessageType::Data => {
+            let local_body = transform_wire_to_local(remote_response_body)
+                .context("Failed to convert QUIC wire payload to local frame")?;
+            Ok(make_local_response(LocalResponseType::Infer, &local_body))
+        }
         QuicMessageType::Error => Ok(make_local_response(
             LocalResponseType::Error,
             remote_response_body,
@@ -615,12 +883,21 @@ async fn forward_reset_request_to_remote_quic(
 async fn forward_backend_response_to_quic(
     send_stream: &mut SendStream,
     backend_response: &LocalBackendResponse,
+    server_timing: Option<ServerTiming>,
 ) -> Result<()> {
     match backend_response.response_type {
-        LocalResponseType::Metadata | LocalResponseType::Infer => {
+        LocalResponseType::Metadata => {
             let mut quic_payload = Vec::with_capacity(1 + backend_response.response_body.len());
             quic_payload.push(QuicMessageType::Data as u8);
             quic_payload.extend_from_slice(&backend_response.response_body);
+            write_length_prefixed_message(send_stream, &quic_payload).await
+        }
+        LocalResponseType::Infer => {
+            let wire_body =
+                transform_infer_response_to_wire(&backend_response.response_body, server_timing)?;
+            let mut quic_payload = Vec::with_capacity(1 + wire_body.len());
+            quic_payload.push(QuicMessageType::Data as u8);
+            quic_payload.extend_from_slice(&wire_body);
             write_length_prefixed_message(send_stream, &quic_payload).await
         }
         LocalResponseType::Error => {
@@ -633,6 +910,16 @@ async fn forward_backend_response_to_quic(
             write_length_prefixed_message(send_stream, &[QuicMessageType::ResetAck as u8]).await
         }
     }
+}
+
+/// Emit a QUIC Error frame carrying a UTF-8 message; used when the sidecar
+/// catches a transform error and wants to signal failure without tearing
+/// down the connection.
+async fn send_quic_error(send_stream: &mut SendStream, message: &str) -> Result<()> {
+    let mut quic_payload = Vec::with_capacity(1 + message.len());
+    quic_payload.push(QuicMessageType::Error as u8);
+    quic_payload.extend_from_slice(message.as_bytes());
+    write_length_prefixed_message(send_stream, &quic_payload).await
 }
 
 struct LocalBackendResponse {

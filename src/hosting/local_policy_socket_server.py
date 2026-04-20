@@ -1,16 +1,15 @@
-"""Local Unix-socket backend for transport sidecars.
+"""Local Unix-socket backend for ``openpi-flash-transport``.
 
-This server keeps the OpenPI-specific work in Python while allowing a
-transport sidecar to own the network protocol. The sidecar sends framed
-requests over a Unix domain socket; this server decodes observations,
-invokes ``policy.infer()``, and returns msgpack-encoded responses.
+Keeps OpenPI-specific work in Python while the transport binary owns the
+network protocol. It sends framed requests over a Unix domain socket; this
+server decodes observations, invokes ``policy.infer()``, and returns
+local-frame-encoded responses.
 """
 
 from __future__ import annotations
 
 import pathlib
 import socket
-import time
 import traceback
 from collections.abc import Callable
 from typing import Any
@@ -18,9 +17,11 @@ from typing import Any
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 
-from hosting.local_sidecar_protocol import (
-    SidecarRequestType,
-    SidecarResponseType,
+from hosting.flash_transport_binary import BINARY_NAME
+from hosting.local_frame import pack_local_frame, unpack_local_frame
+from hosting.local_transport_protocol import (
+    TransportRequestType,
+    TransportResponseType,
     recv_framed_message,
     send_framed_message,
 )
@@ -39,11 +40,12 @@ class LocalPolicySocketServer:
         self._policy = policy
         self._socket_path = socket_path
         self._log = log
-        self._metadata_packer = msgpack_numpy.Packer()
-        self._packed_metadata = self._metadata_packer.pack(metadata)
+        # Metadata stays msgpack_numpy end to end — it's openpi's blob,
+        # forwarded verbatim through the QUIC handshake.
+        self._packed_metadata = msgpack_numpy.Packer().pack(metadata)
 
     def serve_forever(self) -> None:
-        """Listen forever for sidecar connections."""
+        """Listen forever for transport connections."""
         self._remove_stale_socket_file()
 
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server_socket:
@@ -54,7 +56,7 @@ class LocalPolicySocketServer:
             while True:
                 connection_socket, _ = server_socket.accept()
                 with connection_socket:
-                    self._log("[local-policy-socket] Sidecar connected")
+                    self._log("[local-policy-socket] Transport connected")
                     try:
                         self._serve_connection(connection_socket)
                     except Exception:
@@ -73,57 +75,45 @@ class LocalPolicySocketServer:
         self._socket_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _serve_connection(self, connection_socket: socket.socket) -> None:
-        previous_total_duration_seconds: float | None = None
-        response_packer = msgpack_numpy.Packer()
-
         while True:
             framed_request = recv_framed_message(connection_socket)
             if framed_request is None:
-                self._log("[local-policy-socket] Sidecar disconnected")
+                self._log("[local-policy-socket] Transport disconnected")
                 break
             if not framed_request:
-                raise RuntimeError("Received empty framed request from sidecar")
+                raise RuntimeError(f"Received empty framed request from {BINARY_NAME}")
 
             request_type = framed_request[0]
             request_body = framed_request[1:]
 
-            if request_type == SidecarRequestType.METADATA:
+            if request_type == TransportRequestType.METADATA:
                 send_framed_message(
                     connection_socket,
-                    bytes([SidecarResponseType.METADATA]) + self._packed_metadata,
+                    bytes([TransportResponseType.METADATA]) + self._packed_metadata,
                 )
                 continue
 
-            if request_type == SidecarRequestType.RESET:
+            if request_type == TransportRequestType.RESET:
                 self._policy.reset()
-                send_framed_message(connection_socket, bytes([SidecarResponseType.RESET]))
-                previous_total_duration_seconds = None
+                send_framed_message(connection_socket, bytes([TransportResponseType.RESET]))
                 continue
 
-            if request_type != SidecarRequestType.INFER:
-                raise RuntimeError(f"Unexpected sidecar request type: {request_type!r}")
+            if request_type != TransportRequestType.INFER:
+                raise RuntimeError(f"Unexpected transport request type: {request_type!r}")
 
-            request_start_time = time.monotonic()
             try:
-                observation = msgpack_numpy.unpackb(request_body)
-
-                infer_start_time = time.monotonic()
+                observation = unpack_local_frame(request_body)
+                # server_timing is injected by the transport server; we
+                # forward `action` untouched so policy_timing (set by the
+                # model) reaches the client as-is.
                 action = self._policy.infer(observation)
-                infer_duration_milliseconds = (time.monotonic() - infer_start_time) * 1000
-
-                server_timing: dict[str, float] = {"infer_ms": infer_duration_milliseconds}
-                if previous_total_duration_seconds is not None:
-                    server_timing["prev_total_ms"] = previous_total_duration_seconds * 1000
-
-                response_payload = response_packer.pack({**action, "server_timing": server_timing})
+                response_payload = pack_local_frame(action)
                 send_framed_message(
                     connection_socket,
-                    bytes([SidecarResponseType.INFER]) + response_payload,
+                    bytes([TransportResponseType.INFER]) + response_payload,
                 )
-                previous_total_duration_seconds = time.monotonic() - request_start_time
             except Exception:
                 send_framed_message(
                     connection_socket,
-                    bytes([SidecarResponseType.ERROR]) + traceback.format_exc().encode("utf-8"),
+                    bytes([TransportResponseType.ERROR]) + traceback.format_exc().encode("utf-8"),
                 )
-                previous_total_duration_seconds = None

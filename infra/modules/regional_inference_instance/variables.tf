@@ -41,7 +41,7 @@ variable "instance_type" {
 variable "root_volume_size_gib" {
   description = "Root EBS volume size in GiB"
   type        = number
-  default     = 100
+  default     = 200
 }
 
 variable "ssh_key_name" {
@@ -75,13 +75,13 @@ variable "allowed_ssh_cidr_blocks" {
 }
 
 variable "allowed_websocket_cidr_blocks" {
-  description = "CIDR blocks allowed to reach the WebSocket and health endpoint on TCP 8000"
+  description = "CIDR blocks allowed to reach the action-slot WebSocket/health endpoint on TCP 8000 (and the planner-slot WebSocket on TCP 8002 when planner is enabled)"
   type        = list(string)
   default     = []
 }
 
 variable "allowed_quic_cidr_blocks" {
-  description = "CIDR blocks allowed to reach the QUIC endpoint on UDP 5555"
+  description = "CIDR blocks allowed to reach the action-slot QUIC endpoint on UDP 5555 (and the planner-slot QUIC endpoint on UDP 5556 when planner is enabled)"
   type        = list(string)
   default     = []
 }
@@ -114,19 +114,49 @@ variable "container_name" {
   default     = "openpi-inference"
 }
 
-variable "model_config_name" {
-  description = "OpenPI model config name to serve"
-  type        = string
-  default     = "pi05_aloha"
+# -- Component slots -----------------------------------------------------------
+#
+# The Python server boots in one of three modes derived from which slots are
+# set:
+#
+#   action != null, planner == null  → action_only  (current production default)
+#   action == null, planner != null  → planner_only (JAX subtask planner only)
+#   action != null, planner != null  → combined     (two-phase, both endpoints)
+#
+# At least one must be non-null; the Python config will fail validation at
+# startup if both are null.
+
+variable "action" {
+  description = "Action slot config. Set to null to deploy a planner-only server. When set, the server exposes TCP 8000 (WebSocket) + UDP 5555 (QUIC)."
+  type = object({
+    model_config_name = string
+    checkpoint_dir    = string
+    default_prompt    = optional(string)
+  })
+  default = null
 }
 
-variable "checkpoint_dir" {
-  description = "Checkpoint directory for the model, typically the locally prepared path in /cache/models"
-  type        = string
+variable "planner" {
+  description = "JAX subtask planner slot config. Set to null to deploy an action-only server. When set, the server exposes TCP 8002 (WebSocket) + UDP 5556 (QUIC) + TCP 8001 (admin HTTP, bound to 127.0.0.1)."
+  type = object({
+    checkpoint_dir           = string
+    max_generation_tokens    = optional(number)
+    generation_prompt_format = optional(string)
+    action_prompt_template   = optional(string)
+  })
+  default = null
 }
+
+# -- Checkpoint prep (action slot only) ---------------------------------------
+#
+# Optional one-shot step on first boot that prepares a Hugging Face checkpoint
+# into an OpenPI-compatible layout under /cache/models. Only relevant when the
+# action slot uses a locally prepared checkpoint path — planner checkpoints are
+# pulled directly from gs:// at SubtaskGenerator.load() time and don't need
+# prep. Disable with prepare_checkpoint = false for planner-only deployments.
 
 variable "prepare_checkpoint" {
-  description = "Whether to run the one-shot Docker checkpoint preparation step before starting inference"
+  description = "Run the one-shot Docker checkpoint preparation step on first boot. Action-slot-only; safe to disable for planner-only deployments."
   type        = bool
   default     = true
 }
@@ -155,10 +185,10 @@ variable "openpi_pytorch_compile_mode" {
   default     = "default"
 }
 
-variable "default_prompt" {
-  description = "Optional default prompt injected by the server"
+variable "xla_python_client_mem_fraction" {
+  description = "JAX GPU memory fraction (0.0-1.0). Set to 0.5 when both JAX and PyTorch are co-resident (combined mode). Empty string disables the override."
   type        = string
-  default     = null
+  default     = ""
 }
 
 variable "extra_bootstrap_commands" {

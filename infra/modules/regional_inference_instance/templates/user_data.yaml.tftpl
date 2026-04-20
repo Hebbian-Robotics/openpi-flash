@@ -2,6 +2,11 @@
 # Cloud-init configuration for OpenPI inference instances.
 # Expects a Deep Learning AMI GPU PyTorch (Ubuntu 24.04) which ships with
 # Docker, nvidia-container-toolkit, CUDA, and AWS CLI pre-installed.
+#
+# Ports are published per active slot. Combined mode publishes both slots.
+#
+#   action slot : 8000/tcp (WebSocket), 5555/udp (QUIC)
+#   planner slot: 8002/tcp (WebSocket), 5556/udp (QUIC), 8001/tcp (admin, loopback only)
 
 write_files:
   - path: /etc/openpi/config.json
@@ -39,8 +44,18 @@ write_files:
         -v openpi-inference-cache:/cache \
         -e INFERENCE_CONFIG_PATH=/config/config.json \
         -e OPENPI_PYTORCH_COMPILE_MODE=${openpi_pytorch_compile_mode} \
+%{ if xla_python_client_mem_fraction != "" ~}
+        -e XLA_PYTHON_CLIENT_MEM_FRACTION=${xla_python_client_mem_fraction} \
+%{ endif ~}
+%{ if action_enabled ~}
         -p 8000:8000 \
         -p 5555:5555/udp \
+%{ endif ~}
+%{ if planner_enabled ~}
+        -p 8002:8002 \
+        -p 5556:5556/udp \
+        -p 127.0.0.1:8001:8001 \
+%{ endif ~}
         --name ${container_name} \
         ${image_url}
 

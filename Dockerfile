@@ -1,8 +1,11 @@
 # Dockerfile for the openpi-flash inference engine.
 # Based on openpi's scripts/docker/serve_policy.Dockerfile
 #
-# Build (from ~/openpi/hosting/):
+# Local dev (builds everything including openpi-flash-transport):
 #   docker build .. -t openpi-flash -f Dockerfile
+#
+# CI base image (skips Rust, transport binary added later from CI artifact):
+#   docker build .. -t openpi-flash-base -f Dockerfile --target base
 #
 # Run:
 #   docker run --rm -it --gpus=all \
@@ -11,16 +14,15 @@
 #     -p 8000:8000 -p 5555:5555/udp \
 #     openpi-flash
 
-FROM rust:1.88-bookworm AS quic-sidecar-builder
+FROM rust:1-slim-bookworm AS rust-builder
 
 WORKDIR /build
-COPY hosting/quic-sidecar/Cargo.toml /build/Cargo.toml
-COPY hosting/quic-sidecar/src /build/src
+COPY hosting/flash-transport/Cargo.toml /build/Cargo.toml
+COPY hosting/flash-transport/src /build/src
 RUN cargo build --release
 
-FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04@sha256:2d913b09e6be8387e1a10976933642c73c840c0b735f0bf3c28d97fc9bc422e0
+FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04 AS base
 COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /uvx /bin/
-COPY --from=quic-sidecar-builder /build/target/release/openpi-quic-sidecar /usr/local/bin/openpi-quic-sidecar
 
 WORKDIR /app
 
@@ -28,7 +30,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git git-lfs linux-headers-generic build-essential clang \
-        libgl1-mesa-glx libglib2.0-0 libsm6 libxrender1 libxext6 \
+        libgl1 libglib2.0-0 libsm6 libxrender1 libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy from the cache instead of linking since it's a mounted volume.
@@ -72,6 +74,21 @@ ENV TORCHINDUCTOR_FX_GRAPH_CACHE=1
 
 # openpi data home for downloaded checkpoints and norm stats.
 ENV OPENPI_DATA_HOME=/cache/models
+
+# Limit JAX GPU memory when both slots are loaded (combined mode, JAX planner +
+# PyTorch action co-resident). Harmless in single-slot modes — only takes
+# effect when JAX actually allocates GPU memory.
+ENV XLA_PYTHON_CLIENT_MEM_FRACTION=0.5
+
+# Slot-specific ports:
+#   action  : 8000/tcp (WebSocket), 5555/udp (QUIC)
+#   planner : 8002/tcp (WebSocket), 5556/udp (QUIC), 8001/tcp (admin, loopback only)
 EXPOSE 5555/udp
+EXPOSE 5556/udp
 
 CMD ["python", "main.py", "serve"]
+
+# Final stage: adds the openpi-flash-transport binary to the base image.
+# This is the default target for local dev builds.
+FROM base AS final
+COPY --from=rust-builder /build/target/release/openpi-flash-transport /usr/local/bin/openpi-flash-transport

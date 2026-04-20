@@ -59,12 +59,19 @@ uv run python main.py serve --config config.json
 
 For non-Docker local runs, point `checkpoint_dir` at the prepared checkpoint in your local OpenPI cache, typically `$HOME/.cache/openpi/pi05_base_openpi`.
 
-Local serving uses the Rust QUIC sidecar for direct QUIC. If you are not using the Docker image, build the sidecar locally and point the server at the binary:
+Local serving uses the `openpi-flash-transport` binary for direct QUIC. If you are not using the Docker image, you can either download a pre-built binary from [GitHub Actions](./.github/workflows/docker-build.yml) (look for the `flash-transport-x86_64-linux` or `flash-transport-aarch64-linux` artifact on the latest run) or build it locally with Rust:
 
 ```bash
-cd quic-sidecar && cargo build
+# Option 1: Download from GitHub Actions (no Rust needed)
+# Go to Actions → Docker Build → latest run → Artifacts → flash-transport-x86_64-linux
+chmod +x openpi-flash-transport
+OPENPI_FLASH_TRANSPORT_BINARY=$PWD/openpi-flash-transport \
+uv run python main.py serve --config config.json
+
+# Option 2: Build locally (requires Rust)
+cd flash-transport && cargo build
 cd ..
-OPENPI_QUIC_SIDECAR_BINARY=$PWD/quic-sidecar/target/debug/openpi-quic-sidecar \
+OPENPI_FLASH_TRANSPORT_BINARY=$PWD/flash-transport/target/debug/openpi-flash-transport \
 uv run python main.py serve --config config.json
 ```
 
@@ -97,7 +104,7 @@ Or with Docker Compose:
 docker compose --profile openpi up --build
 ```
 
-The Docker image builds and runs a Rust QUIC sidecar by default for the direct EC2/AWS QUIC path. The Python process still owns policy loading and inference; the sidecar only terminates QUIC and forwards requests over a local Unix socket.
+The Docker image builds and runs `openpi-flash-transport` by default for the direct EC2/AWS QUIC path. The Python process still owns policy loading and inference; the transport binary only terminates QUIC and forwards requests over a local Unix socket.
 
 ## Running on Modal
 
@@ -253,16 +260,16 @@ uv run modal volume ls openpi-model-weights
 
 ### QUIC (recommended for EC2/Docker)
 
-QUIC provides lower and more consistent latency than WebSocket for direct connections. Use it as the default transport for EC2/Docker deployments where the server has a stable public IP and UDP is not blocked. The Python client keeps the normal `policy.infer()` API, but direct QUIC now runs through a local Rust sidecar process on the client machine.
+QUIC provides lower and more consistent latency than WebSocket for direct connections. Use it as the default transport for EC2/Docker deployments where the server has a stable public IP and UDP is not blocked. The Python client keeps the normal `policy.infer()` API, but direct QUIC now runs through a local `openpi-flash-transport` subprocess on the client machine.
 
 > **Note:** On Modal, QUIC requires NAT traversal (STUN + UDP hole punching) which is unreliable — it fails frequently depending on the NAT type assigned to the container. Use WebSocket for Modal deployments.
 >
-> For direct QUIC, the client machine also needs the `openpi-quic-sidecar` binary installed. Set `OPENPI_QUIC_SIDECAR_BINARY` if it is not on the default path.
+> For direct QUIC, the client machine also needs the `openpi-flash-transport` binary. You can download a pre-built binary from [GitHub Actions](./.github/workflows/docker-build.yml) (no Rust required) or build it locally from `flash-transport/`. Set `OPENPI_FLASH_TRANSPORT_BINARY` if it is not on the default path.
 
 ```python
-from hosting.direct_quic_client_policy import DirectQuicClientPolicy
+from hosting.flash_transport_policy import FlashTransportPolicy
 
-client = DirectQuicClientPolicy(host="your-ec2-ip", port=5555)
+client = FlashTransportPolicy(host="your-ec2-ip", port=5555)
 action = client.infer(observation)
 client.close()
 ```
@@ -333,7 +340,7 @@ docker run --rm \
 
 See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md) for full details. The short version:
 
-1. Launch a **g6e.xlarge** (L40S GPU) with **Ubuntu 24.04**, **100 GiB** gp3, IAM profile `ec2-ecr-pull`
+1. Launch a **g6e.xlarge** (L40S GPU) with **Ubuntu 24.04**, **200 GiB** gp3, IAM profile `ec2-ecr-pull`
 2. Install Docker + NVIDIA Container Toolkit
 3. Pull, prepare the checkpoint, and run:
 

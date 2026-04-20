@@ -4,6 +4,8 @@
 
 openpi-flash is a real-time inference engine that serves OpenPI policy models over QUIC and WebSocket transports with torch.compile acceleration. It supports deployment on AWS EC2 (Docker Compose) and Modal (serverless).
 
+For terraform use `tofu` not `terraform` CLI for consistency.
+
 ## Running Locally
 
 ```bash
@@ -44,14 +46,16 @@ uv run python main.py test quic localhost
 
 ## Code Quality
 
+Run everything below in one shot with `./scripts/check.sh` (optional tools are skipped with a warning if missing).
+
 ```bash
 uv run ruff check --fix  
 uv run ruff format       
 uv run ty check          
 
-# Rust QUIC sidecar
-cd quic-sidecar && cargo fmt
-cd quic-sidecar && cargo clippy --all-targets --all-features
+# Rust transport layer
+cd flash-transport && cargo fmt
+cd flash-transport && cargo clippy --all-targets --all-features
 
 lychee -v .              # Markdown link checking
 hadolint Dockerfile      # Docker linting (brew install hadolint)

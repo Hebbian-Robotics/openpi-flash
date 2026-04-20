@@ -148,7 +148,7 @@ These steps are repeated for each EC2 instance you launch.
    - TCP 8000 for WebSocket inference
    - UDP 5555 for QUIC transport
    - TCP 443 if using HTTPS (Caddy or ALB)
-7. Storage: **100 GiB** gp3 root volume
+7. Storage: **200 GiB** gp3 root volume
 8. Advanced > IAM instance profile: **ec2-ecr-pull**
 9. Launch
 
@@ -168,7 +168,7 @@ aws ec2 run-instances \
   --key-name your-keypair \
   --security-group-ids sg-xxxxxxxx \
   --iam-instance-profile Name=ec2-ecr-pull \
-  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":100,"VolumeType":"gp3"}}]' \
+  --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":200,"VolumeType":"gp3"}}]' \
   --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=openpi-inference}]'
 ```
 

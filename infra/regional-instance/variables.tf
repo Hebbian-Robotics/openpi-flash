@@ -54,7 +54,7 @@ variable "instance_type" {
 variable "root_volume_size_gib" {
   description = "Root EBS volume size in GiB"
   type        = number
-  default     = 100
+  default     = 200
 }
 
 variable "ssh_key_name" {
@@ -88,13 +88,13 @@ variable "allowed_ssh_cidr_blocks" {
 }
 
 variable "allowed_websocket_cidr_blocks" {
-  description = "CIDR blocks allowed to reach TCP 8000"
+  description = "CIDR blocks allowed to reach TCP 8000 (action) and TCP 8002 (planner, when enabled)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
 
 variable "allowed_quic_cidr_blocks" {
-  description = "CIDR blocks allowed to reach UDP 5555"
+  description = "CIDR blocks allowed to reach UDP 5555 (action) and UDP 5556 (planner, when enabled)"
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }
@@ -128,20 +128,39 @@ variable "container_name" {
   default     = "openpi-inference"
 }
 
-variable "model_config_name" {
-  description = "OpenPI model config name to serve"
-  type        = string
-  default     = "pi05_aloha"
+# -- Component slots -----------------------------------------------------------
+#
+# See infra/modules/regional_inference_instance/variables.tf for the full
+# explanation of the three server modes.
+
+variable "action" {
+  description = "Action slot config. Set to null to deploy a planner-only server."
+  type = object({
+    model_config_name = string
+    checkpoint_dir    = string
+    default_prompt    = optional(string)
+  })
+  default = {
+    model_config_name = "pi05_aloha"
+    checkpoint_dir    = "/cache/models/pi05_base_openpi"
+  }
 }
 
-variable "checkpoint_dir" {
-  description = "Checkpoint directory for the model"
-  type        = string
-  default     = "/cache/models/pi05_base_openpi"
+variable "planner" {
+  description = "JAX subtask planner slot config. Set to null to deploy an action-only server."
+  type = object({
+    checkpoint_dir           = string
+    max_generation_tokens    = optional(number)
+    generation_prompt_format = optional(string)
+    action_prompt_template   = optional(string)
+  })
+  default = null
 }
+
+# -- Checkpoint prep (action slot only) ---------------------------------------
 
 variable "prepare_checkpoint" {
-  description = "Whether to run the one-shot Docker checkpoint preparation step before starting inference"
+  description = "Run the one-shot Docker checkpoint preparation step on first boot. Action-slot-only."
   type        = bool
   default     = true
 }
@@ -170,10 +189,10 @@ variable "openpi_pytorch_compile_mode" {
   default     = "default"
 }
 
-variable "default_prompt" {
-  description = "Optional default prompt for the server runtime config"
+variable "xla_python_client_mem_fraction" {
+  description = "JAX GPU memory fraction (0.0-1.0). Set to 0.5 for combined mode (JAX+PyTorch co-resident). Empty string disables the override."
   type        = string
-  default     = null
+  default     = ""
 }
 
 variable "extra_bootstrap_commands" {

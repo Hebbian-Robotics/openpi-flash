@@ -14,7 +14,24 @@ Protocol:
 import socket as socketlib
 import threading
 
+from tenacity import (
+    RetryError,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+)
+
 from hosting.quic_protocol import UdpAddr
+
+
+class _RelayRegistrationTimeout(TimeoutError):
+    """Internal signal that a single registration attempt timed out.
+
+    Distinct from the socket's built-in ``TimeoutError`` only so we can log
+    the attempt counter cleanly via tenacity's ``before_sleep`` hook. Both
+    are recognised as retry-able by tenacity below.
+    """
+
 
 # Re-registration interval to keep the NAT mapping alive.
 _KEEPALIVE_INTERVAL_SECS = 3.0
@@ -88,21 +105,34 @@ def register_with_relay(
     sock.settimeout(2.0)
 
     msg = f"REG:{session_id}\n".encode()
-    for attempt in range(max_retries):
-        sock.sendto(msg, relay_addr)
-        try:
-            data, _ = sock.recvfrom(64)
-            if data.strip() == b"ACK":
-                print(
-                    f"[relay] Registered with {relay_addr[0]}:{relay_addr[1]} for session {session_id}"
-                )
-                return RelayKeepalive(sock, relay_addr, msg)
-        except TimeoutError:
-            print(f"[relay] Registration attempt {attempt + 1}/{max_retries} timed out")
-            continue
 
-    sock.close()
-    raise ConnectionError(
-        f"Failed to register with relay {relay_addr[0]}:{relay_addr[1]} "
-        f"after {max_retries} attempts"
+    def _log_retry(retry_state: object) -> None:
+        attempt_number = getattr(retry_state, "attempt_number", 0)
+        print(f"[relay] Registration attempt {attempt_number}/{max_retries} timed out")
+
+    @retry(
+        stop=stop_after_attempt(max_retries),
+        retry=retry_if_exception_type((TimeoutError, _RelayRegistrationTimeout)),
+        before_sleep=_log_retry,
+        reraise=True,
     )
+    def _attempt() -> None:
+        sock.sendto(msg, relay_addr)
+        # Socket timeout is 2s; recvfrom raises TimeoutError which tenacity retries.
+        data, _ = sock.recvfrom(64)
+        if data.strip() != b"ACK":
+            # Unexpected payload — treat as a failed attempt so we retry rather
+            # than accept a partial registration.
+            raise _RelayRegistrationTimeout(f"relay returned non-ACK payload: {data!r}")
+
+    try:
+        _attempt()
+    except (TimeoutError, _RelayRegistrationTimeout, RetryError) as exc:
+        sock.close()
+        raise ConnectionError(
+            f"Failed to register with relay {relay_addr[0]}:{relay_addr[1]} "
+            f"after {max_retries} attempts"
+        ) from exc
+
+    print(f"[relay] Registered with {relay_addr[0]}:{relay_addr[1]} for session {session_id}")
+    return RelayKeepalive(sock, relay_addr, msg)
