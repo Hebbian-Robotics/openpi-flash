@@ -34,11 +34,14 @@ from typing import Any
 
 import httpx
 import numpy as np
+from openpi_client import websocket_client_policy as _websocket_client_policy
 
 from hosting.admin_server import DEFAULT_ADMIN_PORT
 from hosting.flash_transport_policy import FlashTransportPolicy
 
 from .constants import DEFAULT_QUIC_PORT
+
+DEFAULT_PLANNER_WS_PORT = 8002
 from .utils import build_subtask_observation, build_warmup_observation, load_manifest
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -113,6 +116,31 @@ def main() -> None:
     )
     parser.add_argument("--port", type=int, default=DEFAULT_QUIC_PORT, help="Server QUIC port")
     parser.add_argument(
+        "--transport",
+        choices=["quic", "ws"],
+        default="quic",
+        help=(
+            "Transport to use for subtask inference. QUIC's Arrow codec currently "
+            "cannot carry planner responses (no array columns), so use 'ws' when "
+            "hitting the planner endpoint."
+        ),
+    )
+    parser.add_argument(
+        "--ws_port",
+        type=int,
+        default=DEFAULT_PLANNER_WS_PORT,
+        help="WebSocket port for the planner endpoint (used when --transport=ws).",
+    )
+    parser.add_argument(
+        "--admin_host",
+        type=str,
+        default=None,
+        help=(
+            "Host for the admin HTTP endpoint. Defaults to --server. Use 127.0.0.1 with "
+            "an SSH tunnel when the deployed server binds admin to localhost."
+        ),
+    )
+    parser.add_argument(
         "--admin_port",
         type=int,
         default=DEFAULT_ADMIN_PORT,
@@ -137,18 +165,29 @@ def main() -> None:
     # Set or read the active subtask prompt format on the server before any inference.
     # The runtime config is read on every generate() call server-side, so this takes
     # effect on the next request.
+    admin_host = args.admin_host or args.server
     if args.prompt_format is not None:
         active_prompt_format = _set_server_prompt_format(
-            args.server, args.admin_port, args.prompt_format
+            admin_host, args.admin_port, args.prompt_format
         )
         logger.info("Set server subtask prompt format to %r", active_prompt_format)
     else:
-        active_prompt_format = _get_server_prompt_format(args.server, args.admin_port)
+        active_prompt_format = _get_server_prompt_format(admin_host, args.admin_port)
         logger.info("Using server's current subtask prompt format: %r", active_prompt_format)
 
-    # Connect to server via QUIC
-    policy = FlashTransportPolicy(args.server, port=args.port)
-    logger.info("Connected to server at %s:%d via QUIC", args.server, args.port)
+    # Connect to server. Prefer QUIC for latency, but fall back to WS when
+    # hitting the planner endpoint because the Arrow codec requires at least
+    # one array column and planner responses contain only scalar metadata.
+    if args.transport == "ws":
+        policy = _websocket_client_policy.WebsocketClientPolicy(host=args.server, port=args.ws_port)
+        logger.info(
+            "Connected to server at %s:%d via WebSocket (planner endpoint)",
+            args.server,
+            args.ws_port,
+        )
+    else:
+        policy = FlashTransportPolicy(args.server, port=args.port)
+        logger.info("Connected to server at %s:%d via QUIC", args.server, args.port)
 
     # Warm up connection
     policy.infer(build_warmup_observation(mode="subtask_only"))
