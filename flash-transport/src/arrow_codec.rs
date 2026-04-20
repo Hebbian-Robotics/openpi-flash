@@ -15,7 +15,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
-use arrow_array::{Array, BinaryArray, RecordBatch};
+use arrow_array::{Array, BinaryArray, RecordBatch, RecordBatchOptions};
 use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{DataType, Field, Schema};
@@ -45,7 +45,12 @@ pub fn encode_arrow_ipc(frame: &LocalFrame) -> Result<Vec<u8>> {
         columns.push(Arc::new(binary_array));
     }
 
-    let record_batch = RecordBatch::try_new(schema_ref.clone(), columns)
+    // Planner (subtask_only) responses carry no numpy arrays — every value
+    // lives in scalar_json. Arrow needs an explicit row count in that case
+    // because it normally infers num_rows from the first column. We always
+    // emit one logical row per inference, matching the decoder's invariant.
+    let options = RecordBatchOptions::new().with_row_count(Some(1));
+    let record_batch = RecordBatch::try_new_with_options(schema_ref.clone(), columns, &options)
         .context("Failed to assemble Arrow RecordBatch")?;
 
     let mut buffer: Vec<u8> = Vec::new();
@@ -231,6 +236,70 @@ fn parse_dtype_name(name: &str) -> Result<DtypeCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::collection::vec as prop_vec;
+    use proptest::prelude::*;
+
+    /// Generate an arbitrary `DtypeCode`.
+    fn arb_dtype() -> impl Strategy<Value = DtypeCode> {
+        prop_oneof![
+            Just(DtypeCode::Uint8),
+            Just(DtypeCode::Int8),
+            Just(DtypeCode::Uint16),
+            Just(DtypeCode::Int16),
+            Just(DtypeCode::Uint32),
+            Just(DtypeCode::Int32),
+            Just(DtypeCode::Uint64),
+            Just(DtypeCode::Int64),
+            Just(DtypeCode::Float16),
+            Just(DtypeCode::Float32),
+            Just(DtypeCode::Float64),
+            Just(DtypeCode::Bool),
+        ]
+    }
+
+    /// Generate a `LocalArray`. Path has 1..=3 ASCII components (the codec
+    /// rejects empty paths on both sides). `data` length is arbitrary because
+    /// the Arrow codec stores raw bytes — shape/dtype consistency is a
+    /// `local_format` concern, not this codec's.
+    fn arb_local_array() -> impl Strategy<Value = LocalArray> {
+        (
+            prop_vec("[a-zA-Z0-9_]{1,12}", 1..=3),
+            arb_dtype(),
+            prop_vec(0_u32..=6, 0..=4),
+            prop_vec(any::<u8>(), 0..=64),
+        )
+            .prop_map(|(path, dtype, shape, data)| LocalArray {
+                path,
+                dtype,
+                shape,
+                data,
+            })
+    }
+
+    /// Generate a `LocalFrame`. `arrays` can be empty (this is the planner
+    /// case) and `scalar_json` must be UTF-8 since the codec rejects non-UTF-8
+    /// scalar blobs.
+    fn arb_local_frame() -> impl Strategy<Value = LocalFrame> {
+        (
+            "[a-zA-Z0-9_]{0,20}",
+            prop_vec(arb_local_array(), 0..=4),
+            ".{0,64}",
+        )
+            .prop_map(|(schema_id, arrays, scalar_json)| LocalFrame {
+                schema_id,
+                arrays,
+                scalar_json: scalar_json.into_bytes(),
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn round_trip_any_frame(frame in arb_local_frame()) {
+            let encoded = encode_arrow_ipc(&frame).expect("encode should succeed");
+            let decoded = decode_arrow_ipc(&encoded).expect("decode should succeed");
+            prop_assert_eq!(decoded, frame);
+        }
+    }
 
     fn sample_frame() -> LocalFrame {
         LocalFrame {
@@ -270,6 +339,23 @@ mod tests {
             assert_eq!(decoded_array.shape, original_array.shape);
             assert_eq!(decoded_array.data, original_array.data);
         }
+    }
+
+    #[test]
+    fn round_trip_zero_array_frame() {
+        // Planner subtask_only responses carry zero numpy arrays — everything
+        // lives in scalar_json. The codec must still produce a valid single-row
+        // RecordBatch so the response can flow over QUIC.
+        let frame = LocalFrame {
+            schema_id: "planner".to_owned(),
+            arrays: vec![],
+            scalar_json: br#"{"subtask":{"text":"pick up cup","ms":442.3}}"#.to_vec(),
+        };
+        let encoded = encode_arrow_ipc(&frame).expect("encode");
+        let decoded = decode_arrow_ipc(&encoded).expect("decode");
+        assert_eq!(decoded.schema_id, frame.schema_id);
+        assert_eq!(decoded.scalar_json, frame.scalar_json);
+        assert!(decoded.arrays.is_empty());
     }
 
     #[test]

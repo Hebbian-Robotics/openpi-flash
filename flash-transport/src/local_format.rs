@@ -61,7 +61,7 @@ impl DtypeCode {
 }
 
 /// A single named numpy array carried in a local frame.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalArray {
     /// Nested dict path (e.g. `["images", "cam_high"]`). Never empty.
     pub path: Vec<String>,
@@ -71,7 +71,7 @@ pub struct LocalArray {
 }
 
 /// A whole observation or action payload decoded from a local frame.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalFrame {
     pub schema_id: String,
     pub arrays: Vec<LocalArray>,
