@@ -36,6 +36,9 @@ config.json
 .codex
 scratch.md
 
+# Experiment caches (local only)
+.experiments_cache/
+
 # Terraform / OpenTofu
 .terraform/
 terraform.tfstate

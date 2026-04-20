@@ -68,6 +68,12 @@ def serve(
     elif "INFERENCE_CONFIG_PATH" not in os.environ:
         os.environ["INFERENCE_CONFIG_PATH"] = "config.json"
 
+    # Limit JAX GPU memory allocation when the JAX planner is loaded, so it
+    # doesn't greedily pre-allocate the whole GPU and leave nothing for the
+    # PyTorch action slot in combined mode. Must be set before any JAX import
+    # (triggered transitively by openpi). Harmless when JAX isn't used.
+    os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.5")
+
     from hosting.serve import main as serve_main
 
     serve_main()

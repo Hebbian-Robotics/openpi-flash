@@ -1,8 +1,9 @@
-"""Shared framed protocol helpers for local transport sidecars.
+"""Shared framed protocol helpers for the local transport Unix socket.
 
-Both the server-side QUIC sidecar and the client-side QUIC sidecar speak the
-same local length-prefixed protocol over a Unix domain socket. This module
-holds the shared message type constants and framing helpers for Python code.
+Both the server-side and client-side transport processes speak the same
+length-prefixed protocol over a Unix domain socket to their Python peers.
+This module holds the shared message type constants and framing helpers
+for the Python side.
 """
 
 from __future__ import annotations
@@ -12,16 +13,16 @@ import struct
 from enum import IntEnum
 
 
-class SidecarRequestType(IntEnum):
-    """Request message types sent to a local transport sidecar."""
+class TransportRequestType(IntEnum):
+    """Request message types sent to the transport over the local socket."""
 
     METADATA = 0x01
     INFER = 0x02
     RESET = 0x03
 
 
-class SidecarResponseType(IntEnum):
-    """Response message types returned by a local transport sidecar."""
+class TransportResponseType(IntEnum):
+    """Response message types returned by the transport over the local socket."""
 
     METADATA = 0x11
     INFER = 0x12
@@ -52,7 +53,7 @@ def recv_framed_message(stream_socket: socket.socket) -> bytes | None:
 
     payload = recv_exactly(stream_socket, message_length)
     if payload is None:
-        raise ConnectionError("Unexpected EOF while reading framed sidecar message")
+        raise ConnectionError("Unexpected EOF while reading framed transport message")
     return payload
 
 

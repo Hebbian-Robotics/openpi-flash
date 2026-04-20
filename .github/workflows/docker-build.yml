@@ -29,7 +29,76 @@ jobs:
           dockerfile: hosting/Dockerfile
           config: hosting/.hadolint.yaml
 
-  build:
+  # ---------------------------------------------------------------------------
+  # Parallel: build transport binaries + Docker base image
+  # ---------------------------------------------------------------------------
+
+  build-transport-x86:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hosting
+        uses: actions/checkout@v6
+        with:
+          path: hosting
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hosting/flash-transport/target
+          key: ${{ runner.os }}-x86_64-cargo-${{ hashFiles('hosting/flash-transport/Cargo.lock') }}
+
+      - name: Build transport (x86_64)
+        run: cargo build --release --manifest-path hosting/flash-transport/Cargo.toml
+
+      - name: Upload transport artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-transport-x86_64-linux
+          path: hosting/flash-transport/target/release/openpi-flash-transport
+          retention-days: 30
+
+  build-transport-arm:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout hosting
+        uses: actions/checkout@v6
+        with:
+          path: hosting
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hosting/flash-transport/target
+          key: ${{ runner.os }}-aarch64-cargo-${{ hashFiles('hosting/flash-transport/Cargo.lock') }}
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build transport (aarch64)
+        run: cross build --release --target aarch64-unknown-linux-gnu --manifest-path hosting/flash-transport/Cargo.toml
+
+      - name: Upload transport artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-transport-aarch64-linux
+          path: hosting/flash-transport/target/aarch64-unknown-linux-gnu/release/openpi-flash-transport
+          retention-days: 30
+
+  build-base-image:
     needs: lint
     runs-on: ubuntu-latest
     permissions:
@@ -48,28 +117,82 @@ jobs:
           path: openpi
 
       - name: Configure AWS credentials
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and push Docker image
+      - name: Build and push base image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: hosting/Dockerfile
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          target: base
+          push: true
+          tags: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:base-${{ github.sha }}
+          cache-from: type=gha,scope=base
+          cache-to: type=gha,mode=max,scope=base
+
+  # ---------------------------------------------------------------------------
+  # Combine: layer transport binary onto base image
+  # ---------------------------------------------------------------------------
+
+  combine:
+    needs: [build-transport-x86, build-transport-arm, build-base-image]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout hosting
+        uses: actions/checkout@v6
+        with:
+          path: hosting
+
+      - name: Download x86_64 transport artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flash-transport-x86_64-linux
+          path: ./transport
+
+      - name: Mark transport binary as executable
+        run: chmod +x ./transport/openpi-flash-transport
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Compute branch tag
+        id: branch-tag
+        run: |
+          # Use PR branch name for pull_requests, ref_name for pushes.
+          # Replace slashes with dashes for Docker tag compatibility.
+          RAW="${{ github.head_ref || github.ref_name }}"
+          echo "tag=${RAW//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push final image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./transport
+          file: hosting/Dockerfile.final
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:base-${{ github.sha }}
           tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
             ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.branch-tag.outputs.tag }}
+            ${{ github.ref == 'refs/heads/main' && format('{0}/{1}:latest', env.ECR_REGISTRY, env.ECR_REPOSITORY) || '' }}

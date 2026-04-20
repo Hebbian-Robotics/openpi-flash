@@ -2,7 +2,7 @@
 
 Defines the wire format, send/recv helpers, connection serving logic, and
 shared interfaces used by QuicPolicyServer, QuicClientPolicy, and
-DirectQuicClientPolicy. All message framing and connection protocol goes
+FlashTransportPolicy. All message framing and connection protocol goes
 through this module so changes are made in one place.
 """
 
@@ -166,7 +166,7 @@ def serve_quic_connection(
             action = policy.infer(observation)
             infer_ms = (time.monotonic() - infer_start) * 1000
 
-            timing: dict[str, float] = {"infer_ms": infer_ms}
+            timing: dict = {**action.get("server_timing", {}), "infer_ms": infer_ms}
             if prev_total_time is not None:
                 timing["prev_total_ms"] = prev_total_time * 1000
 

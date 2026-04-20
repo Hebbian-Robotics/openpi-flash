@@ -3,9 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 import numpy as np
+
+# Dtypes the transport accepts for image preprocessing. Kept as a Literal so
+# serializing `ImageSpec` to msgpack cannot smuggle in an invalid value
+# (e.g. "float64") that the Rust side would reject at runtime.
+ImageDtypeName = Literal["uint8", "float32"]
+
+
+class ImageSpec(TypedDict):
+    """Per-field image preprocessing rule advertised to the transport.
+
+    Serialized to msgpack as part of server metadata and re-parsed in Rust
+    (`flash-transport/src/metadata.rs`). The TypedDict shape is the contract
+    both sides agree on; the Python type-checker flags misspelled keys and
+    wrong value types at authoring time rather than at handshake time.
+    """
+
+    path: list[str]
+    target_shape: list[int]
+    dtype: ImageDtypeName
 
 
 @dataclass(frozen=True)
@@ -90,3 +109,54 @@ def make_warmup_observation(train_config: Any) -> dict[str, Any]:
             return make_aloha_observation(prompt=prompt)
         case DroidWarmupObservationSpec(prompt=prompt):
             return make_droid_observation(prompt=prompt)
+
+
+# Image specs the server advertises in metadata so the client transport
+# can resize raw camera frames before they hit the QUIC wire. See
+# `flash-transport/src/image_preprocess.rs` for the consumer side.
+_ALOHA_IMAGE_SPECS: list[ImageSpec] = [
+    ImageSpec(path=["images", camera_name], target_shape=[3, 224, 224], dtype="uint8")
+    for camera_name in ("cam_high", "cam_low", "cam_left_wrist", "cam_right_wrist")
+]
+_DROID_IMAGE_SPECS: list[ImageSpec] = [
+    ImageSpec(
+        path=["observation/exterior_image_1_left"],
+        target_shape=[224, 224, 3],
+        dtype="uint8",
+    ),
+    ImageSpec(
+        path=["observation/wrist_image_left"],
+        target_shape=[224, 224, 3],
+        dtype="uint8",
+    ),
+]
+
+
+def make_image_specs(train_config: Any) -> list[ImageSpec]:
+    """Return the per-field image preprocessing specs for this embodiment,
+    or an empty list for embodiments we don't recognize (client just no-ops
+    on preprocessing in that case).
+    """
+    warmup_observation_spec = get_warmup_observation_spec(train_config)
+    match warmup_observation_spec:
+        case AlohaWarmupObservationSpec():
+            return _ALOHA_IMAGE_SPECS
+        case DroidWarmupObservationSpec():
+            return _DROID_IMAGE_SPECS
+
+
+def get_action_horizon(train_config: Any) -> int | None:
+    """Return the model's action chunk length (the transport advertises it
+    to clients for action chunking).
+
+    Reads ``train_config.model.action_horizon`` if present. Returns ``None``
+    for configs that don't expose it; the client treats that as "chunking
+    disabled" and just passes server responses through whole.
+    """
+    model = getattr(train_config, "model", None)
+    if model is None:
+        return None
+    horizon = getattr(model, "action_horizon", None)
+    if isinstance(horizon, int) and horizon > 0:
+        return horizon
+    return None

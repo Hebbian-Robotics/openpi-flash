@@ -1,7 +1,6 @@
 {
-  "model_config_name": "pi05_aloha",
-  "checkpoint_dir": "/cache/models/pi05_base_openpi",
-  "default_prompt": null,
-  "port": 8000,
-  "quic_port": 5555
+  "action": {
+    "model_config_name": "pi05_aloha",
+    "checkpoint_dir": "/cache/models/pi05_base_openpi"
+  }
 }

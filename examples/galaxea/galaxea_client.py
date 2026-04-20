@@ -1,23 +1,26 @@
-"""Galaxea R1 Pro -> OpenPI hosted inference client.
+"""Galaxea robot -> OpenPI hosted inference client.
 
-A ROS 2 node that reads sensor data from a Galaxea R1 Pro robot, sends
+A ROS 2 node that reads sensor data from a Galaxea R1-series robot, sends
 observations to a remote OpenPI inference server over QUIC, and publishes
 the returned actions back to the robot's joint command topics.
 
-See examples/galaxea_r1_pro/README.md for full setup instructions.
+Supports both the R1 Pro (7-DOF per arm) and R1 Lite (6-DOF per arm).
+
+See examples/galaxea/README.md for full setup instructions.
 
 Usage:
-    # Source ROS 2, then from the hosting repo root:
-    uv run python examples/galaxea_r1_pro/galaxea_r1_pro_client.py \\
+    # R1 Pro with DROID mapping (recommended for Pro)
+    uv run python examples/galaxea/galaxea_client.py \\
+        --robot r1-pro \\
         --host 10.0.0.42 \\
         --prompt "pick up the red cup"
 
-    # With ALOHA mapping at 10 Hz
-    uv run python examples/galaxea_r1_pro/galaxea_r1_pro_client.py \\
+    # R1 Lite with ALOHA mapping (native 6-DOF fit, recommended for Lite)
+    uv run python examples/galaxea/galaxea_client.py \\
+        --robot r1-lite \\
         --host 10.0.0.42 \\
         --prompt "fold the towel" \\
-        --mapping aloha \\
-        --rate 10
+        --mapping aloha
 """
 
 from __future__ import annotations
@@ -29,13 +32,13 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 import rclpy  # ty: ignore[unresolved-import]  # ROS 2 — not in this venv
-from r1_pro_embodiment_mappings import (
-    AVAILABLE_MAPPINGS,
-    EmbodimentMapping,
+from _common import (
+    JOINTS_PER_ARM,
+    GalaxeaTopicConfig,
     MappingName,
-    R1ProActionCommand,
-    R1ProTopicConfig,
+    RobotModel,
 )
+from embodiment_mappings import MAPPINGS_BY_ROBOT, get_topic_config
 from rclpy.node import Node  # ty: ignore[unresolved-import]
 from rclpy.qos import (  # ty: ignore[unresolved-import]
     QoSDurabilityPolicy,
@@ -44,12 +47,14 @@ from rclpy.qos import (  # ty: ignore[unresolved-import]
     QoSReliabilityPolicy,
 )
 from sensor_msgs.msg import CompressedImage, JointState  # ty: ignore[unresolved-import]
+from shared.mappings import EmbodimentMapping
+from shared.types import ActionCommand
 from std_msgs.msg import Float32  # ty: ignore[unresolved-import]
 
-from hosting.direct_quic_client_policy import DirectQuicClientPolicy
+from hosting.flash_transport_policy import FlashTransportPolicy
 
-# R1 Pro uses BEST_EFFORT QoS for all sensor topics
-R1_PRO_SENSOR_QOS = QoSProfile(
+# Both R1 Pro and R1 Lite use BEST_EFFORT QoS for all sensor topics
+GALAXEA_SENSOR_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.BEST_EFFORT,
     history=QoSHistoryPolicy.KEEP_LAST,
     depth=1,
@@ -58,12 +63,13 @@ R1_PRO_SENSOR_QOS = QoSProfile(
 
 
 # ---------------------------------------------------------------------------
-# Parsed CLI arguments — typed alternative to argparse.Namespace
+# Parsed CLI arguments
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class ClientConfig:
-    """Parsed and validated CLI arguments for the R1 Pro client."""
+    """Parsed and validated CLI arguments for the Galaxea client."""
 
+    robot_model: RobotModel
     server_host: str
     server_port: int
     prompt: str
@@ -71,19 +77,32 @@ class ClientConfig:
     inference_rate_hz: float
 
     @property
+    def joints_per_arm(self) -> int:
+        return JOINTS_PER_ARM[self.robot_model]
+
+    @property
     def mapping(self) -> EmbodimentMapping:
-        return AVAILABLE_MAPPINGS[self.mapping_name]
+        return MAPPINGS_BY_ROBOT[self.robot_model][self.mapping_name]
+
+    @property
+    def topic_config(self) -> GalaxeaTopicConfig:
+        return get_topic_config(self.robot_model, self.mapping_name)
 
 
-class GalaxeaR1ProOpenPIClient(Node):
-    """ROS 2 node bridging the Galaxea R1 Pro to a hosted OpenPI server."""
+# ---------------------------------------------------------------------------
+# ROS 2 node
+# ---------------------------------------------------------------------------
+class GalaxeaOpenPIClient(Node):
+    """ROS 2 node bridging a Galaxea robot to a hosted OpenPI server."""
 
     def __init__(self, config: ClientConfig) -> None:
-        super().__init__("galaxea_r1_pro_openpi_client")
+        node_name = f"galaxea_{config.robot_model.name.lower()}_openpi_client"
+        super().__init__(node_name)
 
         self._prompt = config.prompt
         self._mapping = config.mapping
-        self._topic_config = self._mapping.topic_config()
+        self._topic_config = config.topic_config
+        self._joints_per_arm = config.joints_per_arm
 
         # -- Locks for thread-safe access to latest sensor data ---------
         self._joint_lock = threading.Lock()
@@ -100,28 +119,27 @@ class GalaxeaR1ProOpenPIClient(Node):
         self.get_logger().info(
             f"Connecting to OpenPI server at {config.server_host}:{config.server_port} (QUIC)..."
         )
-        self._policy = DirectQuicClientPolicy(
+        self._policy = FlashTransportPolicy(
             host=config.server_host,
             port=config.server_port,
         )
         server_metadata = self._policy.get_server_metadata()
         self.get_logger().info(f"Connected. Server metadata: {server_metadata}")
 
-        # -- Subscribe to joint state topics (from topic config) --------
+        # -- Subscribe to joint state topics ----------------------------
         self._subscribe_to_joint_topics(self._topic_config)
 
-        # -- Subscribe to camera topics (from topic config) -------------
+        # -- Subscribe to camera topics --------------------------------
         for camera_name, ros_topic in self._topic_config.camera_topics.items():
             self.get_logger().info(f"Subscribing to camera: {camera_name} -> {ros_topic}")
-            # Default-arg closure captures camera_name per iteration
             self.create_subscription(
                 CompressedImage,
                 ros_topic,
                 lambda msg, name=camera_name: self._on_camera_image(name, msg),
-                R1_PRO_SENSOR_QOS,
+                GALAXEA_SENSOR_QOS,
             )
 
-        # -- Create publishers for action commands (from topic config) --
+        # -- Create publishers for action commands ---------------------
         self._left_arm_command_publisher = self.create_publisher(
             JointState,
             self._topic_config.left_arm_command_topic,
@@ -143,7 +161,7 @@ class GalaxeaR1ProOpenPIClient(Node):
             10,
         )
 
-        # -- Inference timer --------------------------------------------
+        # -- Inference timer -------------------------------------------
         inference_period_seconds = 1.0 / config.inference_rate_hz
         self._inference_timer = self.create_timer(
             inference_period_seconds,
@@ -151,46 +169,50 @@ class GalaxeaR1ProOpenPIClient(Node):
         )
         self.get_logger().info(
             f"Inference loop started at {config.inference_rate_hz} Hz "
-            f"(mapping={type(self._mapping).__name__})"
+            f"(robot={config.robot_model}, mapping={type(self._mapping).__name__}, "
+            f"joints_per_arm={self._joints_per_arm})"
         )
 
-    def _subscribe_to_joint_topics(self, topic_config: R1ProTopicConfig) -> None:
-        """Subscribe to all joint state feedback topics defined in the topic config."""
+    def _subscribe_to_joint_topics(self, topic_config: GalaxeaTopicConfig) -> None:
         self.create_subscription(
             JointState,
             topic_config.left_arm_feedback_topic,
             self._on_left_arm_feedback,
-            R1_PRO_SENSOR_QOS,
+            GALAXEA_SENSOR_QOS,
         )
         self.create_subscription(
             JointState,
             topic_config.right_arm_feedback_topic,
             self._on_right_arm_feedback,
-            R1_PRO_SENSOR_QOS,
+            GALAXEA_SENSOR_QOS,
         )
         self.create_subscription(
             JointState,
             topic_config.left_gripper_feedback_topic,
             self._on_left_gripper_feedback,
-            R1_PRO_SENSOR_QOS,
+            GALAXEA_SENSOR_QOS,
         )
         self.create_subscription(
             JointState,
             topic_config.right_gripper_feedback_topic,
             self._on_right_gripper_feedback,
-            R1_PRO_SENSOR_QOS,
+            GALAXEA_SENSOR_QOS,
         )
 
     # -------------------------------------------------------------------
-    # ROS callbacks — update latest sensor data
+    # ROS callbacks
     # -------------------------------------------------------------------
     def _on_left_arm_feedback(self, msg: JointState) -> None:
         with self._joint_lock:
-            self._left_arm_positions = np.array(msg.position[:7], dtype=np.float64)
+            self._left_arm_positions = np.array(
+                msg.position[: self._joints_per_arm], dtype=np.float64
+            )
 
     def _on_right_arm_feedback(self, msg: JointState) -> None:
         with self._joint_lock:
-            self._right_arm_positions = np.array(msg.position[:7], dtype=np.float64)
+            self._right_arm_positions = np.array(
+                msg.position[: self._joints_per_arm], dtype=np.float64
+            )
 
     def _on_left_gripper_feedback(self, msg: JointState) -> None:
         with self._joint_lock:
@@ -206,7 +228,6 @@ class GalaxeaR1ProOpenPIClient(Node):
         if decoded_image is None:
             self.get_logger().warn(f"Failed to decode image from {camera_name}")
             return
-        # OpenCV decodes as BGR — convert to RGB for the model
         decoded_image_rgb = cv2.cvtColor(decoded_image, cv2.COLOR_BGR2RGB)
         with self._image_lock:
             self._latest_images[camera_name] = decoded_image_rgb
@@ -215,7 +236,6 @@ class GalaxeaR1ProOpenPIClient(Node):
     # Inference loop
     # -------------------------------------------------------------------
     def _has_all_sensor_data(self) -> bool:
-        """Check that we have received at least one message from every sensor."""
         if self._left_arm_positions is None or self._right_arm_positions is None:
             return False
         required_cameras = set(self._topic_config.camera_topics.keys())
@@ -229,7 +249,6 @@ class GalaxeaR1ProOpenPIClient(Node):
             )
             return
 
-        # Snapshot current sensor state
         with self._joint_lock:
             left_arm = self._left_arm_positions.copy()
             right_arm = self._right_arm_positions.copy()
@@ -258,8 +277,7 @@ class GalaxeaR1ProOpenPIClient(Node):
         action_command = self._mapping.unpack_actions(server_response)
         self._publish_action_command(action_command)
 
-    def _publish_action_command(self, command: R1ProActionCommand) -> None:
-        """Publish action commands to R1 Pro ROS topics."""
+    def _publish_action_command(self, command: ActionCommand) -> None:
         left_arm_msg = JointState()
         left_arm_msg.position = command.left_arm_joint_positions.tolist()
         self._left_arm_command_publisher.publish(left_arm_msg)
@@ -285,9 +303,19 @@ class GalaxeaR1ProOpenPIClient(Node):
         super().destroy_node()
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 def parse_arguments() -> ClientConfig:
     parser = argparse.ArgumentParser(
-        description="Galaxea R1 Pro client for OpenPI hosted inference",
+        description="Galaxea robot client for OpenPI hosted inference",
+    )
+    parser.add_argument(
+        "--robot",
+        type=RobotModel,
+        required=True,
+        choices=list(RobotModel),
+        help="Robot model (e.g. r1-pro, r1-lite)",
     )
     parser.add_argument(
         "--host",
@@ -323,6 +351,7 @@ def parse_arguments() -> ClientConfig:
     args = parser.parse_args()
 
     return ClientConfig(
+        robot_model=args.robot,
         server_host=args.host,
         server_port=args.port,
         prompt=args.prompt,
@@ -335,7 +364,7 @@ def main() -> None:
     config = parse_arguments()
 
     rclpy.init()
-    node = GalaxeaR1ProOpenPIClient(config)
+    node = GalaxeaOpenPIClient(config)
 
     try:
         rclpy.spin(node)

@@ -1,0 +1,5 @@
+{
+  "planner": {
+    "checkpoint_dir": "gs://openpi-assets/checkpoints/pi05_base"
+  }
+}

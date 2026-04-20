@@ -24,7 +24,7 @@ app = modal.App("openpi-convert-checkpoint")
 
 convert_image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04",
+        "nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04",
         add_python="3.11",
     )
     .apt_install(
@@ -32,7 +32,7 @@ convert_image = (
         "git-lfs",
         "build-essential",
         "clang",
-        "libgl1-mesa-glx",
+        "libgl1",
         "libglib2.0-0",
         "libsm6",
         "libxrender1",

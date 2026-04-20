@@ -52,7 +52,7 @@ def create_openpi_image(extra_pip_packages: list[str] | None = None) -> modal.Im
 
     return (
         modal.Image.from_registry(
-            "nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04",
+            "nvidia/cuda:12.9.1-cudnn-runtime-ubuntu24.04",
             add_python="3.11",
         )
         .apt_install(
@@ -60,7 +60,7 @@ def create_openpi_image(extra_pip_packages: list[str] | None = None) -> modal.Im
             "git-lfs",
             "build-essential",
             "clang",
-            "libgl1-mesa-glx",
+            "libgl1",
             "libglib2.0-0",
             "libsm6",
             "libxrender1",
@@ -149,18 +149,18 @@ def log_ip_location(label: str, ip: str | None = None) -> None:
         label: Human-readable label for the location (e.g. "Container", "Relay").
         ip: IP address to look up. If None, looks up the caller's own IP.
     """
-    import json
-    import urllib.request
+    import httpx
 
     url = f"https://ipinfo.io/{ip}/json" if ip else "https://ipinfo.io/json"
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            info = json.loads(resp.read())
+        response = httpx.get(url, timeout=5.0)
+        response.raise_for_status()
+        info = response.json()
         print(
             f"{label} location: {info.get('city')}, {info.get('region')} "
             f"({info.get('country')}) — IP: {info.get('ip')}, org: {info.get('org')}"
         )
-    except Exception as exc:
+    except httpx.HTTPError as exc:
         print(f"Could not determine {label.lower()} location: {exc}")
 
 

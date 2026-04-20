@@ -3,7 +3,7 @@
 import time
 from typing import Final
 
-import requests
+import httpx
 
 from hosting.warmup import make_aloha_observation
 
@@ -28,14 +28,14 @@ def wait_for_server(
 
     while True:
         try:
-            response = requests.get(health_url, timeout=30)
-            if response.ok:
+            response = httpx.get(health_url, timeout=30.0)
+            if response.is_success:
                 print(f"Health check: {response.text.strip()}")
                 return
             last_status_code = response.status_code
             last_error_message = None
             print(f"  Server returned {response.status_code}, retrying ...")
-        except requests.RequestException as exc:
+        except httpx.HTTPError as exc:
             last_error_message = str(exc)
             print(f"  {exc}, retrying ...")
 
