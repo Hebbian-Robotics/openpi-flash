@@ -2,6 +2,10 @@
 
 Real-time inference engine for [openpi](https://github.com/Physical-Intelligence/openpi). Optimized for low-latency policy serving over QUIC and WebSocket. Deploy on AWS EC2 (Docker) or [Modal](https://modal.com).
 
+openpi-flash gives robots the task-specific brain they need to actually ship
+into production environments like fulfillment, retail, and other commercial
+deployments where a general-purpose policy isn't enough.
+
 ## Prerequisites
 
 - Python 3.11
@@ -77,7 +81,28 @@ Accepted values: `default`, `reduce-overhead`, `max-autotune`, `max-autotune-no-
 
 ## Subtask generation (planner)
 
-The planner slot runs pi0.5 two-phase inference: from `(task, images)` it generates a short subtask string (e.g. `"pick up cup"` from `"pick up the red cup"`), which can either be returned directly or spliced into the action prompt before action inference. See pi0.5 paper §V.E, Figure 7 for the architecture. The planner is **JAX-only** today — point `planner.checkpoint_dir` at a JAX Orbax checkpoint such as `gs://openpi-assets/checkpoints/pi05_base/params`.
+The planner is how we specialize a general VLA to a specific task distribution: a small, cheaply-fine-tuned model rewrites the operator prompt into the subtask vocabulary the action policy was trained on, so the same base weights generalize across deployments without retraining the action model. The planner slot runs pi0.5 two-phase inference: from `(task, images)` it generates a short subtask string (e.g. `"pick up cup"` from `"pick up the red cup"`), which can either be returned directly or spliced into the action prompt before action inference. See pi0.5 paper §V.E, Figure 7 for the architecture. The planner is **JAX-only** today — point `planner.checkpoint_dir` at a JAX Orbax checkpoint such as `gs://openpi-assets/checkpoints/pi05_base/params`.
+
+### Planner checkpoints
+
+`planner.checkpoint_dir` accepts two shapes:
+
+1. **Raw Orbax URI** (preferred for the pi0.5 base): `gs://openpi-assets/checkpoints/pi05_base/params`. `SubtaskGenerator.load()` downloads it on first boot via `maybe_download` and caches it under `OPENPI_DATA_HOME`. No extra step.
+2. **Local prepared directory** (required for fine-tuned checkpoints published as a single HF tar): `/cache/models/<name>`. The directory must contain `params/_METADATA` directly at the root. Prepare it with `main.py prepare-planner-checkpoint` (see below).
+
+The current production planner (`swatery/pi05_subtask`) is published as a single `.tar` blob on Hugging Face. For a cold deployment, prepare it once into `/cache/models/pi05_subtask` and point the config at that path:
+
+```bash
+# Inside the container (or any env with the openpi-flash deps):
+uv run python main.py prepare-planner-checkpoint \
+    --hf-repo swatery/pi05_subtask \
+    --tar-path-in-repo jax/pi05_subtask.tar \
+    --output-dir /cache/models/pi05_subtask
+```
+
+The command downloads the tar via `huggingface_hub`, extracts it, strips the wrapper `99/` directory, verifies `params/_METADATA` exists, and is safe to re-run (returns immediately when the output directory already looks complete; pass `--force-download` to rebuild).
+
+When provisioning through Terraform, set `prepare_planner_checkpoint = true` on the `regional_inference_instance` module to run this step automatically from cloud-init on first boot. The module surfaces `planner_prep_hf_repo`, `planner_prep_tar_path_in_repo`, and `planner_prep_output_dir` variables for picking a different fine-tune.
 
 ### Example combined-mode config
 
@@ -88,11 +113,13 @@ The planner slot runs pi0.5 two-phase inference: from `(task, images)` it genera
     "checkpoint_dir": "/cache/models/pi05_base_openpi"
   },
   "planner": {
-    "checkpoint_dir": "gs://openpi-assets/checkpoints/pi05_base/params",
+    "checkpoint_dir": "/cache/models/pi05_subtask",
     "max_generation_tokens": 20
   }
 }
 ```
+
+Use `gs://openpi-assets/checkpoints/pi05_base/params` in place of the local path if you want the pi0.5 base weights (no prep step required) instead of the fine-tune.
 
 Start the server exactly as in [Running locally](#running-locally) / [Running with Docker](#running-with-docker). At startup you should see:
 
@@ -530,3 +557,7 @@ client ─┬──────────────────────�
 ```
 
 In combined mode both slots load from the same process; the action endpoint's `Policy.infer()` internally calls the shared `SubtaskGenerator` before running action inference, which is why the action response can include a `subtask` field.
+
+## About
+
+`openpi-flash` is developed and maintained by [Hebbian Robotics](https://hebbianrobotics.com).

@@ -2,6 +2,7 @@
 
 Usage:
     uv run python main.py prepare-checkpoint
+    uv run python main.py prepare-planner-checkpoint
     uv run python main.py serve [--config config.json]
     uv run python main.py test ws <url>
     uv run python main.py test quic <host> [--quic-port 5555] [--ws-port 8000]
@@ -49,6 +50,38 @@ def prepare_checkpoint(
     prepare_openpi_compatible_checkpoint(
         model_id=model_id,
         openpi_assets_uri=openpi_assets_uri,
+        output_dir=output_dir,
+        force_download=force_download,
+    )
+
+
+@app.command(name="prepare-planner-checkpoint")
+def prepare_planner_checkpoint(
+    hf_repo: Annotated[
+        str,
+        typer.Option(help="Hugging Face repo id that holds the planner checkpoint tar."),
+    ] = "swatery/pi05_subtask",
+    tar_path_in_repo: Annotated[
+        str,
+        typer.Option(help="Path inside the HF repo to the Orbax checkpoint tar."),
+    ] = "jax/pi05_subtask.tar",
+    output_dir: Annotated[
+        Path | None,
+        typer.Option(help="Local directory where the extracted checkpoint should be written."),
+    ] = None,
+    force_download: Annotated[
+        bool,
+        typer.Option(
+            help="Re-download and re-extract even if the output directory already exists."
+        ),
+    ] = False,
+) -> None:
+    """Download + extract a JAX subtask planner checkpoint from Hugging Face."""
+    from hosting.prepare_planner_checkpoint import prepare_openpi_compatible_planner_checkpoint
+
+    prepare_openpi_compatible_planner_checkpoint(
+        hf_repo=hf_repo,
+        tar_path_in_repo=tar_path_in_repo,
         output_dir=output_dir,
         force_download=force_download,
     )

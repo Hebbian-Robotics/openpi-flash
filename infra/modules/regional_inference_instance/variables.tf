@@ -147,13 +147,12 @@ variable "planner" {
   default = null
 }
 
-# -- Checkpoint prep (action slot only) ---------------------------------------
+# -- Checkpoint prep (action slot) --------------------------------------------
 #
 # Optional one-shot step on first boot that prepares a Hugging Face checkpoint
 # into an OpenPI-compatible layout under /cache/models. Only relevant when the
-# action slot uses a locally prepared checkpoint path — planner checkpoints are
-# pulled directly from gs:// at SubtaskGenerator.load() time and don't need
-# prep. Disable with prepare_checkpoint = false for planner-only deployments.
+# action slot uses a locally prepared checkpoint path. Disable with
+# prepare_checkpoint = false for planner-only deployments.
 
 variable "prepare_checkpoint" {
   description = "Run the one-shot Docker checkpoint preparation step on first boot. Action-slot-only; safe to disable for planner-only deployments."
@@ -177,6 +176,39 @@ variable "checkpoint_prep_output_dir" {
   description = "Output directory written by the Docker checkpoint preparation step"
   type        = string
   default     = "/cache/models/pi05_base_openpi"
+}
+
+# -- Planner checkpoint prep (planner slot) -----------------------------------
+#
+# Optional one-shot step that downloads + extracts a JAX subtask planner tar
+# from Hugging Face into /cache/models. Only relevant when the planner slot
+# uses a locally prepared checkpoint path (as opposed to a bare gs:// URI
+# which SubtaskGenerator.load() can fetch itself). Disable with
+# prepare_planner_checkpoint = false when not running the planner slot or
+# when pointing at a gs:// URI.
+
+variable "prepare_planner_checkpoint" {
+  description = "Run a one-shot Docker planner checkpoint preparation step on first boot. Planner-slot-only; unpacks an HF tar into planner_prep_output_dir."
+  type        = bool
+  default     = false
+}
+
+variable "planner_prep_hf_repo" {
+  description = "Hugging Face repo ID that holds the planner checkpoint tar."
+  type        = string
+  default     = "swatery/pi05_subtask"
+}
+
+variable "planner_prep_tar_path_in_repo" {
+  description = "Path inside the HF repo to the Orbax checkpoint tar."
+  type        = string
+  default     = "jax/pi05_subtask.tar"
+}
+
+variable "planner_prep_output_dir" {
+  description = "Output directory written by the Docker planner checkpoint preparation step"
+  type        = string
+  default     = "/cache/models/pi05_subtask"
 }
 
 variable "openpi_pytorch_compile_mode" {

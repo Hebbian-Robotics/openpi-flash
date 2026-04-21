@@ -237,6 +237,10 @@ resource "aws_instance" "inference" {
       image_url                         = local.effective_image_url
       openpi_pytorch_compile_mode       = var.openpi_pytorch_compile_mode
       prepare_checkpoint                = var.prepare_checkpoint
+      prepare_planner_checkpoint        = var.prepare_planner_checkpoint
+      planner_prep_hf_repo              = var.planner_prep_hf_repo
+      planner_prep_tar_path_in_repo     = var.planner_prep_tar_path_in_repo
+      planner_prep_output_dir           = var.planner_prep_output_dir
       xla_python_client_mem_fraction    = var.xla_python_client_mem_fraction
       action_enabled                    = local.action_enabled
       planner_enabled                   = local.planner_enabled

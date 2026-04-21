@@ -38,6 +38,16 @@ write_files:
         --openpi-assets-uri ${checkpoint_prep_openpi_assets_uri} \
         --output-dir ${checkpoint_prep_output_dir}
 %{ endif ~}
+%{ if prepare_planner_checkpoint ~}
+
+      docker run --rm \
+        -v openpi-inference-cache:/cache \
+        ${image_url} \
+        python main.py prepare-planner-checkpoint \
+        --hf-repo ${planner_prep_hf_repo} \
+        --tar-path-in-repo ${planner_prep_tar_path_in_repo} \
+        --output-dir ${planner_prep_output_dir}
+%{ endif ~}
 
       docker run -d --restart unless-stopped --gpus=all \
         -v /etc/openpi/config.json:/config/config.json:ro \
