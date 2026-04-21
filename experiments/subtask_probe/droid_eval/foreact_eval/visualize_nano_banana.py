@@ -15,6 +15,7 @@ mp4 is literally the same string the generator wrote into its manifest.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -79,25 +80,60 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--fps", type=int, default=2)
+    parser.add_argument(
+        "--subtasks_json",
+        type=Path,
+        default=None,
+        help=(
+            "Optional per-frame subtasks JSON (shape: {'results': [{episode_index, "
+            "frame_idx, subtask}, ...]}). When provided, overrides CHAIN_PHASES: "
+            "captions come from this file and every frame with an entry is rendered "
+            "(no phase-based trimming)."
+        ),
+    )
     return parser.parse_args()
+
+
+def _load_subtasks_by_frame(path: Path) -> dict[tuple[int, int], str]:
+    payload = json.loads(path.read_text())
+    records = payload.get("results") if isinstance(payload, dict) else payload
+    by_frame: dict[tuple[int, int], str] = {}
+    for record in records or []:
+        subtask = (record.get("subtask") or "").strip()
+        if not subtask:
+            continue
+        by_frame[(record["episode_index"], record["frame_idx"])] = subtask
+    return by_frame
 
 
 def main() -> None:
     args = _parse_args()
     all_frames = iter_source_frames(args.v2_root)
-    phased = [(f, lookup_phase(f.episode_index, f.frame_idx)) for f in all_frames]
-    in_phase = [(f, p) for (f, p) in phased if p is not None]
-    if not in_phase:
-        raise SystemExit(f"No in-phase frames found in {args.v2_root}")
-    logger.info(
-        "Rendering %d in-phase frames (trimmed %d) @ %d fps",
-        len(in_phase),
-        len(all_frames) - len(in_phase),
-        args.fps,
-    )
+
+    if args.subtasks_json is not None:
+        per_frame_subtasks = _load_subtasks_by_frame(args.subtasks_json)
+        captioned = [
+            (f, per_frame_subtasks[(f.episode_index, f.frame_idx)])
+            for f in all_frames
+            if (f.episode_index, f.frame_idx) in per_frame_subtasks
+        ]
+        logger.info(
+            "Rendering %d frames from %s (@ %d fps)", len(captioned), args.subtasks_json, args.fps
+        )
+    else:
+        phased = [(f, lookup_phase(f.episode_index, f.frame_idx)) for f in all_frames]
+        captioned = [(f, p.subtask_label) for (f, p) in phased if p is not None]
+        logger.info(
+            "Rendering %d in-phase frames (trimmed %d) @ %d fps",
+            len(captioned),
+            len(all_frames) - len(captioned),
+            args.fps,
+        )
+    if not captioned:
+        raise SystemExit(f"No frames to render from {args.v2_root}")
 
     composites: list[np.ndarray] = []
-    for frame, phase in in_phase:
+    for frame, subtask in captioned:
         actual = _load_resized(frame.actual_path, w=FRAME_W, h=FRAME_H)
         foresight_file = foresight_path(args.foresight_dir, frame.episode_index, frame.frame_idx)
         foresight = (
@@ -112,7 +148,7 @@ def main() -> None:
         composites.append(
             _draw_caption(
                 composite,
-                caption=phase.subtask_label,
+                caption=subtask,
                 footer=footer,
                 camera_labels=[
                     (4, "ACTUAL"),
