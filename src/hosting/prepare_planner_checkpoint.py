@@ -2,7 +2,7 @@
 
 Mirror of ``prepare_checkpoint`` but for the planner slot. The planner's
 Orbax checkpoint ships as a single multi-GB ``.tar`` blob on Hugging Face
-(e.g. ``swatery/pi05_subtask/jax/pi05_subtask.tar``). Most tars wrap the
+(e.g. ``Hebbian-Robotics/pi05_subtask/jax/pi05_subtask.tar``). Most tars wrap the
 Orbax layout inside a ``<step>/`` directory — we strip that wrapper so the
 prepared output directory is the exact directory that
 ``SubtaskGenerator`` expects as ``checkpoint_dir`` (i.e. one that contains
@@ -19,7 +19,7 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download
 from openpi.shared import download as openpi_download
 
-DEFAULT_HF_REPO = "swatery/pi05_subtask"
+DEFAULT_HF_REPO = "Hebbian-Robotics/pi05_subtask"
 DEFAULT_TAR_PATH_IN_REPO = "jax/pi05_subtask.tar"
 
 _PARAMS_METADATA_RELATIVE_PATH = Path("params") / "_METADATA"

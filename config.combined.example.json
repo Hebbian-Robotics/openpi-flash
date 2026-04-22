@@ -1,7 +1,7 @@
 {
   "action": {
     "model_config_name": "pi05_droid",
-    "checkpoint_dir": "hf://swatery/pi05_droid_base"
+    "checkpoint_dir": "hf://Hebbian-Robotics/pi05_droid_base"
   },
   "planner": {
     "checkpoint_dir": "gs://openpi-assets/checkpoints/pi05_base"

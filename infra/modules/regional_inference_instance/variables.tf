@@ -196,7 +196,7 @@ variable "prepare_planner_checkpoint" {
 variable "planner_prep_hf_repo" {
   description = "Hugging Face repo ID that holds the planner checkpoint tar."
   type        = string
-  default     = "swatery/pi05_subtask"
+  default     = "Hebbian-Robotics/pi05_subtask"
 }
 
 variable "planner_prep_tar_path_in_repo" {

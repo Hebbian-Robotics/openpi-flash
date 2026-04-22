@@ -60,7 +60,7 @@ def prepare_planner_checkpoint(
     hf_repo: Annotated[
         str,
         typer.Option(help="Hugging Face repo id that holds the planner checkpoint tar."),
-    ] = "swatery/pi05_subtask",
+    ] = "Hebbian-Robotics/pi05_subtask",
     tar_path_in_repo: Annotated[
         str,
         typer.Option(help="Path inside the HF repo to the Orbax checkpoint tar."),

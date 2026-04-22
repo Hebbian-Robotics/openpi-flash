@@ -90,12 +90,12 @@ The planner is how we specialize a general VLA to a specific task distribution: 
 1. **Raw Orbax URI** (preferred for the pi0.5 base): `gs://openpi-assets/checkpoints/pi05_base/params`. `SubtaskGenerator.load()` downloads it on first boot via `maybe_download` and caches it under `OPENPI_DATA_HOME`. No extra step.
 2. **Local prepared directory** (required for fine-tuned checkpoints published as a single HF tar): `/cache/models/<name>`. The directory must contain `params/_METADATA` directly at the root. Prepare it with `main.py prepare-planner-checkpoint` (see below).
 
-The current production planner (`swatery/pi05_subtask`) is published as a single `.tar` blob on Hugging Face. For a cold deployment, prepare it once into `/cache/models/pi05_subtask` and point the config at that path:
+The current production planner (`Hebbian-Robotics/pi05_subtask`) is published as a single `.tar` blob on Hugging Face. For a cold deployment, prepare it once into `/cache/models/pi05_subtask` and point the config at that path:
 
 ```bash
 # Inside the container (or any env with the openpi-flash deps):
 uv run python main.py prepare-planner-checkpoint \
-    --hf-repo swatery/pi05_subtask \
+    --hf-repo Hebbian-Robotics/pi05_subtask \
     --tar-path-in-repo jax/pi05_subtask.tar \
     --output-dir /cache/models/pi05_subtask
 ```

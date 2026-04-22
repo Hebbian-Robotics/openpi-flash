@@ -9,13 +9,13 @@ dependencies = [
     "openpi",
     "openpi-client",
     "huggingface-hub>=0.36.2,<1.0",
-    "pydantic>=2.13.2",
-    "pydantic-settings>=2.13.1",
+    "pydantic>=2.13.3",
+    "pydantic-settings>=2.14.0",
     "fastapi>=0.136.0",
     "httpx>=0.28.1",
     "modal>=1.4.2",
     "starlette>=1.0.0",
-    "uvicorn>=0.32.0",
+    "uvicorn>=0.45.0",
     "gsutil>=5.36",
     "quic-portal>=0.1.13",
     "python-dotenv>=1.2.2",
@@ -43,7 +43,7 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ruff>=0.15.11", #
-    "ty>=0.0.31",
+    "ty>=0.0.32",
     "pytest>=9.0.3",
 ]
 
