@@ -82,6 +82,53 @@ Two-tier structure:
 - `infra/regional-instance/` — Per-region EC2 deployment. Uses Terraform workspaces (`openpi-uswest2`, `openpi-malaysia`, `openpi-seoul`). Calls the reusable module at `infra/modules/regional_inference_instance/`.
 - `infra/modules/regional_inference_instance/` — The reusable module: EC2 instance, security group, optional Elastic IP, cloud-init bootstrap via `user_data.yaml.tftpl`.
 
+## Transport paths
+
+Both flash-transport and the native openpi WebSocket path terminate at the same `ThreadSafePolicy.infer()` — they differ only in what sits between the robot process and that call. Flash-transport inserts a Rust sidecar on each end that owns the CPU-heavy hot path (image preprocessing, ACT caching) and swaps two layers of the stack — TCP→UDP at the network layer, msgpack→Arrow at the serialization layer — compared to the pure-Python WebSocket path.
+
+```
+   FLASH-TRANSPORT                          NATIVE WEBSOCKET
+   ───────────────                          ────────────────
+
+  ┌────────────────────────┐               ┌────────────────────────┐
+  │ robot process (Python) │               │ robot process (Python) │
+  └───────────┬────────────┘               └───────────┬────────────┘
+              │                                        │
+              ▼                                        │
+  ┌────────────────────────┐                           │
+  │ flash-transport (Rust) │                           │
+  │  · image preprocessing │                           │
+  │  · ACT cache           │                           │
+  └───────────┬────────────┘                           │
+              │                                        │
+       ┌──────┴──────┐                         ┌───────┴─────────┐
+       │ QUIC (UDP)  │                         │ WebSocket (TCP) │
+       └──────┬──────┘                         └───────┬─────────┘
+              │                                        │
+       ┌──────┴──────┐                         ┌───────┴─────────┐
+       │ Arrow IPC   │                         │ msgpack_numpy   │
+       └──────┬──────┘                         └───────┬─────────┘
+              │                                        │
+              ▼                                        ▼
+  ┌────────────────────────┐               ┌────────────────────────┐
+  │ flash-transport (Rust) │               │ openpi                 │
+  └───────────┬────────────┘               │ WebsocketPolicyServer  │
+              │                            └───────────┬────────────┘
+              ▼                                        │
+  ┌────────────────────────┐                           │
+  │ LocalPolicySocketServer│                           │
+  └───────────┬────────────┘                           │
+              │                                        │
+              └──────────────────┬─────────────────────┘
+                                 ▼
+                  ┌──────────────────────────┐
+                  │ ThreadSafePolicy.infer() │
+                  │   → openpi Policy        │
+                  └──────────────────────────┘
+```
+
+The Rust sidecar exists on **both** ends — client-side it's spawned by `FlashTransportPolicy`, server-side it's a supervised subprocess per slot. It takes CPU-heavy preprocessing off the Python GIL, and the two swaps (TCP→UDP, msgpack→Arrow) are independent wins stacked on the same sidecar.
+
 ## Architectural invariants
 
 - **No openpi modifications.** We import from openpi and openpi-client as-is. If something needs to change in openpi, it should be upstreamed.
