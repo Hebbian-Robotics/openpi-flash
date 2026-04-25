@@ -1,0 +1,50 @@
+[project]
+name = "sim"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "imageio[ffmpeg]>=2.37.3",
+    "jaxtyping>=0.3.9",
+    "mink>=1.1.0",
+    "mujoco>=3.7.0",
+    "numpy>=2.4.4",
+    # 0.7.2 ships cp312/cp313 wheels; the 0.7.2.post1 tag is cp310-only, so
+    # pinning to or above the post1 bound would wedge any non-3.10 environment.
+    "proxsuite>=0.7.2,!=0.7.2.post1",
+    # Typer (FastAPI author, built on Click) powers tools/mj.py — one CLI
+    # with subcommands for snapshot / video / grid / plan / diff / ik.
+    "typer>=0.12.5",
+    "viser>=1.0.26",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.11", #
+    "ty>=0.0.32",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",   # pycodestyle + pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "SIM", # simplify
+]
+ignore = [
+    "E501", # line too long — ruff format handles this; complaints usually noise
+]
+
+[tool.ty.rules]
+# mujoco ships as C extensions without .pyi stubs, so every mujoco.* access
+# looks "unresolved" to ty. The rule would otherwise be useful for our own
+# code, but it's drowned by ~70 false positives from mujoco alone. Accept
+# the tradeoff: runtime will surface real typos in dataclass field access
+# quickly during dev.
+unresolved-attribute = "ignore"

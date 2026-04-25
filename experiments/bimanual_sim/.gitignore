@@ -1,0 +1,9 @@
+# uv / Python
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Runtime artifacts
+*.log
+*.pid
