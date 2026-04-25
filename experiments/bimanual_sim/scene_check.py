@@ -36,6 +36,7 @@ ViolationKind = Literal[
     "eq_type_mismatch",
     "connect_anchor_oob",
     "cable_short",
+    "camera_invariant",
 ]
 
 
@@ -61,21 +62,88 @@ class SceneCheckError(RuntimeError):
 
 
 # -----------------------------------------------------------------------------
-# Attachment-constraint descriptor (scene-agnostic)
+# Attachment-constraint descriptors (scene-agnostic, discriminated union)
 # -----------------------------------------------------------------------------
-# Scenes with mjEQ_WELD / mjEQ_CONNECT equalities can expose a tuple of these
-# so `check_scene` can validate each entry (body refs resolve, compiled eq
-# type matches, CONNECT anchors lie inside body_a). The scene's own
-# `_AttachmentWeldSpec` maps trivially to this shape; the runner adapts.
+# `AttachmentConstraint` is the union of `WeldAttachment` and
+# `ConnectAttachment`; scenes declare a tuple of these as the single source
+# of truth, consumed by `build_spec` (creates the equality), the scene's
+# `apply_initial_state` (resets to default), and `check_scene` (validates
+# the compiled fact matches the declared kind). Splitting into two variants
+# instead of a `kind: Literal["weld","connect"]` field puts the
+# "anchor required for connect, absent for weld" rule into the type system —
+# `WeldAttachment` simply doesn't carry an anchor, so a misuse is impossible
+# to construct.
 
 
 @dataclass(frozen=True)
-class AttachmentConstraint:
+class WeldAttachment:
+    """`mjEQ_WELD` — pins the full pose (position + orientation) of body_b
+    relative to body_a. Activation captures the current relpose at the call
+    site so the body doesn't snap to body_a's origin."""
+
     name: str
     body_a: str
     body_b: str
-    kind: Literal["weld", "connect"]
-    connect_anchor_in_a: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    initially_active: bool = True
+
+
+@dataclass(frozen=True)
+class ConnectAttachment:
+    """`mjEQ_CONNECT` — pins a point in body_a's local frame to body_b's
+    origin. No orientation constraint, so body_b can rotate freely about
+    the anchor (real plug-in-socket behaviour)."""
+
+    name: str
+    body_a: str
+    body_b: str
+    anchor_in_a: tuple[float, float, float]
+    initially_active: bool = True
+
+
+AttachmentConstraint = WeldAttachment | ConnectAttachment
+
+
+# -----------------------------------------------------------------------------
+# Camera invariants (scene-agnostic, discriminated union)
+# -----------------------------------------------------------------------------
+# Scenes pin every declared camera's *intent* — which mode it runs in, what
+# body it's attached to, and (for TARGETBODY mode) what it's pointed at — so a
+# subsequent edit that flips a camera mode or moves it to the wrong parent
+# fails at compile-time-startup rather than as "the wrist view looks weird"
+# at viser-time.
+#
+# Two variants encode the targetbody-required-for-tracking-modes rule at the
+# type level: `FixedCameraInvariant` carries no targetbody; the targeting /
+# tracking modes are `TargetingCameraInvariant` and require one. Mapping to
+# MuJoCo's `mjtCamLight` int constants happens inside `_check_camera_invariants`
+# at the boundary so scene declarations don't import mujoco.
+
+TargetingCameraMode = Literal["targetbody", "targetbodycom", "track", "trackcom"]
+
+
+@dataclass(frozen=True)
+class FixedCameraInvariant:
+    """A `mode="fixed"` camera rigidly attached to `parent_body`. Has no
+    target — the optical axis is whatever the MJCF `quat` rotates the
+    camera frame to."""
+
+    name: str
+    parent_body: str
+
+
+@dataclass(frozen=True)
+class TargetingCameraInvariant:
+    """A camera that points at (or follows) another body. `mode` selects
+    between `targetbody`/`targetbodycom` (orient toward body) and
+    `track`/`trackcom` (also follow body's translation)."""
+
+    name: str
+    parent_body: str
+    targetbody: str
+    mode: TargetingCameraMode = "targetbody"
+
+
+CameraInvariant = FixedCameraInvariant | TargetingCameraInvariant
 
 
 # -----------------------------------------------------------------------------
@@ -259,6 +327,7 @@ def check_scene(
     grippable_names: tuple[str, ...] = (),
     allowed_static_overlaps: tuple[tuple[str, str], ...] = (),
     attachment_constraints: tuple[AttachmentConstraint, ...] = (),
+    camera_invariants: tuple[CameraInvariant, ...] = (),
 ) -> None:
     """Run every invariant; raise `SceneCheckError` if any failed.
 
@@ -273,6 +342,7 @@ def check_scene(
     violations.extend(_check_tcp_not_in_static_geom(data, arms, ctx))
     violations.extend(_check_grippables_reachable(model, data, grippable_names, arms))
     violations.extend(_check_attachment_constraints(model, data, attachment_constraints))
+    violations.extend(_check_camera_invariants(model, camera_invariants))
 
     if violations:
         raise SceneCheckError(violations)
@@ -380,6 +450,79 @@ def _check_grippables_reachable(
     return out
 
 
+_TARGETING_CAMERA_MODE_TO_MJ: dict[TargetingCameraMode, int] = {
+    "track": int(mujoco.mjtCamLight.mjCAMLIGHT_TRACK),
+    "trackcom": int(mujoco.mjtCamLight.mjCAMLIGHT_TRACKCOM),
+    "targetbody": int(mujoco.mjtCamLight.mjCAMLIGHT_TARGETBODY),
+    "targetbodycom": int(mujoco.mjtCamLight.mjCAMLIGHT_TARGETBODYCOM),
+}
+_FIXED_CAMERA_MODE_MJ: int = int(mujoco.mjtCamLight.mjCAMLIGHT_FIXED)
+
+
+def _check_camera_invariants(
+    model: mujoco.MjModel,
+    invariants: tuple[CameraInvariant, ...],
+) -> list[SceneCheckViolation]:
+    out: list[SceneCheckViolation] = []
+    for inv in invariants:
+        cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, inv.name)
+        if cam_id < 0:
+            out.append(
+                SceneCheckViolation(
+                    kind="camera_invariant",
+                    detail=f"camera {inv.name!r} not found in compiled model",
+                )
+            )
+            continue
+        # Parent body — the body the camera is rigidly attached to.
+        parent_body_id = int(model.cam_bodyid[cam_id])
+        actual_parent = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, parent_body_id)
+        if actual_parent != inv.parent_body:
+            out.append(
+                SceneCheckViolation(
+                    kind="camera_invariant",
+                    detail=(
+                        f"camera {inv.name!r} parent body {actual_parent!r} "
+                        f"!= declared {inv.parent_body!r}"
+                    ),
+                )
+            )
+        # Mode + targetbody — branch on the variant. The variant itself
+        # encodes the "fixed has no target / targeting must have one" rule,
+        # so there's no need to re-validate that here.
+        actual_mode = int(model.cam_mode[cam_id])
+        if isinstance(inv, FixedCameraInvariant):
+            expected_mode = _FIXED_CAMERA_MODE_MJ
+            mode_label = "fixed"
+        else:
+            expected_mode = _TARGETING_CAMERA_MODE_TO_MJ[inv.mode]
+            mode_label = inv.mode
+        if actual_mode != expected_mode:
+            out.append(
+                SceneCheckViolation(
+                    kind="camera_invariant",
+                    detail=(
+                        f"camera {inv.name!r} mode={actual_mode} "
+                        f"!= declared {mode_label!r} (expected {expected_mode})"
+                    ),
+                )
+            )
+        if isinstance(inv, TargetingCameraInvariant):
+            target_id = int(model.cam_targetbodyid[cam_id])
+            actual_target = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, target_id)
+            if actual_target != inv.targetbody:
+                out.append(
+                    SceneCheckViolation(
+                        kind="camera_invariant",
+                        detail=(
+                            f"camera {inv.name!r} targetbody={actual_target!r} "
+                            f"!= declared {inv.targetbody!r}"
+                        ),
+                    )
+                )
+    return out
+
+
 def _check_attachment_constraints(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -412,25 +555,30 @@ def _check_attachment_constraints(
                     detail=f"attachment {c.name!r} body_b={c.body_b!r} not found",
                 )
             )
-        # Verify compiled equality type matches the declared kind.
+        # Verify compiled equality type matches the declared variant.
         compiled_type = int(model.eq_type[eq_id])
-        expected = mujoco.mjtEq.mjEQ_WELD if c.kind == "weld" else mujoco.mjtEq.mjEQ_CONNECT
-        if compiled_type != int(expected):
+        if isinstance(c, WeldAttachment):
+            expected = int(mujoco.mjtEq.mjEQ_WELD)
+            kind_label = "weld"
+        else:
+            expected = int(mujoco.mjtEq.mjEQ_CONNECT)
+            kind_label = "connect"
+        if compiled_type != expected:
             out.append(
                 SceneCheckViolation(
                     kind="eq_type_mismatch",
                     detail=(
-                        f"attachment {c.name!r} declared kind={c.kind!r} "
+                        f"attachment {c.name!r} declared kind={kind_label!r} "
                         f"but compiled eq type={compiled_type} "
-                        f"(expected {int(expected)})"
+                        f"(expected {expected})"
                     ),
                 )
             )
             continue
-        # For CONNECT entries, the anchor must lie inside body_a's local AABB.
-        if c.kind == "connect" and body_a_id >= 0:
+        # CONNECT-only: anchor must lie inside body_a's local AABB.
+        if isinstance(c, ConnectAttachment) and body_a_id >= 0:
             mins, maxs = _body_local_aabb(model, body_a_id)
-            ax = np.asarray(c.connect_anchor_in_a, dtype=float)
+            ax = np.asarray(c.anchor_in_a, dtype=float)
             # Use <= / >= rather than strict to accept boundary anchors (ports
             # sit exactly on the server's front face by design).
             if not bool(np.all(ax >= mins - 1e-6) and np.all(ax <= maxs + 1e-6)):
@@ -522,8 +670,8 @@ def print_schematic(
 
     if attachment_constraints:
         print()
-        weld_count = sum(1 for c in attachment_constraints if c.kind == "weld")
-        connect_count = sum(1 for c in attachment_constraints if c.kind == "connect")
+        weld_count = sum(1 for c in attachment_constraints if isinstance(c, WeldAttachment))
+        connect_count = sum(1 for c in attachment_constraints if isinstance(c, ConnectAttachment))
         print(
             f"Attachment constraints ({len(attachment_constraints)}): "
             f"{connect_count}× CONNECT, {weld_count}× WELD"
@@ -531,4 +679,5 @@ def print_schematic(
         for c in attachment_constraints:
             eq_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_EQUALITY, c.name)
             status = "✓" if eq_id >= 0 else "✗ MISSING"
-            print(f"  {c.name:<28} {c.kind.upper():<8} {c.body_a!r} ↔ {c.body_b!r}  {status}")
+            kind_label = "WELD" if isinstance(c, WeldAttachment) else "CONNECT"
+            print(f"  {c.name:<28} {kind_label:<8} {c.body_a!r} ↔ {c.body_b!r}  {status}")

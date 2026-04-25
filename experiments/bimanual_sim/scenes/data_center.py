@@ -43,14 +43,23 @@ from enum import StrEnum
 
 import mujoco
 import numpy as np
+from dm_control import mjcf
 
 from arm_handles import ArmHandles, ArmSide
 from cameras import CameraRole
 from ik import PositionOnly, solve_ik
 from paths import D405_MESH_STL, D435I_XML
-from robots.piper import attach_piper
+from robots.piper import load_piper
 from robots.tiago import load_tiago
 from scene_base import CubeID, Position3, Step, make_cube_id
+from scene_check import (
+    AttachmentConstraint,
+    CameraInvariant,
+    ConnectAttachment,
+    FixedCameraInvariant,
+    TargetingCameraInvariant,
+    WeldAttachment,
+)
 from scenes.data_center_layout import HOME_ARM_Q, IK_SEED_Q, LAYOUT
 from welds import activate_attachment_weld
 
@@ -59,9 +68,12 @@ ARM_PREFIXES: tuple[ArmSide, ...] = (ArmSide.LEFT, ArmSide.RIGHT)
 # Grippable objects addressable via Step.weld_activate / weld_deactivate.
 # Index order matters: the runner uses it as an int index into this list.
 GRIPPABLES: tuple[str, ...] = (
-    "cable1_connector",
-    "cable2_connector",
-    "cable3_connector",
+    # Cable connector bodies live inside the `cable{N}` attachment subtrees
+    # (each cable is its own mjcf.RootElement attached at a site on the
+    # rack), so dm_control namespaces them as `cable1/connector` etc.
+    "cable1/connector",
+    "cable2/connector",
+    "cable3/connector",
     "server",
     "new_server",
 )
@@ -82,11 +94,40 @@ class DataCenterAux(StrEnum):
 AUX_ACTUATOR_NAMES: tuple[str, ...] = tuple(m.value for m in DataCenterAux)
 
 CAMERAS: tuple[tuple[str, CameraRole], ...] = (
-    # Realsense D435i mounted on top of the torso lift, pointing forward-down.
-    ("top_d435i_cam", CameraRole.TOP),
-    # Realsense D405 on each arm's link6, along the gripper axis.
-    ("left_wrist_d405_cam", CameraRole.WRIST),
-    ("right_wrist_d405_cam", CameraRole.WRIST),
+    # Realsense D435i attached at the top of the camera pole. dm_control
+    # namespaces names of attached subtrees with `<model>/`, so the camera
+    # the d435i.xml declares as `d435i_cam` compiles as `top/d435i_cam`.
+    ("top/d435i_cam", CameraRole.TOP),
+    # Wrist D405 cameras are added directly inside the piper subtree
+    # (`{side}link6`) before attach so they pick up the piper's namespace
+    # prefix. Result: `left/wrist_d405_cam`, `right/wrist_d405_cam`.
+    ("left/wrist_d405_cam", CameraRole.WRIST),
+    ("right/wrist_d405_cam", CameraRole.WRIST),
+)
+
+# Camera invariants — pinned at startup by `scene_check.check_scene`. Each
+# entry locks a camera's structural identity (parent body, MuJoCo cam mode,
+# optional targetbody) so a future edit that flips the top cam to FIXED,
+# or accidentally re-parents a wrist cam to base_link, fails fast at
+# startup with a clear message instead of as "the wrist view looks
+# wrong" days later in viser.
+CAMERA_INVARIANTS: tuple[CameraInvariant, ...] = (
+    # Top camera rides the camera pole's mesh body (`top/d435i`), attached
+    # to the static `base_link` (not the moving torso_lift_link) so the
+    # view stays stable regardless of lift qpos. Targets `rack_frame`, so
+    # the optical axis tracks the rack as the robot's base rotates.
+    TargetingCameraInvariant(
+        name="top/d435i_cam",
+        parent_body="top/d435i",
+        targetbody="rack_frame",
+        mode="targetbody",
+    ),
+    # Wrist cams mount on each arm's link6 (`left/link6`, `right/link6`)
+    # in FIXED mode. The 180°-x quat on the camera makes its optical
+    # axis (-z) align with link6's +z (the gripper axis), so each wrist
+    # view always looks at whatever the arm is reaching for.
+    FixedCameraInvariant(name="left/wrist_d405_cam", parent_body="left/link6"),
+    FixedCameraInvariant(name="right/wrist_d405_cam", parent_body="right/link6"),
 )
 
 
@@ -123,38 +164,37 @@ ALLOWED_STATIC_OVERLAPS: tuple[tuple[str, str], ...] = (
     ("rack_side_R", "rack_top"),
     ("rack_side_R", "rack_bottom"),
     ("rack_top", "rack_bottom"),
-    # Rack shelves span the whole interior between the surrounding panels.
+    # Shelf is a thin plate spanning the full rack interior; touches the
+    # surrounding panels at every edge. Patch panel sits on top of it.
     ("rack_rear", "rack_shelf"),
     ("rack_side_L", "rack_shelf"),
     ("rack_side_R", "rack_shelf"),
-    ("rack_rear", "rack_lower_shelf"),
-    ("rack_side_L", "rack_lower_shelf"),
-    ("rack_side_R", "rack_lower_shelf"),
-    # Cable bracket is a decorative bar bolted flush against the +y side.
-    ("cable_bracket", "rack_side_R"),
-    # Each cable anchor body sits inside the bracket (that's how the cable
-    # emerges from the fixture), and the composite's first-segment body
-    # (`cable{i}_B_first`) is at the anchor origin — both overlap the
-    # bracket and each other by design.
-    ("cable_bracket", "cable1_anchor"),
-    ("cable_bracket", "cable2_anchor"),
-    ("cable_bracket", "cable3_anchor"),
-    ("cable_bracket", "cable1_B_first"),
-    ("cable_bracket", "cable2_B_first"),
-    ("cable_bracket", "cable3_B_first"),
-    ("cable1_anchor", "cable1_B_first"),
-    ("cable2_anchor", "cable2_B_first"),
-    ("cable3_anchor", "cable3_B_first"),
-    # The cable composite's first body also crosses the rack side panel
-    # (the bracket sits outside +y; the first segment extends back into
-    # the rack toward the port).
-    ("rack_side_R", "cable1_B_first"),
-    ("rack_side_R", "cable2_B_first"),
-    ("rack_side_R", "cable3_B_first"),
+    ("rack_shelf", "patch_panel"),
+    # Shelf top is at server bottom z; cable anchors mount on top of the
+    # patch panel which sits on top of the shelf — anchor bodies graze
+    # the shelf top by design.
+    ("rack_shelf", "cable1/anchor"),
+    ("rack_shelf", "cable2/anchor"),
+    ("rack_shelf", "cable3/anchor"),
+    # Cables emerge from a 1U patch panel mounted on the rack front rails,
+    # one rack-unit below the server slot. Each cable's anchor body
+    # touches the patch-panel face where it emerges, and the rod body
+    # starts co-located with the anchor (rest pose) so the two overlap
+    # by design. Under dm_control namespacing the cable subtrees compile
+    # as `cable{N}/anchor`, `cable{N}/rod`, `cable{N}/connector`.
+    ("patch_panel", "cable1/anchor"),
+    ("patch_panel", "cable2/anchor"),
+    ("patch_panel", "cable3/anchor"),
+    ("patch_panel", "cable1/rod"),
+    ("patch_panel", "cable2/rod"),
+    ("patch_panel", "cable3/rod"),
+    ("cable1/anchor", "cable1/rod"),
+    ("cable2/anchor", "cable2/rod"),
+    ("cable3/anchor", "cable3/rod"),
     # Top camera sits directly on top of the camera pole — the pole-top
     # and mesh-bottom AABBs touch by design. The camera-mesh body
     # contains ~9 sub-geoms so a body-pair allow covers the lot.
-    ("world", "top_d435i"),
+    ("world", "top/d435i"),
     # TIAGo's base mesh uses a conservative sphere bound in scene_check
     # (rbound ≈ 0.30 m at mesh origin z≈0.16), so after pulling the rack
     # closer to center_x=0.58 the rbound sphere grazes the rack walls
@@ -163,7 +203,11 @@ ALLOWED_STATIC_OVERLAPS: tuple[tuple[str, str], ...] = (
     ("world", "rack_side_L"),
     ("world", "rack_side_R"),
     ("world", "rack_bottom"),
-    ("world", "rack_lower_shelf"),
+    # Same conservative-sphere story for the floor-standing cart at
+    # cart.center_y=-0.55: its casters and bottom shelf sit close enough
+    # to the floor that TIAGo's base-mesh sphere bound overlaps them by
+    # design.
+    ("world", "cart_frame"),
 )
 
 
@@ -203,107 +247,92 @@ class AttachmentWeldName(StrEnum):
     PORT2_NEW = "weld_port2_new"
     PORT3_NEW = "weld_port3_new"
     SERVER_IN_RACK = "weld_server_in_rack"
-    SERVER_ON_LOWER_SHELF = "weld_server_on_lower_shelf"
-    NEW_IN_BIN = "weld_new_in_bin"
+    SERVER_ON_CART_BOTTOM = "weld_server_on_cart_bottom"
+    NEW_ON_CART_TOP = "weld_new_on_cart_top"
     NEW_IN_RACK = "weld_new_in_rack"
 
 
-class ConstraintKind(StrEnum):
-    """Which MuJoCo equality type backs an entry in `ATTACHMENTS`."""
-
-    WELD = "weld"  # mjEQ_WELD — pins full pose (position + orientation)
-    CONNECT = "connect"  # mjEQ_CONNECT — pins only a point (like a ball joint)
-
-
-@dataclass(frozen=True)
-class _AttachmentWeldSpec:
-    """One scene body-pair equality. The registry below is the single source
-    of truth for the name, the two bodies, the initial active flag, and the
-    constraint kind — consumed by `build_spec` (create the equality),
-    `_resolve_scene_ids` (collect the eq id), and `apply_initial_state` (reset
-    to the spec default).
-    """
-
-    name: AttachmentWeldName
-    body_a: str
-    body_b: str
-    initially_active: bool
-    kind: ConstraintKind = ConstraintKind.WELD
-    # Only meaningful when kind == CONNECT: the anchor point in body_a's
-    # local frame that body_b's origin should be pinned to. For port
-    # connects this is the port geom's position on the server body.
-    connect_anchor_in_a: tuple[float, float, float] = (0.0, 0.0, 0.0)
-
-
-# Port anchor in server's local frame. Server and new_server share identical
-# port layouts, so both reuse this tuple when a CONNECT equality is built.
-# Delegated to `LAYOUT.port_anchor_in_server_frame` so the port geom position
-# and the connect anchor stay in lockstep.
-def _port_anchor_in_server_frame(port_idx: int) -> tuple[float, float, float]:
-    return LAYOUT.port_anchor_in_server_frame(port_idx)
-
-
-ATTACHMENTS: tuple[_AttachmentWeldSpec, ...] = (
+# Single source of truth for body-pair equalities. Entries are
+# `WeldAttachment` (full-pose pin) or `ConnectAttachment` (point-pin with an
+# anchor in body_a's local frame); the variant itself encodes the constraint
+# kind, so build_spec / apply_initial_state pattern-match on `isinstance(...)`
+# rather than reading a separate `kind` field. `scene_check.check_scene`
+# consumes the same tuple to verify each compiled equality matches its
+# declared variant.
+ATTACHMENTS: tuple[AttachmentConstraint, ...] = (
     # Port connects — body_a is the SERVER (anchor is in server's local
     # frame); body_b is the cable connector whose origin gets pinned.
-    _AttachmentWeldSpec(
-        AttachmentWeldName.PORT1_OLD,
-        "server",
-        "cable1_connector",
-        True,
-        kind=ConstraintKind.CONNECT,
-        connect_anchor_in_a=_port_anchor_in_server_frame(0),
+    # Cable connectors live inside the `cable{N}` attachment subtrees so
+    # dm_control namespaces them as `cable{N}/connector`. Anchor positions
+    # come from `LAYOUT.port_anchor_in_server_frame` so the port geom
+    # position and the connect anchor stay in lockstep.
+    ConnectAttachment(
+        name=AttachmentWeldName.PORT1_OLD,
+        body_a="server",
+        body_b="cable1/connector",
+        anchor_in_a=LAYOUT.port_anchor_in_server_frame(0),
+        initially_active=True,
     ),
-    _AttachmentWeldSpec(
-        AttachmentWeldName.PORT2_OLD,
-        "server",
-        "cable2_connector",
-        True,
-        kind=ConstraintKind.CONNECT,
-        connect_anchor_in_a=_port_anchor_in_server_frame(1),
+    ConnectAttachment(
+        name=AttachmentWeldName.PORT2_OLD,
+        body_a="server",
+        body_b="cable2/connector",
+        anchor_in_a=LAYOUT.port_anchor_in_server_frame(1),
+        initially_active=True,
     ),
-    _AttachmentWeldSpec(
-        AttachmentWeldName.PORT3_OLD,
-        "server",
-        "cable3_connector",
-        True,
-        kind=ConstraintKind.CONNECT,
-        connect_anchor_in_a=_port_anchor_in_server_frame(2),
+    ConnectAttachment(
+        name=AttachmentWeldName.PORT3_OLD,
+        body_a="server",
+        body_b="cable3/connector",
+        anchor_in_a=LAYOUT.port_anchor_in_server_frame(2),
+        initially_active=True,
     ),
-    _AttachmentWeldSpec(
-        AttachmentWeldName.PORT1_NEW,
-        "new_server",
-        "cable1_connector",
-        False,
-        kind=ConstraintKind.CONNECT,
-        connect_anchor_in_a=_port_anchor_in_server_frame(0),
+    ConnectAttachment(
+        name=AttachmentWeldName.PORT1_NEW,
+        body_a="new_server",
+        body_b="cable1/connector",
+        anchor_in_a=LAYOUT.port_anchor_in_server_frame(0),
+        initially_active=False,
     ),
-    _AttachmentWeldSpec(
-        AttachmentWeldName.PORT2_NEW,
-        "new_server",
-        "cable2_connector",
-        False,
-        kind=ConstraintKind.CONNECT,
-        connect_anchor_in_a=_port_anchor_in_server_frame(1),
+    ConnectAttachment(
+        name=AttachmentWeldName.PORT2_NEW,
+        body_a="new_server",
+        body_b="cable2/connector",
+        anchor_in_a=LAYOUT.port_anchor_in_server_frame(1),
+        initially_active=False,
     ),
-    _AttachmentWeldSpec(
-        AttachmentWeldName.PORT3_NEW,
-        "new_server",
-        "cable3_connector",
-        False,
-        kind=ConstraintKind.CONNECT,
-        connect_anchor_in_a=_port_anchor_in_server_frame(2),
+    ConnectAttachment(
+        name=AttachmentWeldName.PORT3_NEW,
+        body_a="new_server",
+        body_b="cable3/connector",
+        anchor_in_a=LAYOUT.port_anchor_in_server_frame(2),
+        initially_active=False,
     ),
-    # Full-pose welds — these need orientation pinning so a stowed server
-    # keeps its rack-aligned orientation and doesn't roll around.
-    _AttachmentWeldSpec(AttachmentWeldName.SERVER_IN_RACK, "server", "rack_frame", True),
-    # Old server gets staged on the rack's lower shelf (not a torso bin) —
-    # the robot's cart only carries the NEW server at init. Weld to
-    # rack_frame (static) so the stowed old server stays put when the
-    # robot lifts.
-    _AttachmentWeldSpec(AttachmentWeldName.SERVER_ON_LOWER_SHELF, "server", "rack_frame", False),
-    _AttachmentWeldSpec(AttachmentWeldName.NEW_IN_BIN, "new_server", "torso_lift_link", True),
-    _AttachmentWeldSpec(AttachmentWeldName.NEW_IN_RACK, "new_server", "rack_frame", False),
+    # Server placement welds (full pose):
+    WeldAttachment(
+        name=AttachmentWeldName.SERVER_IN_RACK,
+        body_a="server",
+        body_b="rack_frame",
+        initially_active=True,
+    ),
+    WeldAttachment(
+        name=AttachmentWeldName.SERVER_ON_CART_BOTTOM,
+        body_a="server",
+        body_b="cart_frame",
+        initially_active=False,
+    ),
+    WeldAttachment(
+        name=AttachmentWeldName.NEW_ON_CART_TOP,
+        body_a="new_server",
+        body_b="cart_frame",
+        initially_active=True,
+    ),
+    WeldAttachment(
+        name=AttachmentWeldName.NEW_IN_RACK,
+        body_a="new_server",
+        body_b="rack_frame",
+        initially_active=False,
+    ),
 )
 
 
@@ -327,10 +356,11 @@ def grippable_id(name: str) -> CubeID:
 
 
 def grasp_weld(side: ArmSide, cube_id: CubeID) -> str:
-    """Name of the per-arm grasp weld for a given cube. Matches the
-    `{prefix}grasp_cube{i}` convention used when the arm handles are built
-    in `arm_handles.get_arm_handles`."""
-    return f"{side}grasp_cube{cube_id}"
+    """Name of the per-arm grasp weld for a given cube. Uses `_` as the
+    side separator (`left_grasp_cube0`) because dm_control.mjcf reserves
+    `/` for namespace scoping. Matches the convention `arm_handles`
+    uses to look up `weld_ids` after compilation."""
+    return f"{side.replace('/', '_')}grasp_cube{cube_id}"
 
 
 # -----------------------------------------------------------------------------
@@ -338,29 +368,109 @@ def grasp_weld(side: ArmSide, cube_id: CubeID) -> str:
 # -----------------------------------------------------------------------------
 
 
-def _static_box(parent, name: str, pos, half, rgba):
-    body = parent.add_body(name=name, pos=list(pos))
-    body.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=list(half), rgba=list(rgba))
-    return body
+def _add_cart(root: mjcf.RootElement, visual_class: str) -> mjcf.Element:
+    """Service cart: 4 corner posts, 2 shelves, 4 casters, push handle.
 
-
-def _add_bin(parent, name_prefix: str, local_pos) -> None:
-    """Open shelf — a single floor plate.
-
-    The bin used to be a U of walls (back + 2 sides + floor) but the back
-    was visually wider than the torso shell (protruded out the robot's
-    sides) and the side walls sat in the path of the piper shoulder/elbow
-    on cable-reach poses — compile-time contacts made the arm physically
-    unable to track its IK-planned q, so TCP settled ~28 cm above the
-    planned height. Server stow is a weld, not contact-based, so none of
-    those walls buy physical correctness; only the floor remains for the
-    visual of a shelf holding a server.
+    Returns the cart_frame body so weld equalities can reference it
+    later. All sub-geoms use the `visual` default class (no contacts,
+    no mass) — the cart is a visual stand; servers are held in place by
+    welds, not by sitting on the shelves.
     """
-    x, y, z = local_pos
-    bx, by, bz = LAYOUT.bins.half
-    wall_t = LAYOUT.bins.wall_thickness
-    rgba = (0.72, 0.72, 0.75, 1.0)
-    _static_box(parent, f"{name_prefix}_floor", (x, y, z - bz - wall_t), (bx, by, wall_t), rgba)
+    cart_cfg = LAYOUT.cart
+    cart_rgba = [0.55, 0.58, 0.60, 1.0]
+    metal_rgba = [0.40, 0.42, 0.44, 1.0]
+    wheel_rgba = [0.10, 0.10, 0.12, 1.0]
+
+    cart = root.worldbody.add(
+        "body",
+        name="cart_frame",
+        pos=[cart_cfg.center_x, cart_cfg.center_y, 0.0],
+    )
+
+    # Corner posts.
+    post_top_z = cart_cfg.top_shelf_z + 0.01
+    post_half_z = post_top_z * 0.5
+    for sx in (-1.0, 1.0):
+        for sy in (-1.0, 1.0):
+            cart.add(
+                "geom",
+                dclass=visual_class,
+                type="box",
+                pos=[
+                    sx * (cart_cfg.half_x - cart_cfg.post_half),
+                    sy * (cart_cfg.half_y - cart_cfg.post_half),
+                    post_half_z,
+                ],
+                size=[cart_cfg.post_half, cart_cfg.post_half, post_half_z],
+                rgba=metal_rgba,
+            )
+
+    # Top + bottom shelf plates.
+    cart.add(
+        "geom",
+        dclass=visual_class,
+        name="cart_top_shelf",
+        type="box",
+        pos=[0.0, 0.0, cart_cfg.top_shelf_z],
+        size=[cart_cfg.half_x, cart_cfg.half_y, cart_cfg.shelf_thickness],
+        rgba=cart_rgba,
+    )
+    cart.add(
+        "geom",
+        dclass=visual_class,
+        name="cart_bottom_shelf",
+        type="box",
+        pos=[0.0, 0.0, cart_cfg.bottom_shelf_z],
+        size=[cart_cfg.half_x, cart_cfg.half_y, cart_cfg.shelf_thickness],
+        rgba=cart_rgba,
+    )
+
+    # Casters at each corner.
+    for sx in (-1.0, 1.0):
+        for sy in (-1.0, 1.0):
+            cart.add(
+                "geom",
+                dclass=visual_class,
+                type="sphere",
+                pos=[
+                    sx * (cart_cfg.half_x - cart_cfg.post_half),
+                    sy * (cart_cfg.half_y - cart_cfg.post_half),
+                    cart_cfg.caster_radius,
+                ],
+                size=[cart_cfg.caster_radius],
+                rgba=wheel_rgba,
+            )
+
+    # Push handle on the rear edge (the side facing away from the rack —
+    # cart_y is negative, so the rack is at +y from cart's POV; the handle
+    # sits at -y so an operator pushing the cart faces the rack).
+    handle_y = -cart_cfg.half_y - cart_cfg.post_half
+    handle_z_top = cart_cfg.handle_height
+    handle_z_mid = (cart_cfg.top_shelf_z + handle_z_top) * 0.5
+    handle_post_half_z = (handle_z_top - cart_cfg.top_shelf_z) * 0.5
+    for sx in (-1.0, 1.0):
+        cart.add(
+            "geom",
+            dclass=visual_class,
+            type="box",
+            pos=[
+                sx * (cart_cfg.half_x - cart_cfg.post_half),
+                handle_y,
+                handle_z_mid,
+            ],
+            size=[cart_cfg.post_half, cart_cfg.post_half, handle_post_half_z],
+            rgba=metal_rgba,
+        )
+    cart.add(
+        "geom",
+        dclass=visual_class,
+        type="box",
+        pos=[0.0, handle_y, handle_z_top],
+        size=[cart_cfg.half_x, cart_cfg.post_half, cart_cfg.post_half],
+        rgba=metal_rgba,
+    )
+
+    return cart
 
 
 def _quat_align_x_to(direction: np.ndarray) -> np.ndarray:
@@ -382,26 +492,26 @@ def _quat_align_x_to(direction: np.ndarray) -> np.ndarray:
     return np.array([float(np.cos(half)), axis[0] * sin_h, axis[1] * sin_h, axis[2] * sin_h])
 
 
-def _add_cable(spec: mujoco.MjSpec, rack_body, cable_idx: int, port_y: float, rgba) -> None:
-    """Build a cable via MuJoCo's native composite + elasticity plugin.
+def _build_cable_root(
+    cable_idx: int, port_y: float, rgba
+) -> tuple[mjcf.RootElement, np.ndarray, np.ndarray]:
+    """Build a `cable{N}` `mjcf.RootElement` — anchor + single rigid rod
+    on a ball joint + connector tip. Returns (root, local_anchor_in_rack,
+    attach_quat) so the caller can attach via a site on the rack with
+    the right pose.
 
-    Previously hand-rolled as a 7-segment ball-jointed capsule chain. The
-    native `composite type="cable"` with the `mujoco.elasticity.cable`
-    plugin implements Discrete Elastic Rods — proper bend/twist stiffness
-    in SI units (Pa) and a maintained first-party plugin rather than hand-
-    tuned ball damping. `composite type="rope"` was removed in MuJoCo 3.x;
-    the cable plugin is the canonical replacement.
+    Topology:
+        anchor (rigid box, attached at rack site)
+          └─ rod (ball joint, capsule along +x, length = anchor↔port)
+                └─ connector (rigid sphere, no joint, at rod's +x tip)
 
-    The composite tip body inside the sub-spec is renamed to `connector`
-    before attach so, with prefix `cable{i+1}_`, it resolves as
-    `cable{i+1}_connector` in the compiled model — matching the name the
-    grasp welds and `ATTACHMENTS` registry reference. The per-port distinct
-    connector geom (box / flat rectangle / cylinder) is added to that same
-    body so it moves with the last segment.
-
-    The attach frame's `quat` rotates the composite's default +x layout to
-    point from the shared side-mounted bracket toward the port. Per-cable
-    stagger along rack +x comes from `LAYOUT.cable_anchor_world`.
+    Length matches the direct anchor↔port distance so the rest pose lays
+    the rod straight from the patch-panel anchor to the server port —
+    visually clean, no curling, no chain segments poking past the server.
+    A multi-segment chain we tried earlier let the connector follow long
+    arm pulls but produced a tangled rest shape because of the slack.
+    The replug task plan now uses a small (~5 cm) pull distance compatible
+    with the rigid rod's reach.
     """
     cables_cfg = LAYOUT.cables
     rack = LAYOUT.rack
@@ -409,316 +519,349 @@ def _add_cable(spec: mujoco.MjSpec, rack_body, cable_idx: int, port_y: float, rg
     rack_origin = np.array([rack.center_x, 0.0, rack.center_z])
     local_anchor = world_anchor - rack_origin
 
-    # Connector tip needs to land at the port geom's world position so the
-    # port connect equality anchors the connector seated inside the socket.
     world_port = LAYOUT.port_world_pos(list(LAYOUT.ports.y_offsets).index(port_y))
     direction = world_port - world_anchor
     direction_len = float(np.linalg.norm(direction))
-    # MuJoCo's composite cable with count=N creates N-1 actual bodies spanning
-    # `size * (N-2)/(N-1)` along its +x axis (the first slot is consumed by
-    # the parent anchor body, and the last body lands one segment short of
-    # `size`). Empirically, count=11 → 10 bodies → last body at 0.9 × size.
-    # To make the tip (B_last) land AT the port, inflate `cable_len` by 10/9.
-    # Without this, the tip sits 4–5 cm short of the port at init and the
-    # connect equality has to yank the cable on every reset, which makes
-    # "plugged in" look like a cable straining toward the socket.
-    count = cables_cfg.n_seg + 1
-    composite_span_fraction = (count - 2) / (count - 1)  # 9/10 for count=11
-    nominal_cable_len = direction_len / composite_span_fraction
-    cable_len = min(nominal_cable_len, LAYOUT.cable_max_len)
+    cable_len = min(direction_len, LAYOUT.cable_max_len)
     attach_quat = _quat_align_x_to(direction)
-    r, g, b, a = rgba
-    cable_xml = f"""<mujoco>
-      <extension>
-        <plugin plugin="mujoco.elasticity.cable"/>
-      </extension>
-      <worldbody>
-        <body name="anchor">
-          <geom type="box" size="0.015 0.010 0.010" rgba="0.3 0.3 0.3 1"/>
-          <composite type="cable" curve="s" count="{count} 1 1"
-                     size="{cable_len:.6f}" offset="0 0 0" initial="none">
-            <plugin plugin="mujoco.elasticity.cable">
-              <!-- 1e6 Pa bend / 2e6 twist: softer than the 2e7/5e7 first
-                   used (Cat-6-stiff), which resisted the arm-yank at
-                   grip-replug hard enough that the ball-joint chain
-                   couldn't absorb the ~40 cm offset between the cable's
-                   settled rest pose and the arm's dangle target — QACC
-                   blew up at t=43.7 s. 1e6 still keeps the cable mostly
-                   straight under its own weight but lets the chain
-                   stretch without numerical instability. -->
-              <config key="twist" value="2e6"/>
-              <config key="bend" value="1e6"/>
-              <config key="vmax" value="0.05"/>
-            </plugin>
-            <joint kind="main" damping="2.0"/>
-            <geom type="capsule" size="{cables_cfg.seg_radius}"
-                  rgba="{r} {g} {b} {a}" mass="0.02"/>
-          </composite>
-        </body>
-      </worldbody>
-    </mujoco>"""
+    seg_radius = cables_cfg.seg_radius
 
-    cable_spec = mujoco.MjSpec.from_string(cable_xml)
-    # Rename the composite tip so it resolves as cable{i+1}_connector after
-    # the attach prefix; ATTACHMENTS + grasp welds reference that exact name.
-    tip = cable_spec.body("B_last")
-    tip.name = "connector"
-
-    # Spherical connector head centred on the tip body's origin. A sphere is
-    # orientation-invariant, so it sits cleanly inside the port socket geom
-    # regardless of which direction the cable routes in from — no matter
-    # whether the tip body's +x ends up pointing along world -y (bracket on
-    # the side), +x (frontal), or anywhere else, the rendered plug stays
-    # seated. Previously each cable had a directional box/rectangle/cylinder
-    # offset along tip +x by CONN_LEN/2, which made the plug appear crooked
-    # next to its port when the cable direction didn't align with the
-    # server's +x axis. Port visual distinction is still carried by the
-    # socket geoms on the server (box / flat box / cylinder) + matching
-    # colour on the sphere.
-    tip.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_SPHERE,
+    cable = mjcf.RootElement(model=f"cable{cable_idx + 1}")
+    anchor = cable.worldbody.add("body", name="anchor")
+    anchor.add(
+        "geom",
+        type="box",
+        size=[0.015, 0.010, 0.010],
+        rgba=[0.3, 0.3, 0.3, 1.0],
+        contype=0,
+        conaffinity=0,
+    )
+    rod = anchor.add("body", name="rod", pos=[0.0, 0.0, 0.0])
+    rod.add("joint", name="rod_ball", type="ball", damping=20.0)
+    rod.add(
+        "geom",
+        type="capsule",
+        fromto=[0.0, 0.0, 0.0, cable_len, 0.0, 0.0],
+        size=[seg_radius],
+        rgba=list(rgba),
+        mass=0.05,
+        contype=0,
+        conaffinity=0,
+    )
+    connector = rod.add("body", name="connector", pos=[cable_len, 0.0, 0.0])
+    # Connector head ~24 mm sphere — reads as the plug ferrule on a
+    # 14 mm cable, big enough to spot from the 3/4 hero camera.
+    connector.add(
+        "geom",
+        type="sphere",
         pos=[0.0, 0.0, 0.0],
-        size=[0.014],
+        size=[0.012],
         rgba=list(rgba),
         mass=0.02,
     )
-
-    attach_frame = rack_body.add_frame(pos=list(local_anchor), quat=list(attach_quat))
-    spec.attach(cable_spec, prefix=f"cable{cable_idx + 1}_", frame=attach_frame)
+    return cable, local_anchor, attach_quat
 
 
-def build_spec() -> mujoco.MjSpec:
+def _add_server_body(
+    parent: mjcf.Element,
+    *,
+    name: str,
+    pos,
+    rgba_chassis,
+    server_cfg,
+    port_local_x: float,
+    port_y_offsets,
+    port_colors,
+) -> None:
+    """Build a server `<body>` (chassis + 3 ports) at `parent`. Both
+    `server` and `new_server` share this layout."""
+    server = parent.add("body", name=name, pos=list(pos))
+    server.add("freejoint")
+    server.add(
+        "geom",
+        type="box",
+        size=list(server_cfg.half),
+        rgba=rgba_chassis,
+        mass=server_cfg.mass,
+        contype=0,
+        conaffinity=0,
+    )
+    # No "handle rail" geoms on the server front face — earlier we placed
+    # two small white rectangles at ±15 cm to mark grasp targets, but they
+    # read as decoration nobody could explain. The arms grip the chassis
+    # sides directly via weld activation at the same world coords; the
+    # boxes were visual noise.
+    shapes = ("box", "box", "cylinder")
+    for i, (y, rgba, shape) in enumerate(zip(port_y_offsets, port_colors, shapes, strict=True)):
+        if shape == "box":
+            size = [0.010, 0.018, 0.018] if i == 0 else [0.010, 0.012, 0.007]
+            server.add(
+                "geom",
+                type="box",
+                pos=[port_local_x, y, 0.0],
+                size=size,
+                rgba=list(rgba),
+            )
+        else:  # cylinder — fiber (fromto only; MuJoCo forbids pos+fromto)
+            server.add(
+                "geom",
+                type="cylinder",
+                fromto=[port_local_x - 0.010, y, 0.0, port_local_x + 0.005, y, 0.0],
+                size=[0.010],
+                rgba=list(rgba),
+            )
+
+
+def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
+    """Build the data-center scene as a `dm_control.mjcf.RootElement`,
+    compile it via `mujoco.MjModel.from_xml_string`, and return the
+    `(model, data)` pair.
+
+    Returns plain MuJoCo handles (not a `mjcf.Physics`) so downstream
+    runtime code (runner.advance_arm, tools/_runtime.advance_timeline)
+    operates against the standard mujoco.MjModel/MjData API. dm_control
+    is used only as the assembly layer.
+    """
     # Start from PAL TIAGo (wheels + torso_lift_link). `robots.tiago.load_tiago`
     # strips the upstream single arm + head, removes the `reference` freejoint
-    # (required for mink IK — see that module's docstring), and prunes
-    # now-orphan contact excludes. All customizations are declared in its
-    # `TiagoConfig`; defaults are what the data-center scene needs.
-    spec = load_tiago()
-    spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
-    spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
-    spec.option.impratio = 10.0
-    spec.option.timestep = 0.002
+    # (required for mink IK — see that module's docstring), prunes orphan
+    # contact excludes, and clears the model name so TIAGo's body names
+    # compile unprefixed.
+    root = load_tiago()
+
+    # Physics options. mjcf maps these to the `<option>` element's attributes.
+    root.option.integrator = "implicitfast"
+    root.option.cone = "elliptic"
+    root.option.impratio = 10.0
+    root.option.timestep = 0.002
+    # Disable global contacts via the `<flag>` child of `<option>`. Every body
+    # in this scene is held by welds or direct qpos writes; contact detection
+    # just adds work and previously triggered a QACC warning at t=41.53 s on
+    # left/joint5.
+    root.option.flag.contact = "disable"
     # Puppet mode: gravity = 0. The arms are qpos-driven (no PD tracking,
     # no need for gravity to load the actuators), and the freejoint
     # bodies (servers, cable connectors) are always pinned by some weld
-    # — gravity would just be solver noise. Removing it eliminates the
-    # entire class of "server drifted while a weld was being captured"
-    # bugs and lets the cable composite settle to its rest pose without
-    # arm-yank instability.
-    spec.option.gravity = [0.0, 0.0, 0.0]
+    # — gravity would just be solver noise.
+    root.option.gravity = [0.0, 0.0, 0.0]
+
+    # Off-screen framebuffer big enough for HD hero renders (proposal
+    # decks, marketing). Default MuJoCo offwidth/offheight is 640×480
+    # which produces a noticeably grainy still. mjcf names this child
+    # `global` (a Python keyword) — access via getattr.
+    visual_global = getattr(root.visual, "global")
+    visual_global.offwidth = 1920
+    visual_global.offheight = 1080
 
     # Default class for visual-only geoms: no contact, zero mass. Geoms that
-    # pass `default=visual` inherit these flags, so we don't repeat the
-    # contype=0 / conaffinity=0 / mass=0.0 trio at every call site (shoulder
-    # plate, camera pole, D405 wrist meshes, rack panels). Using MJCF's
-    # native `<default>` mechanism via MjSpec instead of a Python-level kwargs
-    # shim keeps the defaults visible in `spec.to_xml()` output for anyone
-    # inspecting the compiled model. `add_geom(default=...)` is the MjSpec
-    # Python binding for `<geom class="visual"/>`.
-    visual = spec.add_default("visual", spec.default)
+    # set `dclass="visual"` inherit these flags, so we don't repeat the
+    # contype=0 / conaffinity=0 / mass=0.0 trio at every call site (camera
+    # pole, rack panels, cart shelves, D405 wrist meshes).
+    visual = root.default.add("default", dclass="visual")
     visual.geom.contype = 0
     visual.geom.conaffinity = 0
     visual.geom.mass = 0.0
 
-    wb = spec.worldbody
+    # D405 mesh asset, shared by both wrist cameras. Added at scene root so
+    # both attached pipers can reference it. mjcf resolves cross-namescope
+    # references by Element identity, not string lookup — passing the
+    # `d405_mesh` Element to a geom inside a sub-namescope (e.g. `left/`)
+    # produces the correct compiled `mesh="d405"` reference. Passing the
+    # bare string would prefix it as `left/d405` and fail to find the
+    # asset at compile time.
+    d405_mesh = root.asset.add("mesh", name="d405", file=str(D405_MESH_STL))
+
+    wb = root.worldbody
+
+    # Lighting — TIAGo's upstream MJCF ships no lights, and the default
+    # MuJoCo scene comes with a single dim headlight that leaves stills
+    # looking grainy/black. Three-point setup: a key spot above the
+    # robot, a fill light from the rack side, and a back/rim light from
+    # behind to separate the robot from the dark background.
+    wb.add(
+        "light",
+        name="key",
+        pos=[0.4, -0.5, 2.5],
+        dir=[0.0, 0.5, -1.0],
+        diffuse=[0.7, 0.7, 0.7],
+        specular=[0.3, 0.3, 0.3],
+        castshadow="false",
+    )
+    wb.add(
+        "light",
+        name="fill",
+        pos=[0.4, 1.5, 1.8],
+        dir=[0.0, -1.0, -0.4],
+        diffuse=[0.5, 0.5, 0.55],
+        specular=[0.1, 0.1, 0.1],
+        castshadow="false",
+    )
+    wb.add(
+        "light",
+        name="rim",
+        pos=[-1.0, 0.0, 2.0],
+        dir=[1.0, 0.0, -0.5],
+        diffuse=[0.4, 0.42, 0.5],
+        specular=[0.1, 0.1, 0.1],
+        castshadow="false",
+    )
 
     # Floor (TIAGo's upstream MJCF has no floor — the per-variant scene.xml adds it)
-    wb.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_PLANE,
+    wb.add(
+        "geom",
+        type="plane",
         size=[5.0, 5.0, 0.1],
         rgba=[0.78, 0.78, 0.80, 1.0],
     )
 
-    # Reference to the moving lift body — everything arm-mount-and-bin-related
-    # hangs off this so it rides the torso slide joint.
-    torso = spec.body("torso_lift_link")
+    # Reference to the moving lift body — Piper arms attach via sites on it.
+    torso = root.find("body", "torso_lift_link")
+    base = root.find("body", "base_link")
 
-    # ---------------------- Onboard bin (carries new_server) ----------------
-    # One compartment on the torso, holding the new_server at init. Old
-    # server gets staged on the rack's lower shelf — not another torso bin
-    # — so the robot stays visually simpler and the demo's "robot brings
-    # the new server, leaves the old on the rack" story is readable at a
-    # glance.
-    _add_bin(torso, "new_bin", (LAYOUT.bins.local_x, 0.0, LAYOUT.bins.new_local_z))
+    # ---------------------- Service cart (new + old server stowage) -----------
+    _add_cart(root, "visual")
+
+    # ---------------------- Shoulder bar bridging torso to arm bases ----------
+    # The Piper bases mount at ±arm_mount.y_abs (= 30 cm) outboard of the
+    # torso centreline, but TIAGo's torso shell is much narrower than that
+    # — without a connecting geom the arms read as "floating in mid-air
+    # next to the robot". Add a shoulder bar on the torso at arm_mount.z
+    # (the arms' attach height) spanning the full ±arm_mount.y_abs so
+    # there's a visible structure reaching out from the body to each arm
+    # mount point.
+    arm_mount_cfg = LAYOUT.arm_mount
+    SHOULDER_HALF_Z = 0.07  # 14 cm tall bar
+    SHOULDER_OVERHANG = 0.08  # bar extends past each arm base by this much
+    torso.add(
+        "geom",
+        dclass="visual",
+        name="shoulder_bar",
+        type="box",
+        # Positioned so the bar's TOP face sits at arm_mount.z (where the
+        # arm bases attach) — arms read as "mounted on top of the bar"
+        # rather than embedded in it. Centre is one half-height below.
+        pos=[arm_mount_cfg.x, 0.0, arm_mount_cfg.z - SHOULDER_HALF_Z],
+        # Half-extents in y bumped past arm_mount.y_abs by SHOULDER_OVERHANG
+        # so the bar reads as a substantial cross-piece extending outboard
+        # of the arm mount points, not just spanning between them.
+        size=[
+            0.07,
+            arm_mount_cfg.y_abs + SHOULDER_OVERHANG,
+            SHOULDER_HALF_Z,
+        ],  # 14 cm × 76 cm × 14 cm
+        # Anodised-aluminium grey, distinct from TIAGo's white shell so
+        # the shoulder bar reads as its own structural element bridging
+        # torso ↔ arm bases.
+        rgba=[0.35, 0.36, 0.38, 1.0],
+    )
 
     # ---------------------- Piper arms on the torso --------------------------
-    # Arms sit:
-    #   - well forward of the torso column so the compact home pose keeps TCP
-    #     clear of the rack front face at startup and the arm base is close
-    #     enough to the rack that cable/server targets stay inside Piper's
-    #     ~0.55 m reach envelope
-    #   - outboard of the bins (|y| > bin half-width) so the piper base link
-    #     doesn't intersect the bin side walls
-    #   - below torso origin so TCP ends up at rack-slot height and the arms
-    #     visibly occupy the space BETWEEN the chest and waist bins
-    # All three offsets live in `LAYOUT.arm_mount`.
+    # Pre-build each piper, add its TCP site + wrist camera + wrist mesh
+    # INSIDE the piper subtree so they pick up the namespace prefix
+    # (`left/tcp`, `left/wrist_d405_cam`), THEN attach via a site on the
+    # torso. `arm_mount.x = 0` keeps the shoulder pivot at the torso
+    # centreline; arm_mount.z = -0.15 is the natural shoulder height;
+    # ±arm_mount.y_abs places each arm on its respective side.
     arm_mount = LAYOUT.arm_mount
-    lf = torso.add_frame(
-        pos=[arm_mount.x, -arm_mount.y_abs, arm_mount.z], quat=[1.0, 0.0, 0.0, 0.0]
-    )
-    attach_piper(spec, prefix=ArmSide.LEFT, frame=lf)
-    rf = torso.add_frame(pos=[arm_mount.x, arm_mount.y_abs, arm_mount.z], quat=[1.0, 0.0, 0.0, 0.0])
-    attach_piper(spec, prefix=ArmSide.RIGHT, frame=rf)
-
-    # Torso cladding — one chunky visual box enclosing the piper base links
-    # and the back of the two bins. Depth is fixed ±0.10 m around the torso
-    # column (20 cm front-to-back) so it reads as a proportionate humanoid
-    # torso rather than ballooning whenever arm_mount.x moves; width is
-    # 6 cm inboard of arm_mount.y_abs so the piper base is still visible
-    # on the outside of the cladding (arms stick out of the side).
-    # Vertical extent spans the bin bottoms and tops so the bins look
-    # integrated with the body rather than floating above/below it.
-    _clad_x_min, _clad_x_max = -0.10, 0.10
-    # Cladding top tracks the (only) bin's top; bottom is a fixed torso-
-    # local offset below the arm mount so the cladding reads as "torso
-    # reaches all the way down to the wheel platform" rather than dangling
-    # above empty space once we dropped the old_bin.
-    _clad_z_min = arm_mount.z - 0.20
-    _clad_z_max = LAYOUT.bins.new_local_z + LAYOUT.bins.half[2]
-    torso.add_geom(
-        default=visual,
-        name="torso_cladding",
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        pos=[
-            (_clad_x_min + _clad_x_max) * 0.5,
-            0.0,
-            (_clad_z_min + _clad_z_max) * 0.5,
-        ],
-        size=[
-            (_clad_x_max - _clad_x_min) * 0.5,
-            arm_mount.y_abs - 0.06,
-            (_clad_z_max - _clad_z_min) * 0.5,
-        ],
-        rgba=[0.78, 0.78, 0.82, 1.0],
-    )
-
-    # TCP sites on each arm's link6 (required by ik.solve_ik / welds).
-    for side in ARM_PREFIXES:
-        link6 = spec.body(f"{side}link6")
-        link6.add_site(name=f"{side}tcp", pos=[0.0, 0.0, 0.14], size=[0.006, 0.006, 0.006])
+    WRIST_MESH_OFFSET = [0.0, 0.0, 0.03]
+    for side, y_sign in ((ArmSide.LEFT, -1.0), (ArmSide.RIGHT, 1.0)):
+        piper = load_piper(side)
+        link6 = piper.find("body", "link6")
+        if link6 is None:
+            raise RuntimeError(f"piper {side!r} missing 'link6' after load")
+        # TCP site — IK / weld code addresses this by `f"{side}tcp"` (e.g.
+        # `"left/tcp"`); inside the piper namescope the local name is `tcp`.
+        link6.add(
+            "site",
+            name="tcp",
+            pos=[0.0, 0.0, 0.14],
+            size=[0.006, 0.006, 0.006],
+        )
+        # Wrist camera mesh — orientation chosen so the mount face sits
+        # against link6 and the lens points sideways (matches how a real
+        # D405 mounts on an Aloha-style Piper wrist).
+        link6.add(
+            "geom",
+            dclass="visual",
+            type="mesh",
+            mesh=d405_mesh,
+            pos=WRIST_MESH_OFFSET,
+            rgba=[0.12, 0.12, 0.14, 1.0],
+        )
+        # FIXED-mode camera with a 180°-x quat so the optical axis (cam -z)
+        # aligns with link6 +z (the gripper / TCP axis) — the wrist view
+        # always looks at whatever the arm is reaching for, symmetrically
+        # for both sides.
+        link6.add(
+            "camera",
+            name="wrist_d405_cam",
+            pos=[0.0, 0.0, 0.08],
+            quat=[0.0, 1.0, 0.0, 0.0],
+            mode="fixed",
+            fovy=87.0,
+        )
+        mount_site = torso.add(
+            "site",
+            name=f"{side.rstrip('/')}_arm_mount",
+            pos=[arm_mount.x, y_sign * arm_mount.y_abs, arm_mount.z],
+            quat=[1.0, 0.0, 0.0, 0.0],
+            size=[0.001, 0.001, 0.001],
+        )
+        mount_site.attach(piper)
 
     # ---------------------- Top camera pole (static, above the arms) --------
-    # TIAGo's head is stripped in `load_tiago_without_arm` (user asked to
-    # remove it — we don't actuate it, and the head geoms were competing with
-    # the rack for vertical space). We replace it with a tall static pole
-    # rigidly welded to `base_link` (not the moving `torso_lift_link`), so
-    # the top camera view stays stable regardless of the torso lift qpos.
-    # The D435i mounts at the top and points at `rack_frame` via TARGETBODY,
-    # so the optical axis always aims at the rack irrespective of how the
-    # base is parked.
-    #
-    # `TOP_POLE_X = -0.20` places the pole behind the onboard bins (which
-    # span world x ∈ [-0.012, 0.388] via their torso-local +x mount). Running
-    # the pole forward of that would visibly clip through the new/old_bin
-    # compartments and through whichever server they hold (user report: "the
-    # tall stand... should be moved further back into the robotic body so
-    # that it doesn't clip into the server compartments").
+    # TIAGo's head is stripped in `load_tiago` (we don't actuate it). We
+    # replace it with a tall static pole rigidly welded to `base_link` (not
+    # the moving `torso_lift_link`) so the top camera view stays stable
+    # regardless of the torso lift qpos.
     TOP_POLE_X = -0.20
-    base = spec.body("base_link")
-    # Pole top at z = 1.48 (half = 0.74, pos = 0.74, so span 0 → 1.48).
-    # Camera body attaches at z = 1.485 with the 90°-x rotation below
-    # making the mesh ~2.6 cm tall vertically — so mesh-bottom (~1.472)
-    # sits ~0.8 cm *inside* the pole top, reading as "camera mounted on
-    # the pole" rather than floating above a gap. The overlap is
-    # allowlisted (see ALLOWED_STATIC_OVERLAPS).
-    base.add_geom(
-        default=visual,
+    base.add(
+        "geom",
+        dclass="visual",
         name="top_camera_pole",
-        type=mujoco.mjtGeom.mjGEOM_BOX,
+        type="box",
         pos=[TOP_POLE_X, 0.0, 0.74],
         size=[0.025, 0.025, 0.74],
         rgba=[0.32, 0.32, 0.35, 1.0],
     )
-    # D435i's native mesh frame has local +z as the long (~9.2 cm) camera-
-    # body axis and local +x as the lens direction. At identity orientation
-    # the camera stood on end like a pencil — visually wrong. 90° about +x
-    # (quat = [cos 45°, sin 45°, 0, 0]) rotates local +z → world -y, so the
-    # long axis is horizontal; +x (lens) stays pointing world +x (at the
-    # rack, which is at world +x from the pole). After rotation the mesh
-    # is ~2.6 cm tall vertically, so attach z = 1.485 puts the mesh bottom
-    # flush with the pole top instead of floating 3 cm above it.
-    top_cam_frame = base.add_frame(
+    # D435i's native mesh frame has local +z as the long camera-body axis
+    # and local +x as the lens direction. The 90°-x quat below rotates
+    # local +z → world -y so the body lies horizontal; lens still points
+    # +x (toward the rack). Mesh is ~2.6 cm tall after rotation; attach
+    # z = 1.485 puts the bottom flush with the pole top (allowlisted in
+    # ALLOWED_STATIC_OVERLAPS).
+    top_d435i = mjcf.from_path(str(D435I_XML))
+    top_d435i.model = "top"
+    top_d435i_body = top_d435i.find("body", "d435i")
+    top_cam_mount = base.add(
+        "site",
+        name="top_cam_mount",
         pos=[TOP_POLE_X, 0.0, 1.485],
         quat=[0.7071067811865476, 0.7071067811865476, 0.0, 0.0],
+        size=[0.001, 0.001, 0.001],
     )
-    spec.attach(
-        mujoco.MjSpec.from_file(str(D435I_XML)),
-        prefix="top_",
-        frame=top_cam_frame,
-    )
-    spec.body("top_d435i").add_camera(
-        name="top_d435i_cam",
-        pos=[0.0, 0.0, 0.0],
-        mode=mujoco.mjtCamLight.mjCAMLIGHT_TARGETBODY,
-        targetbody="rack_frame",
-        fovy=69.0,  # D435i colour-sensor horizontal FOV ≈ 69°
-    )
-
-    # ---------------------- Wrist cameras: Realsense D405 --------------------
-    # Load the D405 mesh once as a shared asset; reference it on each link6.
-    # Camera uses FIXED mode with a 180°-about-x quat so its optical axis
-    # (MuJoCo cam -z) aligns with link6's +z (the tool axis — TCP sits along
-    # link6 +z at [0, 0, 0.14]). Switched away from TARGETBODY targetting
-    # `link8`: link8 is one finger (asymmetric w.r.t. link6 +z), so both
-    # wrist cams pointed the same way in world regardless of side — not
-    # useful for a bimanual scene. FIXED along +z is symmetric and always
-    # aimed at the grasp point.
-    spec.add_mesh(name="d405", file=str(D405_MESH_STL))
-    # Wrist D405: mesh was 8 cm along link6 +z with a 180°-about-x quat on
-    # the geom. That put the mesh forward of the gripper fingertips and
-    # flipped its orientation (user report: "wrist cameras floating out
-    # of the grippers"). The D405 STL's frame has +z as the back mount
-    # face and +y as the lens axis, so placing the mesh at the link6
-    # body's outer surface (z ≈ 0.03) with identity orientation keeps
-    # the mount side against link6 and the lens pointing sideways, which
-    # is how the real wrist cam sits on an Aloha-style Piper.
-    #
-    # The CAMERA sensor stays at the TCP site's axis with a 180°-x quat
-    # — MuJoCo cam -z maps to link6 +z so the sensor looks *out* along
-    # the gripper axis toward whatever the arm is reaching for, which is
-    # what the scene's task plan expects. Mesh visualisation and camera
-    # sensor direction are independent here.
-    WRIST_MESH_OFFSET = [0.0, 0.0, 0.03]
-    for side, cam_name in (
-        (ArmSide.LEFT, "left_wrist_d405"),
-        (ArmSide.RIGHT, "right_wrist_d405"),
-    ):
-        link6 = spec.body(f"{side}link6")
-        link6.add_geom(
-            default=visual,
-            type=mujoco.mjtGeom.mjGEOM_MESH,
-            meshname="d405",
-            pos=WRIST_MESH_OFFSET,
-            rgba=[0.12, 0.12, 0.14, 1.0],
-        )
-        link6.add_camera(
-            name=f"{cam_name}_cam",
-            pos=[0.0, 0.0, 0.08],  # optical centre halfway to TCP along gripper axis
-            quat=[0.0, 1.0, 0.0, 0.0],  # 180°x: cam -z aligned with link6 +z
-            mode=mujoco.mjtCamLight.mjCAMLIGHT_FIXED,
-            fovy=87.0,  # D405 FOV
-        )
+    top_cam_mount.attach(top_d435i)
+    # The TARGETBODY camera is added AFTER `rack_frame` is built (below);
+    # mjcf resolves cross-namescope refs by Element identity, and the
+    # rack_frame Element doesn't exist yet at this point.
 
     # ---------------------- Rack (static, open front) ------------------------
-    # A 19" cabinet built as 5 panels (rear + 2 sides + top + bottom) with the
-    # FRONT FULLY OPEN so arms can reach in. Previously a solid box — looked
-    # like a closed-door cabinet. We also add a cosmetic shelf at server
-    # height and a hinged-open door tucked to the side for flavor.
     rack_cfg = LAYOUT.rack
-    rack = wb.add_body(name="rack_frame", pos=[rack_cfg.center_x, 0.0, rack_cfg.center_z])
+    rack = wb.add("body", name="rack_frame", pos=[rack_cfg.center_x, 0.0, rack_cfg.center_z])
     rack_wall_t = rack_cfg.wall_thickness
     panel_rgba = (0.10, 0.10, 0.13, 1.0)
     rhx, rhy, rhz = rack_cfg.half
 
     def _rack_panel(name: str, pos, half) -> None:
-        b = rack.add_body(name=name, pos=list(pos))
+        b = rack.add("body", name=name, pos=list(pos))
         # Visual-only (class "visual"): the server is weld-attached so it
         # doesn't need a shelf to rest on, and arms reach through the open
         # front. Letting panels collide just creates solver noise around the
         # server body.
-        b.add_geom(
-            default=visual,
-            type=mujoco.mjtGeom.mjGEOM_BOX,
+        b.add(
+            "geom",
+            dclass="visual",
+            type="box",
             size=list(half),
             rgba=list(panel_rgba),
         )
@@ -728,213 +871,193 @@ def build_spec() -> mujoco.MjSpec:
     _rack_panel("rack_side_R", (0.0, rhy - rack_wall_t, 0.0), (rhx, rack_wall_t, rhz))
     _rack_panel("rack_top", (0.0, 0.0, rhz - rack_wall_t), (rhx, rhy, rack_wall_t))
     _rack_panel("rack_bottom", (0.0, 0.0, -rhz + rack_wall_t), (rhx, rhy, rack_wall_t))
-    # Cosmetic shelf just below the server slot.
     server_cfg = LAYOUT.server
-    server_local_z = server_cfg.slot_z - rack_cfg.center_z
+    # Shelf — a horizontal plate spanning the rack interior just below the
+    # server slot, so the server visibly rests on something instead of
+    # appearing to float. Thin (12 mm) but wide; the patch panel sits on
+    # the front edge of this shelf as a 1U cable-management fixture.
+    shelf_top_z_world = LAYOUT.server.slot_z - LAYOUT.server.half[2]  # = 0.835
+    shelf_half_z = 0.006
+    shelf_local_z = (shelf_top_z_world - shelf_half_z) - rack_cfg.center_z
     _rack_panel(
         "rack_shelf",
-        (0.0, 0.0, server_local_z - server_cfg.half[2] - rack_wall_t),
-        (rhx - rack_wall_t, rhy - rack_wall_t, rack_wall_t),
+        (0.0, 0.0, shelf_local_z),
+        (rhx - rack_wall_t, rhy - rack_wall_t, shelf_half_z),
     )
-    # Lower staging shelf — fully inside the rack (same footprint as the
-    # cosmetic rack_shelf above). Earlier iteration extended 20 cm forward
-    # of the rack front to bring the stow target into Piper reach; user
-    # read that as "shelf protruding too much". The arm now stows the
-    # server at the upper-slot x (rack interior) instead — see the stow
-    # target retargeting in make_task_plan.
-    lower_shelf_local_z = rack_cfg.lower_shelf_z_world - rack_cfg.center_z
-    _rack_panel(
-        "rack_lower_shelf",
-        (0.0, 0.0, lower_shelf_local_z - server_cfg.half[2] - rack_wall_t),
-        (rhx - rack_wall_t, rhy - rack_wall_t, rack_wall_t),
+    # Patch panel — a 1U cable-management fixture mounted at the front of
+    # the shelf. Each cable anchors on its front face directly under the
+    # matching port on the server above. Standard data-centre layout
+    # (switch one U below the server it patches into).
+    cables_cfg = LAYOUT.cables
+    patch_panel_world = LAYOUT.patch_panel_world_pos
+    patch_panel_local_x = patch_panel_world[0] - rack_cfg.center_x
+    patch_panel_local_z = patch_panel_world[2] - rack_cfg.center_z
+    patch_panel_body = rack.add(
+        "body",
+        name="patch_panel",
+        pos=[patch_panel_local_x, 0.0, patch_panel_local_z],
     )
-    # Cable management bracket — a horizontal bar bolted to the rack's +y
-    # (right) outside wall. All three cables anchor to this bar (spread
-    # along rack +x via `LAYOUT.cable_anchor_world`).
-    bracket_center = LAYOUT.cable_bracket_center
-    cable_bracket_local_x = bracket_center[0] - rack_cfg.center_x
-    cable_bracket_local_z = bracket_center[2] - rack_cfg.center_z
-    cable_bracket_local_y = rhy + 0.010  # just outside the side panel
-    _rack_panel(
-        "cable_bracket",
-        (cable_bracket_local_x, cable_bracket_local_y, cable_bracket_local_z),
-        (0.06, 0.010, 0.020),  # 12 cm long (x) × 2 cm deep (y) × 4 cm tall (z)
+    patch_panel_body.add(
+        "geom",
+        dclass="visual",
+        type="box",
+        size=[
+            cables_cfg.patch_panel_half_x,
+            cables_cfg.patch_panel_half_y,
+            cables_cfg.patch_panel_half_z,
+        ],
+        rgba=[0.18, 0.20, 0.22, 1.0],
     )
-    # (No door — the rack is open-front. An earlier cosmetic hinged-open door
-    # was clipping into the robot's workspace; not worth the geometry fiddle
-    # for a purely visual element. Many real 19" racks run doorless anyway.)
+    # Indicator LEDs on the patch panel, one per cable port, matching the
+    # cable's colour — reads as "this socket goes to that cable".
+    for y, rgba in zip(LAYOUT.ports.y_offsets, LAYOUT.ports.colors, strict=True):
+        patch_panel_body.add(
+            "geom",
+            dclass="visual",
+            type="box",
+            pos=[cables_cfg.patch_panel_half_x, y, 0.012],
+            size=[0.001, 0.018, 0.005],
+            rgba=list(rgba),
+        )
 
-    # Server: freejoint bodies must be direct children of worldbody.
+    # Now that `rack_frame` is built, add the top-camera with a TARGETBODY
+    # reference to it. Passing the Element (not the string `"rack_frame"`)
+    # lets mjcf resolve the reference across namescopes — the camera lives
+    # inside `top/`, the target lives at scene root.
+    if top_d435i_body is not None:
+        top_d435i_body.add(
+            "camera",
+            name="d435i_cam",
+            pos=[0.0, 0.0, 0.0],
+            mode="targetbody",
+            target=rack,
+            fovy=69.0,  # D435i colour-sensor horizontal FOV ≈ 69°
+        )
+
+    # ---------------------- Servers (rack + cart-top) ----------------------
     port_local_x = LAYOUT.port_local_x_on_server
     port_y_offsets = LAYOUT.ports.y_offsets
     port_colors = LAYOUT.ports.colors
-    # contype=0 conaffinity=0: the server is entirely weld-driven (to the
-    # rack, to the lower staging shelf, or to the arm's grasp weld) — it
-    # never needs contact-based physics. Leaving default contacts on
-    # produced a QACC blowup at ~t=44 s because the inserted server's AABB
-    # grazed the rack's lower shelf + rack_shelf + rack_bottom, and the
-    # constraint solver couldn't simultaneously hold the weld AND resolve
-    # the contacts.
-    server = wb.add_body(name="server", pos=list(LAYOUT.server_world_pos_in_rack))
-    server.add_freejoint()
-    server.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=list(server_cfg.half),
-        rgba=[0.16, 0.17, 0.19, 1.0],
-        mass=server_cfg.mass,
-        contype=0,
-        conaffinity=0,
+    _add_server_body(
+        wb,
+        name="server",
+        pos=LAYOUT.server_world_pos_in_rack,
+        rgba_chassis=[0.16, 0.17, 0.19, 1.0],
+        server_cfg=server_cfg,
+        port_local_x=port_local_x,
+        port_y_offsets=port_y_offsets,
+        port_colors=port_colors,
     )
-    for _side, y_off in (("l", -0.15), ("r", +0.15)):
-        server.add_geom(
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            pos=[-server_cfg.half[0] - 0.015, y_off, 0.0],
-            size=[0.015, 0.015, 0.025],
-            rgba=[0.85, 0.85, 0.85, 1.0],
-        )
-    _shapes = ("box", "box", "cylinder")
-    for i, (y, rgba, shape) in enumerate(zip(port_y_offsets, port_colors, _shapes, strict=True)):
-        if shape == "box":
-            # i == 0: power (square); else: net (flatter rectangle).
-            size = [0.010, 0.018, 0.018] if i == 0 else [0.010, 0.012, 0.007]
-            server.add_geom(
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                pos=[port_local_x, y, 0.0],
-                size=size,
-                rgba=list(rgba),
-            )
-        else:  # cylinder — fiber (fromto only; MuJoCo forbids pos+fromto)
-            server.add_geom(
-                type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                fromto=[port_local_x - 0.010, y, 0.0, port_local_x + 0.005, y, 0.0],
-                size=[0.010],
-                rgba=list(rgba),
-            )
+    _add_server_body(
+        wb,
+        name="new_server",
+        pos=LAYOUT.new_server_initial_world_pos,
+        rgba_chassis=[0.24, 0.26, 0.30, 1.0],
+        server_cfg=server_cfg,
+        port_local_x=port_local_x,
+        port_y_offsets=port_y_offsets,
+        port_colors=port_colors,
+    )
 
-    # Cables (anchored to rack, terminating in connector bodies).
+    # ---------------------- Cables (3 ball-jointed sticks on rack) ---------
     for i, (y, rgba) in enumerate(zip(port_y_offsets, port_colors, strict=True)):
-        _add_cable(spec, rack, i, y, rgba)
-
-    # ---------------------- Replacement server -------------------------------
-    # Place the freejoint body resting on the new_bin floor at initial lift
-    # height, so the initial NEW_IN_BIN weld captures a realistic relative
-    # pose. `LAYOUT.new_server_initial_world_pos` computes this from the
-    # TIAGo torso pose, the upper-bin offset, and the server's own half-extent.
-    new_server = wb.add_body(name="new_server", pos=list(LAYOUT.new_server_initial_world_pos))
-    new_server.add_freejoint()
-    new_server.add_geom(
-        type=mujoco.mjtGeom.mjGEOM_BOX,
-        size=list(server_cfg.half),
-        rgba=[0.24, 0.26, 0.30, 1.0],
-        mass=server_cfg.mass,
-        contype=0,
-        conaffinity=0,
-    )
-    for _side, y_off in (("l", -0.15), ("r", +0.15)):
-        new_server.add_geom(
-            type=mujoco.mjtGeom.mjGEOM_BOX,
-            pos=[-server_cfg.half[0] - 0.015, y_off, 0.0],
-            size=[0.015, 0.015, 0.025],
-            rgba=[0.85, 0.85, 0.85, 1.0],
+        cable_root, local_anchor, attach_quat = _build_cable_root(i, y, rgba)
+        cable_mount = rack.add(
+            "site",
+            name=f"cable{i + 1}_mount",
+            pos=list(local_anchor),
+            quat=list(attach_quat),
+            size=[0.001, 0.001, 0.001],
         )
-    for i, (y, rgba, shape) in enumerate(zip(port_y_offsets, port_colors, _shapes, strict=True)):
-        if shape == "box":
-            size = [0.010, 0.018, 0.018] if i == 0 else [0.010, 0.012, 0.007]
-            new_server.add_geom(
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                pos=[port_local_x, y, 0.0],
-                size=size,
-                rgba=list(rgba),
-            )
-        else:
-            new_server.add_geom(
-                type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                fromto=[port_local_x - 0.010, y, 0.0, port_local_x + 0.005, y, 0.0],
-                size=[0.010],
-                rgba=list(rgba),
-            )
+        cable_mount.attach(cable_root)
 
-    # ---------------------- Actuators ----------------------------------------
-    # Position actuator on TIAGo's existing torso_lift_joint. TIAGo's upstream
-    # MJCF ships only the joint (no actuator); we add the position servo here.
-    # kp=80000 / kv=800 holds a ~5 kg arm-and-bin payload with <1 mm static
-    # droop. Earlier kp=5000 produced ~4 cm of sag under the same payload
-    # (force / kp), which landed IK-planned targets above the cable ports
-    # by enough to miss the connectors entirely at grip time.
-    spec.add_actuator(
-        name=DataCenterAux.LIFT,  # -> "torso_lift_joint"
-        target=DataCenterAux.LIFT,
-        trntype=mujoco.mjtTrn.mjTRN_JOINT,
-        gaintype=mujoco.mjtGain.mjGAIN_FIXED,
-        biastype=mujoco.mjtBias.mjBIAS_AFFINE,
-        gainprm=[80000.0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        biasprm=[0.0, -80000.0, -800.0, 0, 0, 0, 0, 0, 0, 0],
-        ctrllimited=True,
+    # ---------------------- Actuator: torso lift -------------------------
+    # Position actuator on TIAGo's existing torso_lift_joint. TIAGo's
+    # upstream MJCF ships only the joint (no actuator); we add the position
+    # servo here. kp=80000 / kv=800 keeps the torso pinned to its commanded
+    # qpos under puppet mode (qpos is direct-written each tick anyway, so
+    # the actuator's job is mostly cosmetic — but the gain is calibrated
+    # for a possible PD-mode revert).
+    root.actuator.add(
+        "position",
+        name=DataCenterAux.LIFT,
+        joint=DataCenterAux.LIFT,
+        kp=80000.0,
+        kv=800.0,
+        ctrllimited="true",
         ctrlrange=[0.0, LAYOUT.tiago.lift_range],
     )
 
-    # ---------------------- Welds (grasp + attachment) ------------------------
-    # Grasp welds: (arm, grippable_object). All inactive at start. Names must
-    # match the `{prefix}grasp_cube{i}` convention that `get_arm_handles`
-    # expects when it builds `ArmHandles.weld_ids`.
+    # ---------------------- Welds (grasp + attachment) ---------------------
+    # Grasp welds: (arm, grippable_object). All inactive at start. Names
+    # must match `grasp_weld(side, i)` — `get_arm_handles` looks them up
+    # via the same `<side>_grasp_cube<i>` formula. The body lookups
+    # use slash-namespaced piper bodies (`left/link6`).
     for side in ARM_PREFIXES:
         hand = f"{side}link6"
+        side_us = side.replace("/", "_")
         for i, obj_name in enumerate(GRIPPABLES):
-            spec.add_equality(
-                type=mujoco.mjtEq.mjEQ_WELD,
-                name=f"{side}grasp_cube{i}",
-                name1=hand,
-                name2=obj_name,
-                objtype=mujoco.mjtObj.mjOBJ_BODY,
-                active=False,
-                data=[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+            root.equality.add(
+                "weld",
+                name=f"{side_us}grasp_cube{i}",
+                body1=hand,
+                body2=obj_name,
+                active="false",
+                relpose=[0, 0, 0, 1, 0, 0, 0],
             )
 
-    # Attachment equalities — single iteration over ATTACHMENTS registry.
-    # Welds pin full pose; connects pin only body_b's origin to a point in
-    # body_a's frame (used for port↔cable connections so the cable can
-    # swivel naturally at the plug).
+    # Attachment equalities — single iteration over the ATTACHMENTS registry.
+    # Variant dispatch via isinstance: `ConnectAttachment` carries its anchor
+    # in body_a's local frame; `WeldAttachment` is identity-pose at compile
+    # time and the relpose gets re-seeded at runtime by
+    # `welds.activate_attachment_weld`.
     for attachment in ATTACHMENTS:
-        if attachment.kind is ConstraintKind.CONNECT:
-            ax, ay, az = attachment.connect_anchor_in_a
-            spec.add_equality(
-                type=mujoco.mjtEq.mjEQ_CONNECT,
+        active_str = "true" if attachment.initially_active else "false"
+        if isinstance(attachment, ConnectAttachment):
+            ax, ay, az = attachment.anchor_in_a
+            root.equality.add(
+                "connect",
                 name=attachment.name,
-                name1=attachment.body_a,
-                name2=attachment.body_b,
-                objtype=mujoco.mjtObj.mjOBJ_BODY,
-                active=attachment.initially_active,
-                # eq_data for mjEQ_CONNECT: [anchor_xyz (in body1 frame), pad...].
-                data=[ax, ay, az, 0, 0, 0, 0, 0, 0, 0, 0],
-                # Tight solver reference so the plug stays seated instead of
-                # drifting under cable weight. Default (0.02, 1.0) lets the
-                # connector sag 2 cm under gravity; 2 ms time-constant makes
-                # it effectively rigid for our 2 ms physics step.
-                solref=[0.002, 1.0],
-                solimp=[0.99, 0.999, 1e-6, 0.5, 2.0],
+                body1=attachment.body_a,
+                body2=attachment.body_b,
+                active=active_str,
+                anchor=[ax, ay, az],
+                # Soft solref (200 ms time-constant) so port↔cable connect
+                # equalities ease into place when activated rather than
+                # shock-loading the closed loop (cable chain → connector →
+                # CONNECT → server → SERVER_IN_RACK weld → rack → patch
+                # panel → cable anchor). Stiff defaults pushed the welded
+                # server out of position when PORT_NEW activated mid-replug
+                # (user report: "new server starts flying around when put
+                # down"). 200 ms is still plenty fast to pull the
+                # connector to its port within ~one task-plan tick.
+                solref=[0.2, 1.0],
             )
-        else:  # WELD
-            spec.add_equality(
-                type=mujoco.mjtEq.mjEQ_WELD,
+        else:  # WeldAttachment
+            root.equality.add(
+                "weld",
                 name=attachment.name,
-                name1=attachment.body_a,
-                name2=attachment.body_b,
-                objtype=mujoco.mjtObj.mjOBJ_BODY,
-                active=attachment.initially_active,
-                data=[0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+                body1=attachment.body_a,
+                body2=attachment.body_b,
+                active=active_str,
+                relpose=[0, 0, 0, 1, 0, 0, 0],
             )
 
-    # Exclude fragile contacts that would otherwise thrash.
-    # Piper bases sit on the torso; without exclude the shared contact noise
-    # produces oscillation around the arm-mount point.
-    spec.add_exclude(bodyname1="torso_lift_link", bodyname2="left_base_link")
-    spec.add_exclude(bodyname1="torso_lift_link", bodyname2="right_base_link")
-    # new_server starts inside the upper bin on the torso — weld-held but the
-    # bin walls would otherwise contact it on every integrator step.
-    spec.add_exclude(bodyname1="torso_lift_link", bodyname2="new_server")
-    spec.add_exclude(bodyname1="rack_frame", bodyname2="server")
+    # Exclude fragile contacts that would otherwise thrash. dm_control
+    # namespacing renamed the piper roots to `left/base_link`,
+    # `right/base_link`.
+    root.contact.add("exclude", body1="torso_lift_link", body2="left/base_link")
+    root.contact.add("exclude", body1="torso_lift_link", body2="right/base_link")
+    root.contact.add("exclude", body1="torso_lift_link", body2="new_server")
+    root.contact.add("exclude", body1="rack_frame", body2="server")
 
-    return spec
+    # Compile via XML round-trip so the returned (model, data) are owned
+    # by mujoco directly — no dm_control Physics lifetime concerns.
+    xml_str = root.to_xml_string()
+    assets = dict(root.get_assets())
+    model = mujoco.MjModel.from_xml_string(xml_str, assets)
+    data = mujoco.MjData(model)
+    return model, data
 
 
 # -----------------------------------------------------------------------------
@@ -1021,9 +1144,9 @@ def apply_initial_state(
         if not attachment.initially_active:
             data.eq_active[eq_id] = 0
             continue
-        if attachment.kind is ConstraintKind.CONNECT:
+        if isinstance(attachment, ConnectAttachment):
             data.eq_active[eq_id] = 1
-        else:  # WELD
+        else:  # WeldAttachment
             activate_attachment_weld(
                 model,
                 data,
@@ -1198,7 +1321,7 @@ def make_task_plan(
 
     # 1) Unplug cables sequentially (L1, R2, L3). Other arm idles at home.
     def plan_unplug(port_idx: int, active_side: ArmSide) -> None:
-        cable_id = grippable_id(f"cable{port_idx + 1}_connector")
+        cable_id = grippable_id(f"cable{port_idx + 1}/connector")
         cable_grasp_weld = grasp_weld(active_side, cable_id)
         port_weld = _PORT_OLD[port_idx]
 
@@ -1212,20 +1335,29 @@ def make_task_plan(
         # cable heads"). The connector is pinned to the server by the port
         # weld at this point, so its world pose is deterministic.
         connector_bid = mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_BODY, f"cable{port_idx + 1}_connector"
+            model, mujoco.mjtObj.mjOBJ_BODY, f"cable{port_idx + 1}/connector"
         )
         connector_pos = np.asarray(data.xpos[connector_bid], dtype=float).copy()
 
         approach = connector_pos + np.array([-0.10, 0.0, 0.0])
         at_conn = connector_pos
-        pulled = connector_pos + np.array([-0.14, 0.0, 0.03])
-        side_y = -0.28 if active_side == ArmSide.LEFT else +0.28
-        dangle = np.array([LAYOUT.server_front_x - 0.28, side_y, LAYOUT.server.slot_z - 0.10])
+        # Pull short — the rigid cable rod has length ≈ direct anchor↔port
+        # distance (~5 cm), so the connector can swing on the rod's ball
+        # joint but can't be yanked further than rod_len from the anchor
+        # without ripping the closed constraint loop. 4 cm forward is
+        # well within reach and reads as a clear visible pull.
+        pulled = connector_pos + np.array([-0.04, 0.0, 0.02])
+        # No "park" position any more — release the cable right at the
+        # pulled-free spot (14 cm in front of port). Earlier we parked
+        # the cable to the side of the rack, but the cable composite
+        # length didn't reach those side positions reliably (cable over-
+        # stretches → elastic plugin builds force → QACC blows up at
+        # replug time). Releasing close to the port also makes the
+        # subsequent replug a short arm motion instead of a long swing.
 
         q_approach, _ = snap(approach)
         q_at, _ = snap(at_conn)
         q_pulled, _ = snap(pulled)
-        q_dangle, _ = snap(dangle)
 
         aux = {DataCenterAux.LIFT: LAYOUT.lift.cables}
         # Step durations include dedicated settle time before grip: the
@@ -1247,11 +1379,10 @@ def make_task_plan(
                 attach_activate=(cable_grasp_weld,),
                 attach_deactivate=(port_weld,),
             ),
-            Step(f"pull c{port_idx + 1} free", q_pulled, "closed", 0.9, aux_ctrl=aux),
-            Step(f"park c{port_idx + 1}", q_dangle, "closed", 1.0, aux_ctrl=aux),
+            Step(f"pull c{port_idx + 1} free", q_pulled, "closed", 1.0, aux_ctrl=aux),
             Step(
                 f"release c{port_idx + 1}",
-                q_dangle,
+                q_pulled,
                 "open",
                 0.4,
                 aux_ctrl=aux,
@@ -1270,10 +1401,11 @@ def make_task_plan(
     plan_unplug(1, ArmSide.RIGHT)
     plan_unplug(2, ArmSide.LEFT)
 
-    # 2) Server extraction — both arms together. After pull-out the server
-    # is lowered onto the rack's lower staging shelf (not a torso bin);
-    # the lift drops to put the arms at shelf height so the drop-off is
-    # the same short downward motion it used to be for the bin stow.
+    # 2) Server extraction — both arms together. After pull-out the
+    # server is lowered onto the cart's bottom shelf (off-robot, on the
+    # robot's left side). The lift stays at server height through the
+    # extract; the carry over to the cart is an arm motion, not a lift
+    # drop.
     snap_l, snap_r = seed_at_lift(LAYOUT.lift.server)
     aux_server = {DataCenterAux.LIFT: LAYOUT.lift.server}
     aux_stow = {DataCenterAux.LIFT: LAYOUT.lift.stow}
@@ -1288,18 +1420,19 @@ def make_task_plan(
     approach_R = handle_R + np.array([-0.07, 0.0, 0.0])
     pulled_L = handle_L + np.array([-0.32, 0.0, 0.0])
     pulled_R = handle_R + np.array([-0.32, 0.0, 0.0])
-    # Lower-shelf stow: target the rack's upper-slot x so the server
-    # ends up INSIDE the rack on the lower shelf (same depth as the
-    # live slot above), rather than dangling 20 cm in front. The arm's
-    # 0.36 m forward reach at LIFT.stow (arm base world z≈0.79, target
-    # z≈0.64, 0.15 m y inboard) fits inside Piper's ~0.55 m envelope.
-    stow_z_world = LAYOUT.rack.lower_shelf_z_world + LAYOUT.server.half[2] + 0.015
-    # 6 cm forward of the upper-slot handle so the reach stays inside
-    # Piper's envelope at the lower stow height (target z 0.64 vs arm
-    # base 0.79 — the 15 cm vertical drop eats into horizontal reach).
-    stow_handle_x = handle_x - 0.06
-    stow_L = np.array([stow_handle_x, -0.15, stow_z_world])
-    stow_R = np.array([stow_handle_x, +0.15, stow_z_world])
+    # Cart bottom-shelf stow: arm centre target sits over the cart's
+    # bottom shelf. Server then snaps to cart's stow-pos via the
+    # SERVER_ON_CART_BOTTOM weld with explicit world pose, so the arm
+    # tracking offset doesn't bleed into the final stow position.
+    stow_world_pos = LAYOUT.old_server_stow_world_pos
+    stow_z_world = float(stow_world_pos[2])
+    # Cart-bottom-shelf stow: LEFT arm only — cart sits on the robot's
+    # left-y side, well outside the right arm's reach envelope. The
+    # right arm releases at the rack-pulled position and returns home
+    # while the left arm carries solo to the cart.
+    stow_L = np.array(
+        [float(stow_world_pos[0]) + 0.0, float(stow_world_pos[1]) + 0.15, stow_z_world]
+    )
 
     qL_app, _ = snap_l(approach_L)
     qL_at, _ = snap_l(handle_L)
@@ -1307,16 +1440,14 @@ def make_task_plan(
     qR_app, _ = snap_r(approach_R)
     qR_at, _ = snap_r(handle_R)
     qR_out, _ = snap_r(pulled_R)
-    # Stow targets are reached at LIFT.stow (lift_qpos=0.05), not
-    # LIFT.server (0.28) where the rest of the extraction targets are
-    # solved. Re-seed snap at LIFT.stow before solving the stow IK so
-    # the IK's notion of arm-base z matches the runtime's at the moment
-    # the arm reaches the stow waypoint. Without this, qL_stow's TCP
-    # ends up 23 cm below the planned target (the lift drops between
-    # IK time and runtime, dragging the arm down with it).
-    snap_l_stow, snap_r_stow = seed_at_lift(LAYOUT.lift.stow)
+    # Re-seed left-arm IK at the stow lift height (LIFT.stow=0.05)
+    # before solving qL_stow — the IK's notion of arm-base z must
+    # match the runtime's at the moment the arm reaches the stow
+    # waypoint, otherwise the lift transition between extract (lift
+    # at server height) and stow (lift at cart height) drops the arm
+    # by ~23 cm of its IK-planned z.
+    snap_l_stow, _ = seed_at_lift(LAYOUT.lift.stow)
     qL_stow, _ = snap_l_stow(stow_L)
-    qR_stow, _ = snap_r_stow(stow_R)
 
     # SERVER GRASPING POLICY: only the LEFT arm welds to the server. The right
     # arm tracks the opposite handle kinematically for visual bimanual effect,
@@ -1344,24 +1475,23 @@ def make_task_plan(
                 attach_deactivate=(AttachmentWeldName.SERVER_IN_RACK,),
             ),
             Step("pull server L", qL_out, "closed", 2.5, aux_ctrl=aux_server),
-            Step("lower to shelf L", qL_stow, "closed", 2.5, aux_ctrl=aux_stow),
+            Step("carry to cart L", qL_stow, "closed", 2.5, aux_ctrl=aux_stow),
             Step(
-                "seat + release L",
+                "stow on cart L",
                 qL_stow,
                 "open",
                 0.8,
                 aux_ctrl=aux_stow,
-                # Pin server at the rack's interior on the lower shelf
-                # (centered, just resting on the shelf top). Explicit
-                # pose so arm-tracking offsets at this moment don't
-                # propagate into the server's final pose.
+                # Pin server at the cart's bottom-shelf canonical pose,
+                # not wherever the arm happens to be at the instant of
+                # release. Explicit pose; immune to arm-tracking offset.
                 attach_activate_at=(
                     (
-                        AttachmentWeldName.SERVER_ON_LOWER_SHELF,
+                        AttachmentWeldName.SERVER_ON_CART_BOTTOM,
                         (
-                            float(LAYOUT.server_center_x_in_rack),
-                            0.0,
-                            float(LAYOUT.rack.lower_shelf_z_world) + float(LAYOUT.server.half[2]),
+                            float(LAYOUT.old_server_stow_world_pos[0]),
+                            float(LAYOUT.old_server_stow_world_pos[1]),
+                            float(LAYOUT.old_server_stow_world_pos[2]),
                         ),
                         (1.0, 0.0, 0.0, 0.0),
                     ),
@@ -1370,70 +1500,72 @@ def make_task_plan(
             ),
         ]
     )
+    # Right arm during server extraction: bimanual visual at the rack
+    # (right arm reaches the opposite handle and pulls alongside the
+    # left), then releases and idles at home while the left arm
+    # carries solo to the cart on the robot's left side. The cart is
+    # out of the right arm's reach envelope — single-arm carry from
+    # the pull-out point to the cart side is what the geometry allows.
+    home_R_pose = HOME_ARM_Q.copy()
     scripts[ArmSide.RIGHT].extend(
         [
             Step("to server handle R", qR_app, "open", 1.8, aux_ctrl=aux_server),
             Step("at handle R", qR_at, "open", 0.8, aux_ctrl=aux_server),
-            # Right gripper stays OPEN through the whole carry: the left
-            # arm owns the grasp weld, so any force the right fingers
-            # would apply to the server body just fights that weld. A
-            # closed-gripper right hand contacting a welded body produced
-            # QACC blowups around t=44s during the install phase.
             Step("hold handle R", qR_at, "open", 0.6, aux_ctrl=aux_server),
             Step("pull server R", qR_out, "open", 2.5, aux_ctrl=aux_server),
-            Step("lower to shelf R", qR_stow, "open", 2.5, aux_ctrl=aux_stow),
-            Step("release R", qR_stow, "open", 0.8, aux_ctrl=aux_stow),
+            # Right arm doesn't follow to cart; returns to home so it's
+            # out of the way of left arm's carry path.
+            Step("return R", home_R_pose, "open", 2.5, aux_ctrl=aux_stow),
+            Step("idle at home R", home_R_pose, "open", 0.8, aux_ctrl=aux_stow),
         ]
     )
 
-    # 3) New server pickup from new_bin + install in rack
+    # 3) New server pickup from cart top shelf (LEFT arm only; cart is on
+    # robot's left side, out of right arm's reach envelope) + install in
+    # rack (also LEFT-arm-driven — same single-arm carry policy as
+    # extraction so we never have two grasp welds fighting on one body).
     snap_l, snap_r = seed_at_lift(LAYOUT.lift.pick_new)
     aux_pick = {DataCenterAux.LIFT: LAYOUT.lift.pick_new}
 
-    new_handle_z = _torso_world_z(LAYOUT.lift.pick_new) + LAYOUT.bins.new_local_z + 0.06
-    new_handle_L = np.array([0.14, -0.15, new_handle_z])
-    new_handle_R = np.array([0.14, +0.15, new_handle_z])
-    new_approach_L = new_handle_L + np.array([-0.06, 0.0, 0.0])
-    new_approach_R = new_handle_R + np.array([-0.06, 0.0, 0.0])
-
+    cart_top_world = LAYOUT.new_server_initial_world_pos
+    new_handle_L = np.array(
+        [
+            float(cart_top_world[0]),
+            float(cart_top_world[1]),
+            float(cart_top_world[2]),
+        ]
+    )
+    new_approach_L = new_handle_L + np.array([0.0, 0.0, 0.10])  # 10 cm above
     qL_napp, _ = snap_l(new_approach_L)
     qL_ngrip, _ = snap_l(new_handle_L)
-    qR_napp, _ = snap_r(new_approach_R)
-    qR_ngrip, _ = snap_r(new_handle_R)
 
     snap_l, snap_r = seed_at_lift(LAYOUT.lift.server)
-    # Rack-slot target aligns with the handle bar of the new-server (same
-    # geometry as the old server), so arms end the carry with the server
-    # seated in the slot rather than 2 cm in front of it.
-    slot_L = np.array([handle_x, -0.15, LAYOUT.server.slot_z])
-    slot_R = np.array([handle_x, +0.15, LAYOUT.server.slot_z])
+    # Single-arm install: only the LEFT arm reaches into the rack slot
+    # for the new server (the cart pickup is left-arm-only by reach
+    # geometry, so handing off to the right arm mid-carry isn't worth
+    # the choreography).
+    slot_L = np.array([handle_x, -0.05, LAYOUT.server.slot_z])
     pre_slot_L = slot_L + np.array([-0.12, 0.0, 0.0])
-    pre_slot_R = slot_R + np.array([-0.12, 0.0, 0.0])
-
     qL_pre, _ = snap_l(pre_slot_L)
     qL_in, _ = snap_l(slot_L)
-    qR_pre, _ = snap_r(pre_slot_R)
-    qR_in, _ = snap_r(slot_R)
 
-    # Same single-arm policy as server extraction: only the LEFT arm welds
-    # to the new_server; the right arm shadow-carries for visual effect.
     new_server_id = grippable_id("new_server")
     grasp_new_L = grasp_weld(ArmSide.LEFT, new_server_id)
 
     scripts[ArmSide.LEFT].extend(
         [
-            Step("to new_bin L", qL_napp, "open", 1.8, aux_ctrl=aux_pick),
-            Step("at new_bin L", qL_ngrip, "open", 0.8, aux_ctrl=aux_pick),
+            Step("to cart top L", qL_napp, "open", 1.8, aux_ctrl=aux_pick),
+            Step("at cart top L", qL_ngrip, "open", 0.8, aux_ctrl=aux_pick),
             Step(
-                "grip new + release bin L",
+                "grip new + release cart L",
                 qL_ngrip,
                 "closed",
                 0.6,
                 aux_ctrl=aux_pick,
                 attach_activate=(grasp_new_L,),
-                attach_deactivate=(AttachmentWeldName.NEW_IN_BIN,),
+                attach_deactivate=(AttachmentWeldName.NEW_ON_CART_TOP,),
             ),
-            Step("raise new L", qL_pre, "closed", 2.0, aux_ctrl=aux_server),
+            Step("raise new L", qL_pre, "closed", 2.5, aux_ctrl=aux_server),
             Step("insert L", qL_in, "closed", 1.8, aux_ctrl=aux_server),
             Step(
                 "seat in rack + release L",
@@ -1443,11 +1575,8 @@ def make_task_plan(
                 aux_ctrl=aux_server,
                 # Pin new_server in the rack's upper slot at exactly the
                 # canonical world pose, not wherever the arm happens to
-                # be at this instant. The grasp_offset captured at
-                # pickup was relative to where the arm was in the bin;
-                # without an explicit final pose that offset propagates
-                # straight into the install pose and the new server
-                # ends up several cm off-slot.
+                # be at this instant. Same explicit-pose pattern as the
+                # cart-bottom stow above.
                 attach_activate_at=(
                     (
                         AttachmentWeldName.NEW_IN_RACK,
@@ -1463,47 +1592,51 @@ def make_task_plan(
             ),
         ]
     )
+    # Right arm stays at home through the new-server install (cart is
+    # out of reach, install is single-arm). Five matching idle steps so
+    # the right-arm timeline length stays in lockstep with the left.
     scripts[ArmSide.RIGHT].extend(
         [
-            Step("to new_bin R", qR_napp, "open", 1.8, aux_ctrl=aux_pick),
-            Step("at new_bin R", qR_ngrip, "open", 0.8, aux_ctrl=aux_pick),
-            # Right gripper stays OPEN through the new-server carry for
-            # the same reason as server extraction — see the "hold
-            # handle R" comment above. Closed-right-gripper vs. welded
-            # new_server was the direct cause of the t=44s QACC blowup
-            # during `insert R`.
-            Step("hold new R", qR_ngrip, "open", 0.6, aux_ctrl=aux_pick),
-            Step("raise new R", qR_pre, "open", 2.0, aux_ctrl=aux_server),
-            Step("insert R", qR_in, "open", 1.8, aux_ctrl=aux_server),
-            Step("release R", qR_in, "open", 0.8, aux_ctrl=aux_server),
+            Step("idle R cart-app", home_R_pose, "open", 1.8, aux_ctrl=aux_pick),
+            Step("idle R cart-at", home_R_pose, "open", 0.8, aux_ctrl=aux_pick),
+            Step("idle R cart-grip", home_R_pose, "open", 0.6, aux_ctrl=aux_pick),
+            Step("idle R raise", home_R_pose, "open", 2.5, aux_ctrl=aux_server),
+            Step("idle R insert", home_R_pose, "open", 1.8, aux_ctrl=aux_server),
+            Step("idle R seat", home_R_pose, "open", 0.8, aux_ctrl=aux_server),
         ]
     )
 
     # 4) Replug cables sequentially into NEW server (active side rotates).
     def plan_replug(port_idx: int, active_side: ArmSide) -> None:
-        cable_id = grippable_id(f"cable{port_idx + 1}_connector")
+        cable_id = grippable_id(f"cable{port_idx + 1}/connector")
         cable_grasp_weld = grasp_weld(active_side, cable_id)
         port_weld_new = _PORT_NEW[port_idx]
 
         snap_l, snap_r = seed_at_lift(LAYOUT.lift.cables)
         snap = snap_l if active_side == ArmSide.LEFT else snap_r
 
-        side_y = -0.28 if active_side == ArmSide.LEFT else +0.28
-        dangle = np.array([LAYOUT.server_front_x - 0.28, side_y, LAYOUT.server.slot_z - 0.10])
+        # After unplug, cable was released at "pulled" pose = port - 14 cm
+        # in x, +3 cm in z. That's where the cable sits now (gravity=0,
+        # nothing's moved it). Replug grip aims for that same spot.
         port_pos = _port_world_pos(port_idx)
-        approach = port_pos + np.array([-0.08, 0.0, 0.0])
+        # Regrip aligns with the unplug "pulled" position (4 cm forward
+        # of port + 2 cm up) — that's where the connector dangles after
+        # release. Approach + seated stay close so the rigid rod can
+        # follow without tearing the port-CONNECT loop.
+        regrip = port_pos + np.array([-0.04, 0.0, 0.02])
+        approach = port_pos + np.array([-0.03, 0.0, 0.0])
         seated = port_pos + np.array([-0.005, 0.0, 0.0])
 
-        q_d, _ = snap(dangle)
+        q_regrip, _ = snap(regrip)
         q_a, _ = snap(approach)
         q_s, _ = snap(seated)
 
         aux = {DataCenterAux.LIFT: LAYOUT.lift.cables}
         active_steps = [
-            Step(f"to c{port_idx + 1} dangle", q_d, "open", 1.2, aux_ctrl=aux),
+            Step(f"to c{port_idx + 1}", q_regrip, "open", 1.2, aux_ctrl=aux),
             Step(
                 f"grip c{port_idx + 1}",
-                q_d,
+                q_regrip,
                 "closed",
                 0.5,
                 aux_ctrl=aux,
@@ -1535,14 +1668,6 @@ def make_task_plan(
             aux=aux,
         )
 
-    # Replug phase — re-enabled now that puppet mode eliminates the
-    # earlier QACC blowup at ~t=44 s. Under direct-qpos arm motion +
-    # gravity=0, the cable composite stays where it's left between
-    # phases (no gravity drag), and the arm doesn't overshoot when
-    # picking the connector back up (no PD lag). The original `attach_activate`
-    # of grasp_weld captures whatever offset separates arm and connector,
-    # but with gravity=0 the offset is small (whatever the unplug pose
-    # left it at).
     plan_replug(0, ArmSide.LEFT)
     plan_replug(1, ArmSide.RIGHT)
     plan_replug(2, ArmSide.LEFT)

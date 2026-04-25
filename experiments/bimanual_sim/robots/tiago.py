@@ -1,11 +1,17 @@
 """PAL TIAGo loader — Menagerie-adapter for the data-center scene's mobile base.
 
 Menagerie's `pal_tiago/tiago.xml` stays untouched on disk; everything our
-scene needs to change about it is declared here as a typed
-`TiagoConfig` + applied by `load_tiago(config)`. Scenes import only
-`load_tiago` and `torso_world_pos_at_zero` from this module — not
-`TIAGO_XML` directly — so there's a single place to look when Menagerie
-updates and something needs to adjust.
+scene needs to change about it is declared here as a typed `TiagoConfig`
++ applied by `load_tiago(config)`. Scenes import only `load_tiago` and
+`torso_world_pos_at_zero` from this module — not `TIAGO_XML` directly —
+so there's a single place to look when Menagerie updates and something
+needs to adjust.
+
+Built atop `dm_control.mjcf`: `load_tiago` returns an `mjcf.RootElement`
+which the scene then composes (Pipers, cameras, rack, cart, cables) by
+attaching at sites. Compilation happens once, at the scene's
+`build_scene()`, via `MjModel.from_xml_string(root.to_xml_string(),
+root.get_assets())`.
 
 Customizations we currently apply:
 
@@ -34,7 +40,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-import mujoco
+from dm_control import mjcf
 
 from paths import TIAGO_XML
 
@@ -62,86 +68,101 @@ _TIAGO_REQUIRED_BODIES: tuple[str, ...] = (
 )
 
 
-def _iter_body_subtree(root: mujoco.MjsBody) -> Iterator[mujoco.MjsBody]:
+def _iter_body_subtree(root: mjcf.Element) -> Iterator[mjcf.Element]:
     """Pre-order traversal yielding `root` and every descendant body."""
     yield root
-    for child in root.bodies:
-        yield from _iter_body_subtree(child)
+    for child in root.all_children():
+        if child.tag == "body":
+            yield from _iter_body_subtree(child)
 
 
-def _collect_dead_body_names(spec: mujoco.MjSpec, subtree_roots: tuple[str, ...]) -> set[str]:
+def _collect_dead_body_names(root: mjcf.RootElement, subtree_roots: tuple[str, ...]) -> set[str]:
     """Names of every body inside each named subtree, collected BEFORE
-    `spec.delete(...)` runs so downstream orphan-reference pruning
-    (contact excludes) knows which names just disappeared."""
+    `body.remove()` runs so downstream orphan-reference pruning (contact
+    excludes) knows which names just disappeared."""
     dead: set[str] = set()
     for root_name in subtree_roots:
-        root = spec.body(root_name)
-        for b in _iter_body_subtree(root):
+        body = root.find("body", root_name)
+        if body is None:
+            continue
+        for b in _iter_body_subtree(body):
             if b.name:
                 dead.add(b.name)
     return dead
 
 
-def _assert_menagerie_shape(spec: mujoco.MjSpec, config: TiagoConfig) -> None:
+def _assert_menagerie_shape(root: mjcf.RootElement, config: TiagoConfig) -> None:
     """Fail at load time if the upstream names we plan to touch are
     missing. Cheaper to triage here than as a mysterious MuJoCo compile
-    error 400 lines into `build_spec`.
-    """
-    # Everything the scene downstream assumes exists:
+    error 400 lines into `build_scene`."""
     for name in _TIAGO_REQUIRED_BODIES:
-        if spec.body(name) is None:
+        if root.find("body", name) is None:
             raise RuntimeError(
                 f"TIAGo upstream XML missing expected body {name!r}. "
                 "Menagerie's pal_tiago/tiago.xml may have changed shape — "
                 "update robots/tiago.py if the new naming is intentional."
             )
-    # Each strip target must actually be there:
     for subtree in config.strip_subtrees:
-        if spec.body(subtree) is None:
+        if root.find("body", subtree) is None:
             raise RuntimeError(
                 f"TiagoConfig.strip_subtrees references {subtree!r} but it's "
                 "not in TIAGo's upstream XML."
             )
-    # Freejoint to remove must exist where we expect it:
-    if config.remove_freejoint_name is not None:
-        base = spec.body("base_link")
-        names = {j.name for j in base.joints if j.name}
-        if config.remove_freejoint_name not in names:
-            raise RuntimeError(
-                f"TiagoConfig.remove_freejoint_name={config.remove_freejoint_name!r} "
-                f"but base_link's joints are {sorted(names)!r}."
-            )
+    if (
+        config.remove_freejoint_name is not None
+        and root.find("joint", config.remove_freejoint_name) is None
+    ):
+        raise RuntimeError(
+            f"TiagoConfig.remove_freejoint_name={config.remove_freejoint_name!r} "
+            "but no such joint in TIAGo's upstream XML."
+        )
 
 
-def load_tiago(config: TiagoConfig = TiagoConfig()) -> mujoco.MjSpec:  # noqa: B008 — frozen dataclass, no shared state
-    """Return a customized, uncompiled TIAGo MjSpec per `config`.
+def load_tiago(config: TiagoConfig = TiagoConfig()) -> mjcf.RootElement:  # noqa: B008 — frozen dataclass, no shared state
+    """Return a customized, uncompiled TIAGo `mjcf.RootElement` per `config`.
 
-    Callers typically treat this as the root spec and add more bodies to
-    its worldbody before `spec.compile()` — that's what
-    `scenes/data_center.py::build_spec` does.
+    Callers typically treat this as the root and compose more children
+    (Pipers, cameras, rack, cart, cables) before compiling — that's
+    what `scenes/data_center.py::build_scene` does.
+
+    The returned root has `.model = ""` (no namespace) so TIAGo's body
+    names compile unprefixed (`base_link`, `torso_lift_link`); attached
+    children carry their own namespace prefixes via their `.model`
+    attribute (e.g. `left/`, `cable1/`).
     """
-    spec = mujoco.MjSpec.from_file(str(TIAGO_XML))
-    _assert_menagerie_shape(spec, config)
+    root = mjcf.from_path(str(TIAGO_XML))
+    # TIAGo's upstream MJCF declares `<mujoco model="tiago">`; clearing the
+    # model attribute keeps body names like `torso_lift_link` unprefixed in
+    # the compiled scene (rather than `tiago/torso_lift_link`).
+    root.model = ""
+    _assert_menagerie_shape(root, config)
 
-    dead_bodies = _collect_dead_body_names(spec, config.strip_subtrees)
-    for root_name in config.strip_subtrees:
-        spec.delete(spec.body(root_name))  # cascades to descendants
+    # Collect dead-body names BEFORE removing subtrees so orphan-exclude
+    # pruning below can match against the deleted set.
+    dead_bodies = _collect_dead_body_names(root, config.strip_subtrees)
+
+    # Prune `<exclude>` entries referencing dead bodies first — body Element
+    # references would dangle if we removed the bodies first.
+    if root.contact is not None:
+        for exc in list(root.contact.all_children()):
+            if exc.tag != "exclude":
+                continue
+            b1 = getattr(exc.body1, "name", None) if exc.body1 is not None else None
+            b2 = getattr(exc.body2, "name", None) if exc.body2 is not None else None
+            if b1 in dead_bodies or b2 in dead_bodies:
+                exc.remove()
+
+    for subtree in config.strip_subtrees:
+        body = root.find("body", subtree)
+        if body is not None:
+            body.remove()
 
     if config.remove_freejoint_name is not None:
-        base = spec.body("base_link")
-        for j in list(base.joints):
-            if j.name == config.remove_freejoint_name:
-                spec.delete(j)
-                break
+        joint = root.find("joint", config.remove_freejoint_name)
+        if joint is not None:
+            joint.remove()
 
-    # Prune orphaned `<exclude>` entries (TIAGo's upstream declares 3, all
-    # referencing arm/gripper bodies that are now gone). TIAGo has no
-    # `<actuator>` or `<equality>` block upstream, so nothing else to prune.
-    for exc in list(spec.excludes):
-        if exc.bodyname1 in dead_bodies or exc.bodyname2 in dead_bodies:
-            spec.delete(exc)
-
-    return spec
+    return root
 
 
 def torso_world_pos_at_zero() -> tuple[float, float, float]:
@@ -155,8 +176,8 @@ def torso_world_pos_at_zero() -> tuple[float, float, float]:
     In TIAGo's upstream file `torso_lift_link` hangs off `torso_fixed_link`
     whose own pos is (0, 0, 0), so the local pos is the world pos at qpos=0.
     """
-    spec = mujoco.MjSpec.from_file(str(TIAGO_XML))
-    body = spec.body("torso_lift_link")
+    root = mjcf.from_path(str(TIAGO_XML))
+    body = root.find("body", "torso_lift_link")
     if body is None:
         raise RuntimeError(
             "TIAGo upstream XML missing torso_lift_link — "
