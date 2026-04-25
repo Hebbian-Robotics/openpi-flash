@@ -7,8 +7,43 @@
 #
 #   action slot : 8000/tcp (WebSocket), 5555/udp (QUIC)
 #   planner slot: 8002/tcp (WebSocket), 5556/udp (QUIC), 8001/tcp (admin, loopback only)
+#
+# On first boot, cloud-init applies outstanding Ubuntu security patches via
+# apt-get upgrade, and unattended-upgrades is enabled for ongoing patching.
+# The kernel, NVIDIA driver, CUDA, and Docker packages are pinned via
+# /etc/apt/preferences.d/90-pin-gpu-stack so neither the first-boot upgrade
+# nor unattended-upgrades can replace the DLAMI-pinned GPU stack.
+
+package_update: true
+package_upgrade: true
+package_reboot_if_required: false
 
 write_files:
+  - path: /etc/apt/preferences.d/90-pin-gpu-stack
+    owner: root:root
+    permissions: "0644"
+    content: |
+      Package: linux-image-* linux-headers-* linux-modules-* linux-generic linux-aws* nvidia-* libnvidia-* cuda-* libcuda* nvidia-container-toolkit* nvidia-container-runtime* containerd.io docker-ce docker-ce-cli docker-compose-plugin docker-buildx-plugin
+      Pin: release *
+      Pin-Priority: -1
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root:root
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+
+  - path: /etc/apt/apt.conf.d/52unattended-upgrades-local
+    owner: root:root
+    permissions: "0644"
+    content: |
+      // Never auto-reboot — a reboot mid-inference would drop active
+      // WebSocket/QUIC sessions. Operator reboots on a maintenance window.
+      Unattended-Upgrade::Automatic-Reboot "false";
+      Unattended-Upgrade::Automatic-Reboot-WithUsers "false";
+
   - path: /etc/openpi/config.json
     owner: root:root
     permissions: "0644"
@@ -93,6 +128,7 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable openpi-inference.service
   - systemctl start openpi-inference.service
+  - systemctl enable --now unattended-upgrades.service
 %{ if extra_bootstrap_commands != "" ~}
   - |
     ${extra_bootstrap_commands}
