@@ -3,6 +3,11 @@ name = "sim"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    # dm_control.mjcf is the assembly layer for nested robot/cable/camera
+    # subtrees. Native MuJoCo APIs (mj_step / MjModel / MjData) still drive
+    # runtime; mjcf is only used inside scenes/<name>.build_spec to compose
+    # XML before compilation.
+    "dm-control>=1.0.20",
     "imageio[ffmpeg]>=2.37.3",
     "jaxtyping>=0.3.9",
     "mink>=1.1.0",
@@ -48,3 +53,8 @@ ignore = [
 # the tradeoff: runtime will surface real typos in dataclass field access
 # quickly during dev.
 unresolved-attribute = "ignore"
+# dm_control depends on labmaze, which doesn't build on macOS (Bazel toolchain
+# requirement; Linux EC2 installs cleanly). We use only `dm_control.mjcf` —
+# the mujoco scene-assembly layer — at runtime on the EC2 box. Locally, ty
+# can't resolve the import; ignore so static checks pass on either machine.
+unresolved-import = "ignore"

@@ -26,10 +26,17 @@ import numpy as np
 
 
 class ArmSide(StrEnum):
-    """Bimanual arm identity; value is the MuJoCo body-name prefix."""
+    """Bimanual arm identity; value is the MuJoCo body-name prefix.
 
-    LEFT = "left_"
-    RIGHT = "right_"
+    The trailing `/` is dm_control.mjcf's namespace separator: when a piper
+    sub-MJCF is attached with `model="left"`, every body/joint/actuator
+    inside it is renamed `left/<original>` (vs MjSpec's `left_<original>`
+    convention used pre-migration). f-string concatenation (`f"{side}link6"`)
+    naturally produces the slash-namespaced compiled name.
+    """
+
+    LEFT = "left/"
+    RIGHT = "right/"
 
 
 @dataclass
@@ -75,9 +82,18 @@ def get_arm_handles(model: mujoco.MjModel, side: ArmSide, n_cubes: int) -> ArmHa
     gripper_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}joint7")
     lo, hi = model.jnt_range[gripper_jnt]
 
+    # Weld names use `_` as the side separator (`left_grasp_cube0`) because
+    # dm_control.mjcf reserves `/` for namespace scoping and rejects it in
+    # element names. Body / joint / actuator / site names compiled from the
+    # piper subtree stay slash-namespaced (`left/link6`); only the
+    # scene-root equality names use the underscore form.
     weld_ids = np.array(
         [
-            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_EQUALITY, f"{side}grasp_cube{i}")
+            mujoco.mj_name2id(
+                model,
+                mujoco.mjtObj.mjOBJ_EQUALITY,
+                f"{side.replace('/', '_')}grasp_cube{i}",
+            )
             for i in range(n_cubes)
         ],
         dtype=np.int64,

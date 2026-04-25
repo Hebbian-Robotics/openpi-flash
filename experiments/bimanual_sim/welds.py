@@ -83,30 +83,29 @@ def activate_attachment_weld(
 
     Two modes:
 
-    * **target_world_pose=None** (legacy): freeze the *current* world pose
-      of body_b relative to body_a. Suitable when the caller has already
-      driven both bodies into the desired final pose; the weld then holds
-      them at that captured snapshot.
+    * **target_world_pose=None** (legacy): freeze the *current* relative
+      pose between body_a and body_b. Both bodies stay where they are.
 
-    * **target_world_pose=((x, y, z), (qw, qx, qy, qz))**: freeze body_b
-      at *exactly* this world pose, regardless of where it currently is.
-      We compute the relpose in body_a's frame so that the weld, once
-      active, snaps body_b to (and holds it at) the requested world
-      pose. Use for deterministic placements (server-on-shelf,
-      new-server-in-rack) where the runtime arm position shouldn't
-      bleed into the final object pose.
+    * **target_world_pose=((x, y, z), (qw, qx, qy, qz))**: target is the
+      desired world pose of **body_a** (the movable body in the
+      attachment — convention: scene declares welds with the moving
+      object as `name1`/`obj1`, the static parent as `name2`/`obj2`).
+      We compute the relpose using body_b's actual current world pose
+      so the weld, once active, snaps body_a to the requested world
+      pose while body_b stays put.
     """
-    a_pos = data.xpos[body_a_id].copy()
-    a_mat = data.xmat[body_a_id].reshape(3, 3).copy()
-    a_rot = vtf.SO3.from_matrix(a_mat)
-
     if target_world_pose is None:
-        b_pos = data.xpos[body_b_id].copy()
-        b_rot = vtf.SO3.from_matrix(data.xmat[body_b_id].reshape(3, 3).copy())
+        a_pos = data.xpos[body_a_id].copy()
+        a_mat = data.xmat[body_a_id].reshape(3, 3).copy()
+        a_rot = vtf.SO3.from_matrix(a_mat)
     else:
         target_xyz, target_quat_wxyz = target_world_pose
-        b_pos = np.asarray(target_xyz, dtype=float)
-        b_rot = vtf.SO3(wxyz=np.asarray(target_quat_wxyz, dtype=float))
+        a_pos = np.asarray(target_xyz, dtype=float)
+        a_rot = vtf.SO3(wxyz=np.asarray(target_quat_wxyz, dtype=float))
+        a_mat = a_rot.as_matrix()
+
+    b_pos = data.xpos[body_b_id].copy()
+    b_rot = vtf.SO3.from_matrix(data.xmat[body_b_id].reshape(3, 3).copy())
 
     rel_pos = a_mat.T @ (b_pos - a_pos)
     rel_rot = a_rot.inverse() @ b_rot

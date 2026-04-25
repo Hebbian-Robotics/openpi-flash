@@ -7,8 +7,8 @@ Every file in `scenes/` is expected to expose, at module level:
                                     #   (empty tuple for scenes with no articulated arm)
     N_CUBES: int                    # number of grippable objects (0 if no grasp)
 
-    def build_spec() -> mujoco.MjSpec:
-        '''Construct the uncompiled MJCF spec.'''
+    def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
+        '''Construct + compile the scene; return (model, data).'''
 
     def apply_initial_state(
         model: mujoco.MjModel,

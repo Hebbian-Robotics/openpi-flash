@@ -291,9 +291,7 @@ def build_scene_and_advance(scene_name: SceneName | str, t: Seconds | float = 0.
     tools that only care about the home-pose spec (e.g. `tree.py`) don't
     pay the IK cost."""
     scene = load_scene(scene_name)
-    spec = scene.build_spec()
-    model = spec.compile()
-    data = mujoco.MjData(model)
+    model, data = scene.build_spec()
 
     arm_sides: tuple[ArmSide, ...] = getattr(scene, "ARM_PREFIXES", ())
     n_cubes: int = getattr(scene, "N_CUBES", 0)

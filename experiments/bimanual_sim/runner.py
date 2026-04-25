@@ -44,7 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arm_handles import ArmHandles, ArmSide, get_arm_handles
 from cameras import CameraRole, add_frustum_widgets, update_frustum_widgets
 from scene_base import Step
-from scene_check import AttachmentConstraint, check_scene, print_schematic
+from scene_check import AttachmentConstraint, CameraInvariant, check_scene, print_schematic
 from viser_render import build_viser_scene, update_viser
 from welds import (
     activate_attachment_weld,
@@ -78,32 +78,11 @@ def _collect_cube_body_ids(model: mujoco.MjModel, n_cubes: int) -> list[int]:
 
 
 def _extract_attachment_constraints(scene) -> tuple[AttachmentConstraint, ...]:
-    """Adapt a scene's `ATTACHMENTS` tuple (of `_AttachmentWeldSpec`) into the
-    scene-agnostic `AttachmentConstraint` shape that `scene_check` consumes.
-
-    Scenes expose their registry via a module-level `ATTACHMENTS` attribute
-    where each entry has `.name`, `.body_a`, `.body_b`, `.kind` (an enum
-    with `.value in {"weld", "connect"}`), and `.connect_anchor_in_a`.
-    Scenes without the registry get an empty tuple — `check_scene` then
-    skips the attachment validations silently.
-    """
-    raw = getattr(scene, "ATTACHMENTS", ())
-    if not raw:
-        return ()
-    out: list[AttachmentConstraint] = []
-    for a in raw:
-        # `a.kind` may be a StrEnum; its value is "weld" or "connect".
-        kind_value = getattr(a.kind, "value", a.kind)
-        out.append(
-            AttachmentConstraint(
-                name=str(a.name),
-                body_a=str(a.body_a),
-                body_b=str(a.body_b),
-                kind=kind_value,  # type: ignore[arg-type]
-                connect_anchor_in_a=tuple(a.connect_anchor_in_a),
-            )
-        )
-    return tuple(out)
+    """Read a scene's `ATTACHMENTS` tuple — already a tuple of the
+    `WeldAttachment | ConnectAttachment` union from `scene_check`. Scenes
+    without the registry get an empty tuple, and `check_scene` silently
+    skips the attachment validations."""
+    return tuple(getattr(scene, "ATTACHMENTS", ()))
 
 
 def main() -> None:
@@ -142,9 +121,7 @@ def main() -> None:
     scene = _load_scene(args.scene)
     print(f"Building scene: {getattr(scene, 'NAME', args.scene)}")
 
-    spec = scene.build_spec()
-    model = spec.compile()
-    data = mujoco.MjData(model)
+    model, data = scene.build_spec()
     print(
         f"compiled: nbody={model.nbody} njnt={model.njnt} nu={model.nu} "
         f"neq={model.neq} ngeom={model.ngeom}"
@@ -189,6 +166,7 @@ def main() -> None:
     grippable_names: tuple[str, ...] = getattr(scene, "GRIPPABLES", ())
     allowed_overlaps: tuple[tuple[str, str], ...] = getattr(scene, "ALLOWED_STATIC_OVERLAPS", ())
     attachment_constraints = _extract_attachment_constraints(scene)
+    camera_invariants: tuple[CameraInvariant, ...] = getattr(scene, "CAMERA_INVARIANTS", ())
 
     if args.inspect:
         # --inspect: print the schematic, run checks (which may raise), exit
@@ -208,6 +186,7 @@ def main() -> None:
             grippable_names=grippable_names,
             allowed_static_overlaps=allowed_overlaps,
             attachment_constraints=attachment_constraints,
+            camera_invariants=camera_invariants,
         )
         print("\ncheck_scene: OK")
         return
@@ -219,6 +198,7 @@ def main() -> None:
         grippable_names=grippable_names,
         allowed_static_overlaps=allowed_overlaps,
         attachment_constraints=attachment_constraints,
+        camera_invariants=camera_invariants,
     )
 
     task_plan: dict[ArmSide, list[Step]] | None = None

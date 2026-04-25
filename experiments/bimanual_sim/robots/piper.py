@@ -1,10 +1,10 @@
 """Agilex Piper loader — Menagerie-adapter for the bimanual arm attachments.
 
 Menagerie's `agilex_piper/piper.xml` stays untouched on disk; our scene
-calls `attach_piper(scene_spec, prefix=..., frame=..., config=...)` which
-reads upstream, attaches with the requested prefix, then overrides a
-fixed set of actuator parameters via native `MjsActuator` properties
-(`gainprm`, `biasprm`, `forcerange`).
+calls `attach_piper(mount_site, side, ...)` which reads upstream, sets
+the namespace prefix from `side` (e.g. `left`), overrides a fixed set of
+actuator parameters via dm_control.mjcf attribute set, then attaches the
+piper subtree at `mount_site`.
 
 Why we override: upstream ships `kp=80 N·m/rad kv=5 forcerange=±100` on
 joints 1–3, tuned for an empty wrist. Our scene carries a wrist camera
@@ -25,8 +25,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import mujoco
+from dm_control import mjcf
 
+from arm_handles import ArmSide
 from paths import PIPER_XML
 
 
@@ -35,8 +36,9 @@ class PiperJointGain:
     """kp / kv / forcerange override for a single Piper position actuator.
 
     `joint_suffix` is the name upstream uses for both the joint and the
-    actuator that drives it (Menagerie's convention). We concatenate the
-    scene-supplied `prefix` at attach time to resolve the final name.
+    actuator that drives it (Menagerie's convention). dm_control.mjcf
+    namespacing prepends the model name (`left/`, `right/`) at attach
+    time, so this stays unprefixed.
     """
 
     joint_suffix: str
@@ -91,54 +93,60 @@ _PIPER_REQUIRED_ACTUATORS: tuple[str, ...] = (
 )
 
 
-def _assert_menagerie_shape(piper_spec: mujoco.MjSpec, config: PiperConfig) -> None:
+def _assert_menagerie_shape(piper: mjcf.RootElement, config: PiperConfig) -> None:
     """Fail fast if the upstream actuator names we plan to override are
     missing or the config references one that isn't upstream."""
-    upstream_actuators = {a.name for a in piper_spec.actuators if a.name}
+    upstream_names = {a.name for a in piper.actuator.all_children() if a.name}
     for required in _PIPER_REQUIRED_ACTUATORS:
-        if required not in upstream_actuators:
+        if required not in upstream_names:
             raise RuntimeError(
                 f"Piper upstream XML missing expected actuator {required!r}. "
                 "Menagerie's agilex_piper/piper.xml may have changed shape — "
                 "update robots/piper.py if the new naming is intentional."
             )
     for gain in config.gains:
-        if gain.joint_suffix not in upstream_actuators:
+        if gain.joint_suffix not in upstream_names:
             raise RuntimeError(
                 f"PiperConfig.gains references actuator {gain.joint_suffix!r} "
-                f"not in Piper upstream (actuators: {sorted(upstream_actuators)!r})."
+                f"not in Piper upstream (actuators: {sorted(upstream_names)!r})."
             )
 
 
-def attach_piper(
-    scene_spec: mujoco.MjSpec,
-    *,
-    prefix: str,
-    frame: mujoco.MjsFrame,
+def load_piper(
+    side: ArmSide,
     config: PiperConfig = PiperConfig(),  # noqa: B008 — frozen dataclass, no shared state
-) -> None:
-    """Attach a prefixed Piper to `scene_spec` at `frame`, then apply
-    gain/forcerange overrides per `config`.
+) -> mjcf.RootElement:
+    """Load Menagerie's Piper, set the dm_control namespace prefix from
+    `side`, and apply the gain/forcerange overrides per `config`.
 
-    `prefix` is prepended to every Piper body/joint/actuator/geom name on
-    attach (MjSpec convention). The post-attach override uses the native
-    `spec.actuator(name).gainprm = [...]` form — same as writing the
-    values directly into `<position>` elements, just expressed in Python.
+    Returns the `mjcf.RootElement` *without* attaching it to a parent —
+    the caller is expected to mutate the subtree (e.g. add a TCP site or
+    a wrist camera on `link6`) BEFORE calling `parent_site.attach(piper)`,
+    so any element added inside the subtree picks up the namespace
+    prefix automatically.
 
-    Mutates `scene_spec` in place; no return value.
+    `side`'s value is the dm_control namespace prefix (`left/`, `right/`);
+    the trailing `/` is stripped before assigning to `piper.model`. Once
+    attached, every body / joint / actuator / site / camera in the piper
+    subtree is renamed `<side>/<original>` (e.g. `left/link6`, `left/joint1`).
     """
-    piper_spec = mujoco.MjSpec.from_file(str(PIPER_XML))
-    _assert_menagerie_shape(piper_spec, config)
-    scene_spec.attach(piper_spec, prefix=prefix, frame=frame)
+    piper = mjcf.from_path(str(PIPER_XML))
+    piper.model = side.rstrip("/")
+    _assert_menagerie_shape(piper, config)
 
     for g in config.gains:
-        name = f"{prefix}{g.joint_suffix}"
-        act = scene_spec.actuator(name)
+        act = piper.find("actuator", g.joint_suffix)
         if act is None:
             raise RuntimeError(
-                f"attach_piper: actuator {name!r} not found on scene spec after "
-                f"attach. Check prefix={prefix!r} / PiperConfig.gains."
+                f"load_piper: actuator {g.joint_suffix!r} not found in piper "
+                f"after assert pass — internal inconsistency."
             )
-        act.gainprm = [g.kp, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-        act.biasprm = [0.0, -g.kp, -g.kv, 0, 0, 0, 0, 0, 0, 0]
+        # piper.xml ships high-level `<position kp=… kv=…>` actuators.
+        # mjcf maps these to the same `kp` / `kv` attributes; setting them
+        # produces the same compiled gainprm/biasprm/biastype tuple as
+        # writing the lower-level values directly.
+        act.kp = g.kp
+        act.kv = g.kv
         act.forcerange = list(g.forcerange)
+
+    return piper

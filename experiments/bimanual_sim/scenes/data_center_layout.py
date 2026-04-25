@@ -71,22 +71,44 @@ class _ArmMount:
 
 
 @dataclass(frozen=True)
-class _Bins:
-    """Two onboard compartments on the torso (chest + waist).
+class _Cart:
+    """Floor-standing service cart parked next to the robot.
 
-    `half` is noticeably larger than `_Server.half` (24×28×8 cm vs
-    18×22×4.5 cm) so servers sit with visible clearance inside a
-    proper drawer-like compartment instead of hugging the walls (user
-    ask: "bins can be bigger than servers themselves"). Server stow is
-    a weld, not contact-based, so the oversized bin doesn't introduce
-    physics instability even though the server would rattle inside a
-    real drawer of this clearance.
+    Generic data-centre service cart: two horizontal shelves (top +
+    bottom) sized so 2-3 rack-unit servers fit on each, four vertical
+    corner posts, push handle on the rear edge, four caster wheels
+    underneath. New server starts on the top shelf; old server stows
+    on the bottom shelf after extraction. Sized for "could carry any
+    server, not just the one we're moving" — half_x and half_y bumped
+    up so the deck reads as a real serviceman cart rather than a
+    custom-fit pedestal for one chassis.
+    """
+
+    # Cart centre in world coordinates (front-left of the robot).
+    center_x: float = 0.25  # bumped forward so longer cart still fits
+    center_y: float = -0.65  # bumped further out so wider cart clears robot
+    half_x: float = 0.45  # 90 cm long along the cart's long axis
+    half_y: float = 0.30  # 60 cm deep (perpendicular to long axis)
+    top_shelf_z: float = 0.80  # top deck — new server starts here
+    bottom_shelf_z: float = 0.50  # bottom deck — old server stows here
+    shelf_thickness: float = 0.01
+    post_half: float = 0.020  # 4 cm × 4 cm corner posts
+    caster_radius: float = 0.035
+    handle_height: float = 0.95  # top of the push handle (above top shelf)
+
+
+@dataclass(frozen=True)
+class _Bins:
+    """Legacy on-torso bins — kept for backward-compat default values
+    used by `new_server_initial_world_pos`. The data-center scene no
+    longer renders bins; the new server starts on the cart's top shelf
+    instead. Remove once `new_server_initial_world_pos` is retired.
     """
 
     half: Half3 = (0.24, 0.28, 0.08)
-    local_x: float = 0.16  # both bins protrude forward of the torso column
-    new_local_z: float = 0.13  # upper bin (chest)
-    old_local_z: float = -0.28  # lower bin (waist)
+    local_x: float = 0.16
+    new_local_z: float = 0.13
+    old_local_z: float = -0.28
     wall_thickness: float = 0.01
 
 
@@ -94,23 +116,19 @@ class _Bins:
 class _Rack:
     """Static 19" cabinet parked in front of the robot.
 
-    `center_x` is coupled to `_ArmMount.x` — with arm base at torso-local
-    x=0 (world ≈ -0.06), scene_check's 0.75 m pre-filter from arm base to
-    the server *centre* (= rack.front + server.half[0]) forces
-    rack.center_x ≤ ~0.62. `0.58` puts the server centre at x=0.56,
-    leaving ~4 cm of scene_check margin and ~50 cm arm-base-to-cable
-    reach (well inside Piper's ~0.55 m envelope). If arm_mount.x moves,
-    this must too.
+    Real-rack proportions: 60 cm wide × 60 cm deep × 130 cm tall (a
+    half-height telco enclosure). `center_x = 0.70` puts the rack
+    front face at x=0.40 — ~20 cm in front of the robot's base radius
+    and within Piper's reach budget for cable-port targets at the
+    front face (~0.50 m horizontal from the arm base). The server
+    seats near the front of the rack interior so the arms don't have
+    to reach 30 cm deep into the cabinet.
     """
 
-    center_x: float = 0.58
-    half: Half3 = (0.20, 0.32, 0.65)
+    center_x: float = 0.70
+    half: Half3 = (0.30, 0.30, 0.65)
     center_z: float = 0.65
     wall_thickness: float = 0.012
-    # World z of the rack's *lower* staging shelf (below the live-server
-    # slot). Holds the old server after extraction so the robot's single
-    # torso bin stays free for carrying the new server.
-    lower_shelf_z_world: float = 0.58
 
     @property
     def front_face_x(self) -> float:
@@ -171,15 +189,38 @@ class _Ports:
 
 @dataclass(frozen=True)
 class _Cables:
-    """Composite-cable dimensions + side-of-rack bracket placement."""
+    """Cable rod + patch-panel placement.
 
-    n_seg: int = 10
-    seg_len: float = 0.06
-    seg_radius: float = 0.005
+    Cables emerge from a 1U-style patch panel mounted in the rack
+    immediately below the server slot — the standard data-centre
+    layout where switch ports sit one rack-unit below or above the
+    server they connect to. Short rigid rods run vertically from
+    each patch-panel port up to the matching server-front port, all
+    inside the rack interior. Visible through the open front, and
+    the arms unplug by gripping a connector and pulling forward.
+    """
+
+    n_seg: int = 14
+    seg_len: float = 0.07
+    # 18 mm-diameter cable — visible at HD render distance while still
+    # in believable proportion to a 9 cm-tall server (~1:5). Earlier
+    # stages: 24 mm read as fire hose; 14 mm was hard to see; 8 mm
+    # vanished. 18 mm balances proportion with visibility.
+    seg_radius: float = 0.009
     conn_len: float = 0.02
-    anchor_forward_inset: float = 0.04  # along rack +x from front face
-    anchor_side_offset: float = 0.020  # outside the +y side panel
-    anchor_spread_x: float = 0.04  # stagger between cables along rack +x
+    # Patch panel sits this far below the server slot (typical 1U gap
+    # between rack-mounted hardware) — short enough that cables don't
+    # over-stretch when an arm pulls the connector forward.
+    patch_panel_z_below_server: float = 0.07
+    # Patch panel is a thin box on the rack interior front face. Sized
+    # so its ports (at port_y_offsets, mirroring server ports below)
+    # span the full rack interior width.
+    patch_panel_half_x: float = 0.012  # 24 mm thick (front-to-back)
+    patch_panel_half_y: float = 0.20  # 40 cm wide (mirrors rack interior)
+    patch_panel_half_z: float = 0.025  # 5 cm tall (1U ≈ 4.4 cm)
+    # Visible "cable plug tail" coming out of the connector toward the
+    # server — reads as a stubby ferrule on the connector head.
+    connector_stub_len: float = 0.04
 
 
 @dataclass(frozen=True)
@@ -210,8 +251,8 @@ class _LiftTargets:
     home: float = 0.05
     cables: float = 0.30  # rack cable-port height
     server: float = 0.28  # server-slot height (just below cables)
-    stow: float = 0.05  # lower bin (old-server stow)
-    pick_new: float = 0.15  # upper bin (new-server pickup)
+    stow: float = 0.05  # cart-bottom stow (low lift puts arm near cart shelves)
+    pick_new: float = 0.05  # cart-top pickup (same low lift as stow)
 
 
 # -----------------------------------------------------------------------------
@@ -232,6 +273,7 @@ class DataCenterLayout:
     tiago: _Tiago = field(default_factory=_Tiago)
     arm_mount: _ArmMount = field(default_factory=_ArmMount)
     bins: _Bins = field(default_factory=_Bins)
+    cart: _Cart = field(default_factory=_Cart)
     rack: _Rack = field(default_factory=_Rack)
     server: _Server = field(default_factory=_Server)
     ports: _Ports = field(default_factory=_Ports)
@@ -278,44 +320,66 @@ class DataCenterLayout:
         mjEQ_CONNECT `data` field of a port↔cable-connector equality."""
         return (self.port_local_x_on_server, self.ports.y_offsets[i], 0.0)
 
-    # ---- Cable-bracket derivations ----
+    # ---- Patch-panel + cable-anchor derivations ----
+    # The patch panel is a 1U fixture mounted on the rack front rails,
+    # one rack-unit below the server slot. Each cable anchors at the
+    # patch-panel face directly under its corresponding server port, so
+    # the rod runs straight up between them — short, visible, plausibly
+    # data-centre-shaped.
 
     @property
-    def cable_bracket_center(self) -> Position3:
-        """World position of the shared side-of-rack cable bracket."""
+    def patch_panel_world_pos(self) -> Position3:
+        """World position of the patch-panel body's centre."""
         return np.array(
             [
-                self.rack.front_face_x + self.cables.anchor_forward_inset,
-                self.rack.side_y_pos + self.cables.anchor_side_offset,
-                self.server.slot_z,
+                self.rack.front_face_x + self.cables.patch_panel_half_x,
+                0.0,
+                self.server.slot_z - self.cables.patch_panel_z_below_server,
             ]
         )
 
     def cable_anchor_world(self, cable_idx: int) -> Position3:
-        """World anchor for cable `cable_idx` (0..2), staggered along rack +x
-        so the three grommets are visually distinct."""
-        offset = (cable_idx - 1) * self.cables.anchor_spread_x
-        return self.cable_bracket_center + np.array([offset, 0.0, 0.0])
+        """World anchor for cable `cable_idx` (0..2). Sits on the front
+        face of the patch panel, directly below port `cable_idx` on the
+        server above."""
+        return np.array(
+            [
+                self.rack.front_face_x + 2 * self.cables.patch_panel_half_x,
+                self.ports.y_offsets[cable_idx],
+                self.server.slot_z - self.cables.patch_panel_z_below_server
+                + self.cables.patch_panel_half_z,
+            ]
+        )
 
     @property
     def cable_max_len(self) -> float:
-        """Cap on composite cable length (beyond the direct anchor→port run)."""
+        """Cap on cable length (beyond the direct anchor→port run)."""
         return self.cables.n_seg * self.cables.seg_len + self.cables.conn_len
 
-    # ---- New-server initial pose (resting in the upper bin at LIFT_HOME) ----
+    # ---- Cart placements ----
 
     @property
     def new_server_initial_world_pos(self) -> Position3:
         """World pose the replacement server is spawned at: resting on the
-        upper bin's floor at torso `LIFT_HOME`. Server centre sits
-        `SERVER_HALF[2]` above the bin floor's inner surface."""
-        tz = self.tiago.torso_world_z(self.lift.home)
-        bin_floor_inner_z = tz + self.bins.new_local_z - self.bins.half[2]
+        cart's top shelf, server centre `server.half[2]` above the
+        shelf top surface."""
         return np.array(
             [
-                self.tiago.torso_world_pos_at_zero[0] + self.bins.local_x,
-                0.0,
-                bin_floor_inner_z + self.server.half[2],
+                self.cart.center_x,
+                self.cart.center_y,
+                self.cart.top_shelf_z + self.server.half[2],
+            ]
+        )
+
+    @property
+    def old_server_stow_world_pos(self) -> Position3:
+        """World pose the OLD server gets stowed at after extraction:
+        resting on the cart's bottom shelf."""
+        return np.array(
+            [
+                self.cart.center_x,
+                self.cart.center_y,
+                self.cart.bottom_shelf_z + self.server.half[2],
             ]
         )
 

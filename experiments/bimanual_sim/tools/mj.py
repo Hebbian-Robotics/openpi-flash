@@ -554,16 +554,16 @@ def ik(
 
 
 _REVIEW_KEYFRAMES_DATA_CENTER: tuple[tuple[float, str], ...] = (
-    (0.0, "home"),
+    (0.0, "home (cables plugged)"),
     (5.0, "settle at cables"),
-    (9.0, "grip cable 1"),
-    (17.0, "grip cable 2"),
-    (25.5, "grip cable 3"),
-    (30.0, "extract old server"),
-    (33.5, "stow on shelf"),
-    (38.0, "grip new server"),
-    (42.0, "install in rack"),
-    (45.0, "return home"),
+    (8.8, "grip cable 1"),
+    (15.2, "grip cable 2"),
+    (21.6, "grip cable 3 (all unplugged)"),
+    (28.0, "extract old server"),
+    (32.0, "carry old to cart"),
+    (37.0, "grip new from cart"),
+    (43.5, "install new in rack"),
+    (47.0, "home (demo end)"),
 )
 """Timestamps + labels of the moments a human reviewer cares about
 when judging the data-center demo. Pinned to the scene's task plan;
@@ -581,18 +581,25 @@ _REVIEW_ANGLES: tuple[tuple[str, FreeCameraPose], ...] = (
         ),
     ),
     (
-        "close",
+        "side",
         FreeCameraPose(
-            azimuth_deg=AzimuthDeg(70.0),
-            elevation_deg=ElevationDeg(-10.0),
-            distance_m=Metres(1.2),
-            lookat=(0.40, -0.10, 0.88),
+            # Side-on profile: camera ~1 m to the +y side of the
+            # rack-and-robot midline, looking across at the rack-arm
+            # interaction. Avoids the wrist-cam mesh dominating the
+            # frame (the lookat at the cable-port height keeps the
+            # arms and rack interior in profile, not in front of the
+            # camera).
+            azimuth_deg=AzimuthDeg(90.0),
+            elevation_deg=ElevationDeg(-5.0),
+            distance_m=Metres(1.5),
+            lookat=(0.30, 0.0, 0.85),
         ),
     ),
 )
-"""Two canonical free-cam poses: a wide 3/4 overview and a closer
-gripper's-eye angle at the rack. Enough to catch "arm is too high" or
-"something is protruding" without multi-window orbiting."""
+"""Two canonical free-cam poses: a wide 3/4 overview and a rack-
+interior view looking back at the robot. Enough to catch "arm is too
+high", "server didn't seat", or "shelf protruding" without
+multi-window orbiting."""
 
 
 @app.command()
