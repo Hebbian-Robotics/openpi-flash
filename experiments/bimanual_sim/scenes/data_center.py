@@ -38,6 +38,7 @@ Type-safety conventions:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -51,7 +52,7 @@ from ik import PositionOnly, solve_ik
 from paths import D405_MESH_STL, D435I_XML
 from robots.piper import load_piper
 from robots.tiago import load_tiago
-from scene_base import CubeID, Position3, Step, make_cube_id
+from scene_base import CubeID, GripperState, Position3, Step, make_cube_id
 from scene_check import (
     AttachmentConstraint,
     CameraInvariant,
@@ -86,9 +87,19 @@ class DataCenterAux(StrEnum):
     `LIFT` maps directly to PAL TIAGo's upstream `torso_lift_joint` name so the
     scene's aux-ctrl dispatch reaches the joint Menagerie already declares in
     tiago.xml (we add only a position actuator on top).
+
+    `BASE_X` / `BASE_Y` / `BASE_YAW` drive the 3-DOF planar joint
+    `robots.tiago.load_tiago` adds at `base_link`. Used by the carry
+    choreography so the robot can step back, rotate to face the cart,
+    place the server, and rotate back — all via puppet-mode qpos
+    writes. mink IK locks these three joints so the planner uses only
+    the arm chain.
     """
 
     LIFT = "torso_lift_joint"
+    BASE_X = "base_x"
+    BASE_Y = "base_y"
+    BASE_YAW = "base_yaw"
 
 
 AUX_ACTUATOR_NAMES: tuple[str, ...] = tuple(m.value for m in DataCenterAux)
@@ -673,36 +684,33 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
 
     wb = root.worldbody
 
-    # Lighting — TIAGo's upstream MJCF ships no lights, and the default
-    # MuJoCo scene comes with a single dim headlight that leaves stills
-    # looking grainy/black. Three-point setup: a key spot above the
-    # robot, a fill light from the rack side, and a back/rim light from
-    # behind to separate the robot from the dark background.
+    # Lighting — match the Menagerie `agilex_piper/scene.xml` setup that
+    # produces the reference piper.png: bright ambient via headlight +
+    # one strong overhead directional light. Pure spot lighting (the
+    # earlier 3-point setup) left the white/gray Piper materials reading
+    # as silhouetted gray; the menagerie's ambient+directional combo is
+    # what makes the arm read as bright white.
+    root.visual.headlight.diffuse = [0.6, 0.6, 0.6]
+    root.visual.headlight.ambient = [0.4, 0.4, 0.4]
+    root.visual.headlight.specular = [0.0, 0.0, 0.0]
     wb.add(
         "light",
-        name="key",
-        pos=[0.4, -0.5, 2.5],
-        dir=[0.0, 0.5, -1.0],
-        diffuse=[0.7, 0.7, 0.7],
-        specular=[0.3, 0.3, 0.3],
-        castshadow="false",
+        name="key_directional",
+        pos=[0.4, 0.0, 3.0],
+        dir=[0.0, 0.0, -1.0],
+        directional="true",
+        diffuse=[0.5, 0.5, 0.5],
+        specular=[0.1, 0.1, 0.1],
     )
+    # Soft side fill so the rack interior + cart shelves don't fall into
+    # deep shadow when the directional light hits them edge-on.
     wb.add(
         "light",
-        name="fill",
+        name="side_fill",
         pos=[0.4, 1.5, 1.8],
-        dir=[0.0, -1.0, -0.4],
-        diffuse=[0.5, 0.5, 0.55],
-        specular=[0.1, 0.1, 0.1],
-        castshadow="false",
-    )
-    wb.add(
-        "light",
-        name="rim",
-        pos=[-1.0, 0.0, 2.0],
-        dir=[1.0, 0.0, -0.5],
-        diffuse=[0.4, 0.42, 0.5],
-        specular=[0.1, 0.1, 0.1],
+        dir=[0.0, -1.0, -0.3],
+        diffuse=[0.25, 0.25, 0.28],
+        specular=[0.05, 0.05, 0.05],
         castshadow="false",
     )
 
@@ -987,6 +995,37 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
         ctrllimited="true",
         ctrlrange=[0.0, LAYOUT.tiago.lift_range],
     )
+    # Position actuators for the planar base joints — same puppet-mode
+    # convention as the lift (qpos written each tick; ctrl mirrors it).
+    # Generous ctrlrange so the carry choreography can park the robot
+    # well off-axis from the rack without saturating.
+    root.actuator.add(
+        "position",
+        name=DataCenterAux.BASE_X,
+        joint=DataCenterAux.BASE_X,
+        kp=20000.0,
+        kv=400.0,
+        ctrllimited="true",
+        ctrlrange=[-1.0, 1.0],
+    )
+    root.actuator.add(
+        "position",
+        name=DataCenterAux.BASE_Y,
+        joint=DataCenterAux.BASE_Y,
+        kp=20000.0,
+        kv=400.0,
+        ctrllimited="true",
+        ctrlrange=[-1.0, 1.0],
+    )
+    root.actuator.add(
+        "position",
+        name=DataCenterAux.BASE_YAW,
+        joint=DataCenterAux.BASE_YAW,
+        kp=8000.0,
+        kv=200.0,
+        ctrllimited="true",
+        ctrlrange=[-3.5, 3.5],  # ±π plus margin
+    )
 
     # ---------------------- Welds (grasp + attachment) ---------------------
     # Grasp welds: (arm, grippable_object). All inactive at start. Names
@@ -1116,10 +1155,14 @@ def apply_initial_state(
     for arm in arms.values():
         for i, idx in enumerate(arm.arm_qpos_idx):
             data.qpos[idx] = HOME_ARM_Q[i]
-        data.qpos[arm.qpos_idx[6]] = arm.gripper_open
-        data.qpos[arm.qpos_idx[7]] = -arm.gripper_open
+        # Start with gripper CLOSED — matches the Menagerie piper.png
+        # reference pose where the two finger plates sit together as a
+        # wedge. The arms open the gripper just before reaching for a
+        # cable/handle (see the "approach" steps in `make_task_plan`).
+        data.qpos[arm.qpos_idx[6]] = arm.gripper_closed
+        data.qpos[arm.qpos_idx[7]] = -arm.gripper_closed
         data.ctrl[arm.act_arm_ids] = HOME_ARM_Q
-        data.ctrl[arm.act_gripper_id] = arm.gripper_open
+        data.ctrl[arm.act_gripper_id] = arm.gripper_closed
         # All grasp welds start inactive.
         for eq_id in arm.weld_ids:
             data.eq_active[eq_id] = 0
@@ -1127,6 +1170,15 @@ def apply_initial_state(
     data.ctrl[ids.lift_actuator_id] = LAYOUT.lift.home
     lift_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.LIFT)
     data.qpos[model.jnt_qposadr[lift_jnt]] = LAYOUT.lift.home
+    # Planar base at origin (x=0, y=0, yaw=0). The carry choreography
+    # animates these via aux_ctrl during the cart sequence.
+    for jname in (DataCenterAux.BASE_X, DataCenterAux.BASE_Y, DataCenterAux.BASE_YAW):
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        data.qpos[model.jnt_qposadr[jid]] = 0.0
+        data.qvel[model.jnt_dofadr[jid]] = 0.0
+        aid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, jname)
+        if aid >= 0:
+            data.ctrl[aid] = 0.0
 
     # Propagate qpos to xpos/xmat so the attachment welds below see the
     # actual initial body poses (not stale values from the previous tick).
@@ -1192,7 +1244,16 @@ def _snap_factory(model, data, arm):
             np.asarray(target_pos, dtype=float),
             orientation=PositionOnly(),
             seed_q=q_seed["current"],
-            locked_joint_names=(DataCenterAux.LIFT,),
+            # Lock the lift AND the planar base — the solver only uses the
+            # 6-DOF arm chain. Without these locks, mink could satisfy a
+            # world-frame target by sliding/rotating the whole robot,
+            # which produces plans that don't match what runtime delivers.
+            locked_joint_names=(
+                DataCenterAux.LIFT,
+                DataCenterAux.BASE_X,
+                DataCenterAux.BASE_Y,
+                DataCenterAux.BASE_YAW,
+            ),
             # DAQP over ProxQP: ProxQP raises NoSolutionFound on some of the
             # long-reach TIAGo-mounted targets — DAQP finds a feasible solve
             # (sub-mm error) in the same cases.
@@ -1254,13 +1315,18 @@ def make_task_plan(
     scripts: dict[ArmSide, list[Step]] = {side: [] for side in ARM_PREFIXES}
     lift_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.LIFT)
 
-    def push_both(label: str, duration: float, aux: dict[str, float] | None = None) -> None:
+    def push_both(
+        label: str,
+        duration: float,
+        aux: dict[str, float] | None = None,
+        gripper: GripperState = "closed",
+    ) -> None:
         for side in ARM_PREFIXES:
             scripts[side].append(
                 Step(
                     label=label,
                     arm_q=HOME_ARM_Q.copy(),
-                    gripper="open",
+                    gripper=gripper,
                     duration=duration,
                     aux_ctrl=aux,
                 )
@@ -1284,10 +1350,30 @@ def make_task_plan(
                 )
             )
 
-    def seed_at_lift(lift_qpos: float) -> tuple:
-        """Set carriage to lift_qpos and return fresh snap closures."""
+    base_x_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.BASE_X)
+    base_y_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.BASE_Y)
+    base_yaw_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.BASE_YAW)
+
+    def seed_at_lift(
+        lift_qpos: float,
+        base_x: float = 0.0,
+        base_y: float = 0.0,
+        base_yaw: float = 0.0,
+    ) -> tuple:
+        """Reset state, set carriage at lift_qpos and base at the given
+        planar pose, return fresh per-arm `snap` closures.
+
+        IK targets are world-fixed (cable port world pos, cart shelf
+        world pos, etc.). When the base is moved/rotated, the arms have a
+        different reach geometry to satisfy those targets — so each phase
+        of the carry choreography seeds with its own base pose before
+        running snap.
+        """
         apply_initial_state(model, data, arms, cube_body_ids)
         data.qpos[model.jnt_qposadr[lift_jnt]] = lift_qpos
+        data.qpos[model.jnt_qposadr[base_x_jnt]] = base_x
+        data.qpos[model.jnt_qposadr[base_y_jnt]] = base_y
+        data.qpos[model.jnt_qposadr[base_yaw_jnt]] = base_yaw
         mujoco.mj_forward(model, data)
         return (
             _snap_factory(model, data, arms[ArmSide.LEFT]),
@@ -1401,90 +1487,151 @@ def make_task_plan(
     plan_unplug(1, ArmSide.RIGHT)
     plan_unplug(2, ArmSide.LEFT)
 
-    # 2) Server extraction — both arms together. After pull-out the
-    # server is lowered onto the cart's bottom shelf (off-robot, on the
-    # robot's left side). The lift stays at server height through the
-    # extract; the carry over to the cart is an arm motion, not a lift
-    # drop.
-    snap_l, snap_r = seed_at_lift(LAYOUT.lift.server)
-    aux_server = {DataCenterAux.LIFT: LAYOUT.lift.server}
-    aux_stow = {DataCenterAux.LIFT: LAYOUT.lift.stow}
+    # 2) Server extraction + carry to cart via base motion.
+    #
+    # Realistic motion: the arms grip the server's handle bars at the
+    # rack, then the BASE slides backward (in world -x) to drag the
+    # server straight out of the rack — like a person pulling a server
+    # off a shelf. Arms hold their grip pose constant; the base does
+    # the work, so the server slides out along its own axis instead of
+    # being swung around on arm joints.
+    #
+    # Choreography:
+    #   a) Approach handles + grip (base at origin)
+    #   b) Slide out (base_x: 0 → -0.30, arms held)
+    #   c) Rotate to face cart (base_yaw: 0 → -π/2, arms held)
+    #   d) Slide toward cart (base_y: 0 → -0.30, arms held)
+    #   e) Lower the lift so server reaches cart shelf height
+    #   f) Release: server pinned to cart via SERVER_ON_CART_BOTTOM
+    #
+    # Inverse for new-server pickup + install in rack.
 
-    # Handle bar world x = server_body_center_x - (server.half[0] + 0.015)
-    # = LAYOUT.server_front_x - 0.015. Targets aim for the handle bar centre
-    # so the gripper fingers span the bar when TCP seats on it.
+    # Base poses for each phase of the carry. The robot's two Piper arms
+    # are 60 cm apart on the shoulder bar; both can grip the same server
+    # only when the robot's centre x is within ~20 cm of the server's x.
+    # Cart server lives at world (0.25, -0.65), so we park the robot
+    # centre at (0.25, -0.35) facing -y to get both arms within reach.
+    # Extraction needs to back the robot far enough that the server's
+    # rear face fully clears the rack's open front. Server depth is
+    # 2 * server.half[0] = 36 cm, plus a little margin for the cable
+    # connectors that ride on the front face. 45 cm of pull-back fully
+    # extracts the server with ~5 cm of clearance.
+    # Extraction sequence:
+    #   1. Robot reverses base by `BASE_PRE_EXTRACT` (~10 cm) BEFORE
+    #      reaching for the server — gives the arm full stroke to pull
+    #      the server out by retracting its joints.
+    #   2. Arms extend to the rack handles (now ~10 cm farther away,
+    #      arm at ~80% reach).
+    #   3. Grip the server.
+    #   4. Arms RETRACT while gripping — TCP moves in world -x at the
+    #      same world z, so the server slides straight out along its
+    #      own axis. From the side it looks like the arm V-shape's
+    #      top angle (elbow) closing as the forearm folds back toward
+    #      the upper arm.
+    BASE_PRE_EXTRACT = -0.10
+    BASE_AT_CART_X = 0.25  # robot centre over cart's x (= cart.center_x)
+    BASE_AT_CART_Y = -0.35  # robot 30 cm north of cart, facing it
+    YAW_TO_CART = -math.pi / 2.0  # 90° clockwise about +z (face world -y)
+
+    def base_aux(*, lift: float, x: float, y: float, yaw: float) -> dict[str, float]:
+        return {
+            DataCenterAux.LIFT: lift,
+            DataCenterAux.BASE_X: x,
+            DataCenterAux.BASE_Y: y,
+            DataCenterAux.BASE_YAW: yaw,
+        }
+
+    aux_at_rack = base_aux(lift=LAYOUT.lift.server, x=0.0, y=0.0, yaw=0.0)
+    # After the pre-extract reverse, the robot stays at this offset
+    # through the grip + arm-retract phases.
+    aux_pre_extract = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0
+    )
+    aux_facing_cart = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=YAW_TO_CART
+    )
+    aux_at_cart = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
+    aux_at_cart_low = base_aux(
+        lift=LAYOUT.lift.stow, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
+
+    # IK for the extraction is solved with the base already reversed
+    # by BASE_PRE_EXTRACT — the arm pose in world coords is what
+    # changes during the pull (TCP slides in world -x at constant z),
+    # so the arm joints have to be solved against the reversed base
+    # geometry to land the right world-frame TCP.
+    snap_l, snap_r = seed_at_lift(LAYOUT.lift.server, base_x=BASE_PRE_EXTRACT)
     handle_x = LAYOUT.server_front_x - 0.015
     handle_L = np.array([handle_x, -0.15, LAYOUT.server.slot_z])
     handle_R = np.array([handle_x, +0.15, LAYOUT.server.slot_z])
     approach_L = handle_L + np.array([-0.07, 0.0, 0.0])
     approach_R = handle_R + np.array([-0.07, 0.0, 0.0])
-    pulled_L = handle_L + np.array([-0.32, 0.0, 0.0])
-    pulled_R = handle_R + np.array([-0.32, 0.0, 0.0])
-    # Cart bottom-shelf stow: arm centre target sits over the cart's
-    # bottom shelf. Server then snaps to cart's stow-pos via the
-    # SERVER_ON_CART_BOTTOM weld with explicit world pose, so the arm
-    # tracking offset doesn't bleed into the final stow position.
-    stow_world_pos = LAYOUT.old_server_stow_world_pos
-    stow_z_world = float(stow_world_pos[2])
-    # Cart-bottom-shelf stow: LEFT arm only — cart sits on the robot's
-    # left-y side, well outside the right arm's reach envelope. The
-    # right arm releases at the rack-pulled position and returns home
-    # while the left arm carries solo to the cart.
-    stow_L = np.array(
-        [float(stow_world_pos[0]) + 0.0, float(stow_world_pos[1]) + 0.15, stow_z_world]
-    )
-
+    pulled_out_L = handle_L + np.array([-0.40, 0.0, 0.0])
+    pulled_out_R = handle_R + np.array([-0.40, 0.0, 0.0])
     qL_app, _ = snap_l(approach_L)
     qL_at, _ = snap_l(handle_L)
-    qL_out, _ = snap_l(pulled_L)
+    qL_out, _ = snap_l(pulled_out_L)
     qR_app, _ = snap_r(approach_R)
     qR_at, _ = snap_r(handle_R)
-    qR_out, _ = snap_r(pulled_R)
-    # Re-seed left-arm IK at the stow lift height (LIFT.stow=0.05)
-    # before solving qL_stow — the IK's notion of arm-base z must
-    # match the runtime's at the moment the arm reaches the stow
-    # waypoint, otherwise the lift transition between extract (lift
-    # at server height) and stow (lift at cart height) drops the arm
-    # by ~23 cm of its IK-planned z.
-    snap_l_stow, _ = seed_at_lift(LAYOUT.lift.stow)
-    qL_stow, _ = snap_l_stow(stow_L)
+    qR_out, _ = snap_r(pulled_out_R)
 
-    # SERVER GRASPING POLICY: only the LEFT arm welds to the server. The right
-    # arm tracks the opposite handle kinematically for visual bimanual effect,
-    # but activating two grasp welds (one per arm) over-constrains the server
-    # body — any tiny mismatch in the two arms' IK solutions yanks the
-    # server around as both welds pull in different directions (user
-    # report: "the whole replacing the server phase is so messy with the
-    # server flying around"). One rigid weld → server follows exactly one
-    # arm, smooth carry. Durations on the pull / lower / carry / insert
-    # phases bumped ~1.5× so the motion is visibly slow and deliberate.
+    # SERVER GRASPING POLICY: only the LEFT arm welds to the server.
+    # Activating two grasp welds (one per arm) over-constrains the
+    # server body — any tiny mismatch in the two arms' IK solutions
+    # yanks the server around as both welds pull in different directions.
+    # The right arm tracks the opposite handle kinematically for visual
+    # bimanual effect; only the left arm pins via grasp_weld.
     server_id = grippable_id("server")
     grasp_L = grasp_weld(ArmSide.LEFT, server_id)
 
     scripts[ArmSide.LEFT].extend(
         [
-            Step("to server handle L", qL_app, "open", 1.8, aux_ctrl=aux_server),
-            Step("at handle L", qL_at, "open", 0.8, aux_ctrl=aux_server),
+            # Robot first backs up by BASE_PRE_EXTRACT — gives the arm
+            # full stroke to pull the server out by retracting its
+            # joints once gripping. Arms stay at home pose during the
+            # reverse so they don't wave around.
             Step(
-                "grip + extract L",
+                "reverse base L",
+                HOME_ARM_Q.copy(),
+                "closed",
+                1.2,
+                aux_ctrl=aux_pre_extract,
+            ),
+            Step("to handle L", qL_app, "open", 1.8, aux_ctrl=aux_pre_extract),
+            Step("at handle L", qL_at, "open", 0.8, aux_ctrl=aux_pre_extract),
+            Step(
+                "grip server L",
                 qL_at,
                 "closed",
                 0.6,
-                aux_ctrl=aux_server,
+                aux_ctrl=aux_pre_extract,
                 attach_activate=(grasp_L,),
                 attach_deactivate=(AttachmentWeldName.SERVER_IN_RACK,),
             ),
-            Step("pull server L", qL_out, "closed", 2.5, aux_ctrl=aux_server),
-            Step("carry to cart L", qL_stow, "closed", 2.5, aux_ctrl=aux_stow),
+            # ARM-RETRACT pull-out — arm joints fold back (qL_at → qL_out)
+            # while the gripper stays welded to the server's handle.
+            # TCP traces a horizontal line at constant z=slot_z; the
+            # forearm and upper arm form a V-shape whose top angle
+            # closes as the elbow flexes. Server slides 40 cm in world
+            # -x and is fully clear of the rack opening. Base
+            # stationary throughout this phase.
+            Step("pull server out L", qL_out, "closed", 2.8, aux_ctrl=aux_pre_extract),
+            # Rotate body in place to face cart (yaw 0 → -π/2). Arm pose
+            # held; server rotates with the robot.
+            Step("rotate to cart", qL_out, "closed", 2.5, aux_ctrl=aux_facing_cart),
+            # Slide diagonally toward cart (base x: 0 → 0.25, y: 0 → -0.35).
+            Step("slide to cart", qL_out, "closed", 2.0, aux_ctrl=aux_at_cart),
+            # Drop the lift to descend the server onto the cart's bottom shelf.
+            Step("lower onto cart", qL_out, "closed", 1.5, aux_ctrl=aux_at_cart_low),
+            # Release: pin server at canonical cart-shelf pose; drop grasp.
             Step(
-                "stow on cart L",
-                qL_stow,
+                "release on cart L",
+                qL_out,
                 "open",
                 0.8,
-                aux_ctrl=aux_stow,
-                # Pin server at the cart's bottom-shelf canonical pose,
-                # not wherever the arm happens to be at the instant of
-                # release. Explicit pose; immune to arm-tracking offset.
+                aux_ctrl=aux_at_cart_low,
                 attach_activate_at=(
                     (
                         AttachmentWeldName.SERVER_ON_CART_BOTTOM,
@@ -1500,83 +1647,131 @@ def make_task_plan(
             ),
         ]
     )
-    # Right arm during server extraction: bimanual visual at the rack
-    # (right arm reaches the opposite handle and pulls alongside the
-    # left), then releases and idles at home while the left arm
-    # carries solo to the cart on the robot's left side. The cart is
-    # out of the right arm's reach envelope — single-arm carry from
-    # the pull-out point to the cart side is what the geometry allows.
-    home_R_pose = HOME_ARM_Q.copy()
     scripts[ArmSide.RIGHT].extend(
         [
-            Step("to server handle R", qR_app, "open", 1.8, aux_ctrl=aux_server),
-            Step("at handle R", qR_at, "open", 0.8, aux_ctrl=aux_server),
-            Step("hold handle R", qR_at, "open", 0.6, aux_ctrl=aux_server),
-            Step("pull server R", qR_out, "open", 2.5, aux_ctrl=aux_server),
-            # Right arm doesn't follow to cart; returns to home so it's
-            # out of the way of left arm's carry path.
-            Step("return R", home_R_pose, "open", 2.5, aux_ctrl=aux_stow),
-            Step("idle at home R", home_R_pose, "open", 0.8, aux_ctrl=aux_stow),
+            Step(
+                "reverse base R",
+                HOME_ARM_Q.copy(),
+                "closed",
+                1.2,
+                aux_ctrl=aux_pre_extract,
+            ),
+            Step("to handle R", qR_app, "open", 1.8, aux_ctrl=aux_pre_extract),
+            Step("at handle R", qR_at, "open", 0.8, aux_ctrl=aux_pre_extract),
+            Step("hold handle R", qR_at, "open", 0.6, aux_ctrl=aux_pre_extract),
+            Step("pull server out R", qR_out, "open", 2.8, aux_ctrl=aux_pre_extract),
+            Step("rotate R", qR_out, "open", 2.5, aux_ctrl=aux_facing_cart),
+            Step("slide to cart R", qR_out, "open", 2.0, aux_ctrl=aux_at_cart),
+            Step("lower onto cart R", qR_out, "open", 1.5, aux_ctrl=aux_at_cart_low),
+            Step("release R", qR_out, "open", 0.8, aux_ctrl=aux_at_cart_low),
         ]
     )
 
-    # 3) New server pickup from cart top shelf (LEFT arm only; cart is on
-    # robot's left side, out of right arm's reach envelope) + install in
-    # rack (also LEFT-arm-driven — same single-arm carry policy as
-    # extraction so we never have two grasp welds fighting on one body).
-    snap_l, snap_r = seed_at_lift(LAYOUT.lift.pick_new)
-    aux_pick = {DataCenterAux.LIFT: LAYOUT.lift.pick_new}
-
+    # 3) New server pickup from cart top + install in rack via reverse
+    # path. Robot is currently at base = (-BASE_BACK, BASE_AT_CART_Y,
+    # YAW_TO_CART) facing the cart. We:
+    #   a) Lift up to cart-top height (lift.pick_new).
+    #   b) Re-IK both arms onto new_server's handles at the cart top.
+    #   c) Grip new server.
+    #   d) Slide back from cart (base_y: -0.30 → 0).
+    #   e) Rotate back (base_yaw: -π/2 → 0).
+    #   f) Slide forward to rack (base_x: -BASE_BACK → 0).
+    #   g) Re-IK the slot insert pose.
+    #   h) Slide server in (lift up to server height).
+    #   i) Release: pin via NEW_IN_RACK.
+    #
+    # IK for the cart-top grip is solved at the rotated base pose so the
+    # grip handles map to world coords correctly.
+    snap_l_cart, snap_r_cart = seed_at_lift(
+        LAYOUT.lift.pick_new,
+        base_x=BASE_AT_CART_X,
+        base_y=BASE_AT_CART_Y,
+        base_yaw=YAW_TO_CART,
+    )
     cart_top_world = LAYOUT.new_server_initial_world_pos
     new_handle_L = np.array(
-        [
-            float(cart_top_world[0]),
-            float(cart_top_world[1]),
-            float(cart_top_world[2]),
-        ]
+        [float(cart_top_world[0]), float(cart_top_world[1]) - 0.03, float(cart_top_world[2])]
     )
-    new_approach_L = new_handle_L + np.array([0.0, 0.0, 0.10])  # 10 cm above
-    qL_napp, _ = snap_l(new_approach_L)
-    qL_ngrip, _ = snap_l(new_handle_L)
-
-    snap_l, snap_r = seed_at_lift(LAYOUT.lift.server)
-    # Single-arm install: only the LEFT arm reaches into the rack slot
-    # for the new server (the cart pickup is left-arm-only by reach
-    # geometry, so handing off to the right arm mid-carry isn't worth
-    # the choreography).
-    slot_L = np.array([handle_x, -0.05, LAYOUT.server.slot_z])
-    pre_slot_L = slot_L + np.array([-0.12, 0.0, 0.0])
-    qL_pre, _ = snap_l(pre_slot_L)
-    qL_in, _ = snap_l(slot_L)
+    new_handle_R = np.array(
+        [float(cart_top_world[0]), float(cart_top_world[1]) + 0.03, float(cart_top_world[2])]
+    )
+    new_approach_L = new_handle_L + np.array([0.0, 0.0, 0.10])
+    new_approach_R = new_handle_R + np.array([0.0, 0.0, 0.10])
+    qL_napp, _ = snap_l_cart(new_approach_L)
+    qL_ngrip, _ = snap_l_cart(new_handle_L)
+    qR_napp, _ = snap_r_cart(new_approach_R)
+    qR_ngrip, _ = snap_r_cart(new_handle_R)
 
     new_server_id = grippable_id("new_server")
     grasp_new_L = grasp_weld(ArmSide.LEFT, new_server_id)
 
+    aux_pick_at_cart = base_aux(
+        lift=LAYOUT.lift.pick_new, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
+    aux_carry_at_cart = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
+    # During the new-server install the base mirrors the extract: stays
+    # at BASE_PRE_EXTRACT so the same qL_out / qL_at arm poses (solved
+    # against that base) describe the slide-in motion symmetrically.
+    aux_carry_facing_cart = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=YAW_TO_CART
+    )
+    aux_carry_back = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0
+    )
+
+    # Install motion is the mirror of extract: arm starts at qL_out
+    # (server held in front of rack) and extends to qL_at (server slid
+    # into rack slot), with the base parked at BASE_PRE_EXTRACT so the
+    # IK solutions match the same arm reach used for pull-out. Already
+    # solved above as qL_out/qR_out and qL_at/qR_at — re-use them.
+
     scripts[ArmSide.LEFT].extend(
         [
-            Step("to cart top L", qL_napp, "open", 1.8, aux_ctrl=aux_pick),
-            Step("at cart top L", qL_ngrip, "open", 0.8, aux_ctrl=aux_pick),
+            Step("to cart top L", qL_napp, "open", 1.6, aux_ctrl=aux_pick_at_cart),
+            Step("at cart top L", qL_ngrip, "open", 0.8, aux_ctrl=aux_pick_at_cart),
             Step(
-                "grip new + release cart L",
+                "grip new L",
                 qL_ngrip,
                 "closed",
                 0.6,
-                aux_ctrl=aux_pick,
+                aux_ctrl=aux_pick_at_cart,
                 attach_activate=(grasp_new_L,),
                 attach_deactivate=(AttachmentWeldName.NEW_ON_CART_TOP,),
             ),
-            Step("raise new L", qL_pre, "closed", 2.5, aux_ctrl=aux_server),
-            Step("insert L", qL_in, "closed", 1.8, aux_ctrl=aux_server),
+            # Lift up off cart shelf (raise lift, hold arm pose).
+            Step("lift off cart L", qL_ngrip, "closed", 1.5, aux_ctrl=aux_carry_at_cart),
+            # Slide back from cart.
+            Step("slide back from cart L", qL_ngrip, "closed", 2.0, aux_ctrl=aux_carry_facing_cart),
+            # Rotate back to face rack.
+            Step("rotate to rack L", qL_ngrip, "closed", 2.5, aux_ctrl=aux_carry_back),
+            # Re-pose arm to "out" — server now held in front of robot,
+            # ready to slide into the rack. Mirror of post-extract pose.
             Step(
-                "seat in rack + release L",
-                qL_in,
+                "ready to insert L",
+                qL_out,
+                "closed",
+                1.5,
+                aux_ctrl=aux_carry_back,
+            ),
+            # ARM-EXTEND slide-in: TCP traces a horizontal line at constant
+            # z=slot_z, moving from "out" (-x) to "at handle" (+x). Server
+            # slides into the rack slot — exact reverse of extract pull.
+            Step("slide into rack L", qL_at, "closed", 2.0, aux_ctrl=aux_carry_back),
+            # Robot rolls forward to base origin so the slot/server pose
+            # matches the canonical world position before the weld pins.
+            Step("roll forward L", qL_at, "closed", 1.0, aux_ctrl=aux_at_rack),
+            # Release: pin new_server at canonical rack pose, drop grasp.
+            # Arm stays at qL_at (TCP at handle) — server is already in
+            # the slot from the slide-in step; the weld just snaps the
+            # canonical pose and we drop the grasp.
+            Step(
+                "seat in rack L",
+                qL_at,
                 "open",
                 0.8,
-                aux_ctrl=aux_server,
-                # Pin new_server in the rack's upper slot at exactly the
-                # canonical world pose, not wherever the arm happens to
-                # be at this instant. Same explicit-pose pattern as the
-                # cart-bottom stow above.
+                aux_ctrl=aux_at_rack,
                 attach_activate_at=(
                     (
                         AttachmentWeldName.NEW_IN_RACK,
@@ -1592,17 +1787,18 @@ def make_task_plan(
             ),
         ]
     )
-    # Right arm stays at home through the new-server install (cart is
-    # out of reach, install is single-arm). Five matching idle steps so
-    # the right-arm timeline length stays in lockstep with the left.
     scripts[ArmSide.RIGHT].extend(
         [
-            Step("idle R cart-app", home_R_pose, "open", 1.8, aux_ctrl=aux_pick),
-            Step("idle R cart-at", home_R_pose, "open", 0.8, aux_ctrl=aux_pick),
-            Step("idle R cart-grip", home_R_pose, "open", 0.6, aux_ctrl=aux_pick),
-            Step("idle R raise", home_R_pose, "open", 2.5, aux_ctrl=aux_server),
-            Step("idle R insert", home_R_pose, "open", 1.8, aux_ctrl=aux_server),
-            Step("idle R seat", home_R_pose, "open", 0.8, aux_ctrl=aux_server),
+            Step("to cart top R", qR_napp, "open", 1.6, aux_ctrl=aux_pick_at_cart),
+            Step("at cart top R", qR_ngrip, "open", 0.8, aux_ctrl=aux_pick_at_cart),
+            Step("grip new R", qR_ngrip, "open", 0.6, aux_ctrl=aux_pick_at_cart),
+            Step("lift off cart R", qR_ngrip, "open", 1.5, aux_ctrl=aux_carry_at_cart),
+            Step("slide back R2", qR_ngrip, "open", 2.0, aux_ctrl=aux_carry_facing_cart),
+            Step("rotate to rack R", qR_ngrip, "open", 2.5, aux_ctrl=aux_carry_back),
+            Step("ready to insert R", qR_out, "open", 1.5, aux_ctrl=aux_carry_back),
+            Step("slide into rack R", qR_at, "open", 2.0, aux_ctrl=aux_carry_back),
+            Step("roll forward R", qR_at, "open", 1.0, aux_ctrl=aux_at_rack),
+            Step("seat in rack R", qR_at, "open", 0.8, aux_ctrl=aux_at_rack),
         ]
     )
 

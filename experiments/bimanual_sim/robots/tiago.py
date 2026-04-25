@@ -57,6 +57,16 @@ class TiagoConfig:
 
     strip_subtrees: tuple[str, ...] = ("arm_1_link", "head_1_link")
     remove_freejoint_name: str | None = "reference"
+    # Whether to install a 3-DOF planar joint (slide-x + slide-y +
+    # hinge-yaw) on `base_link`. When True, the scene can drive the
+    # robot's planar pose via puppet-mode qpos writes (e.g. for a "step
+    # back, rotate, step forward" carry choreography). Each scene that
+    # turns this on must lock the three joint names in IK and supply
+    # aux-actuator entries for them.
+    install_base_planar_joints: bool = True
+    base_x_joint_name: str = "base_x"
+    base_y_joint_name: str = "base_y"
+    base_yaw_joint_name: str = "base_yaw"
 
 
 # Names we dereference at load time; see `_assert_menagerie_shape`.
@@ -161,6 +171,43 @@ def load_tiago(config: TiagoConfig = TiagoConfig()) -> mjcf.RootElement:  # noqa
         joint = root.find("joint", config.remove_freejoint_name)
         if joint is not None:
             joint.remove()
+
+    # Install the 3-DOF planar base joint (slide-x, slide-y, hinge-yaw)
+    # on base_link, in that compose order. Three separate joints stack
+    # in MuJoCo such that each operates in the frame of its parent —
+    # so the yaw applies AFTER the slides, which is what we want
+    # (translate first, then rotate-in-place around the new base
+    # position). All three are puppet-driven via aux qpos writes; the
+    # scene locks them in IK so mink doesn't try to satisfy targets
+    # by sliding the whole robot around.
+    if config.install_base_planar_joints:
+        base = root.find("body", "base_link")
+        if base is None:
+            raise RuntimeError("install_base_planar_joints=True but base_link missing")
+        base.add(
+            "joint",
+            name=config.base_x_joint_name,
+            type="slide",
+            axis=[1.0, 0.0, 0.0],
+            damping=50.0,
+            limited="false",
+        )
+        base.add(
+            "joint",
+            name=config.base_y_joint_name,
+            type="slide",
+            axis=[0.0, 1.0, 0.0],
+            damping=50.0,
+            limited="false",
+        )
+        base.add(
+            "joint",
+            name=config.base_yaw_joint_name,
+            type="hinge",
+            axis=[0.0, 0.0, 1.0],
+            damping=20.0,
+            limited="false",
+        )
 
     return root
 

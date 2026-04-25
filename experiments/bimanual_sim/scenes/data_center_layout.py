@@ -89,8 +89,13 @@ class _Cart:
     center_y: float = -0.65  # bumped further out so wider cart clears robot
     half_x: float = 0.45  # 90 cm long along the cart's long axis
     half_y: float = 0.30  # 60 cm deep (perpendicular to long axis)
-    top_shelf_z: float = 0.80  # top deck — new server starts here
-    bottom_shelf_z: float = 0.50  # bottom deck — old server stows here
+    # Shelf z's are calibrated so the lift's puppet-mode range can drop
+    # the carried server onto the bottom deck without the arms having
+    # to reach further than a level pose. Server slot z=0.88, lift
+    # drop = 0.23 m at full retract, so server-bottom lands at the
+    # `bottom_shelf_z + shelf_thickness` ≈ 0.605 mark when lift=stow.
+    top_shelf_z: float = 0.85  # top deck — new server starts here
+    bottom_shelf_z: float = 0.60  # bottom deck — old server stows here
     shelf_thickness: float = 0.01
     post_half: float = 0.020  # 4 cm × 4 cm corner posts
     caster_radius: float = 0.035
@@ -236,8 +241,12 @@ class _Arm:
     first IK-solved `q` so the transition stays smooth.
     """
 
+    # Wrist (joint5) at 0 keeps the gripper plates flat / parallel to
+    # the world horizon — matches Menagerie's `agilex_piper/scene.xml`
+    # home keyframe and avoids the askew "twisted gripper" look an
+    # earlier joint5=1 rad value produced.
     home_q: JointConfig = field(
-        default_factory=lambda: np.array([0.0, 0.0, -1.5708, 0.0, 1.0, 0.0])
+        default_factory=lambda: np.array([0.0, 0.0, -1.5708, 0.0, 0.0, 0.0])
     )
     ik_seed_q: JointConfig = field(
         default_factory=lambda: np.array([0.0, 1.57, -1.3485, 0.0, 0.2, 0.0])
