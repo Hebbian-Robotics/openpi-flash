@@ -554,16 +554,16 @@ def ik(
 
 
 _REVIEW_KEYFRAMES_DATA_CENTER: tuple[tuple[float, str], ...] = (
-    (0.0, "home (cables plugged)"),
-    (5.0, "settle at cables"),
-    (8.8, "grip cable 1"),
-    (15.2, "grip cable 2"),
-    (21.6, "grip cable 3 (all unplugged)"),
-    (28.0, "extract old server"),
-    (32.0, "carry old to cart"),
-    (37.0, "grip new from cart"),
-    (43.5, "install new in rack"),
-    (47.0, "home (demo end)"),
+    (0.0, "home"),
+    (5.0, "settled at cables"),
+    (10.5, "unplugged cable 1"),
+    (16.0, "unplugged cable 2"),
+    (22.0, "all cables unplugged"),
+    (27.0, "server slid out (base reversed)"),
+    (30.5, "rotating toward cart"),
+    (34.0, "server on cart"),
+    (39.5, "gripped new server"),
+    (47.5, "new server in rack"),
 )
 """Timestamps + labels of the moments a human reviewer cares about
 when judging the data-center demo. Pinned to the scene's task plan;

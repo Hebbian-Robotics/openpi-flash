@@ -66,6 +66,14 @@ def parse_menagerie_mesh(*parts: str) -> MenagerieMesh:
 
 MENAGERIE: Path = _resolve_menagerie()
 PIPER_XML: MenagerieXml = parse_menagerie_xml("agilex_piper", "piper.xml")
+# Universal Robots UR10e — 6-DoF revolute arm with 1.3 m reach. Used by
+# scenes/data_center.py as the bimanual workhorse; the upstream MJCF
+# ships standalone (no built-in gripper) so we attach a Robotiq 2F-85
+# at its `attachment_site` on `wrist_3_link`.
+UR10E_XML: MenagerieXml = parse_menagerie_xml("universal_robots_ur10e", "ur10e.xml")
+# Robotiq 2F-85 parallel-jaw gripper — tendon-coupled, single actuator
+# (`fingers_actuator`, ctrl 0..255). Mounts on the UR10e's wrist flange.
+ROBOTIQ_2F85_XML: MenagerieXml = parse_menagerie_xml("robotiq_2f85", "2f85.xml")
 FRANKA_SCENE_XML: MenagerieXml = parse_menagerie_xml("franka_emika_panda", "scene.xml")
 # PAL TIAGo single-arm: differential-drive base + torso lift. Used by
 # scenes/data_center.py as the mobile embodiment (its single arm gets stripped
