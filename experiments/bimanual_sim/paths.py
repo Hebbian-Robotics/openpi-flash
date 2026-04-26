@@ -84,3 +84,33 @@ D435I_XML: MenagerieXml = parse_menagerie_xml("realsense_d435i", "d435i.xml")
 # D405 wrist cam mesh lives inside ALOHA's asset dir. Referenced directly
 # (no separate D405 package in Menagerie).
 D405_MESH_STL: MenagerieMesh = parse_menagerie_mesh("aloha", "assets", "d405_solid.stl")
+
+# Stanford Mobile ALOHA body — combined chassis + lift column + top
+# platform extracted from the project-page CAD download. The original
+# STL ships as a single monolithic mesh with all four ViperX arms
+# attached; the four-arm subtrees are stripped (centroid-based filter,
+# see `tools/strip_aloha_arms.py`) leaving only the central rolling
+# platform. Units are MILLIMETRES — geom must scale by 1e-3 to compile
+# in our metres-everywhere scene. Vendored at `assets/mobile_aloha/`
+# so the demo is self-contained.
+_PROJECT_ROOT: Path = Path(__file__).resolve().parent
+_MOBILE_ALOHA_MESHES: Path = _PROJECT_ROOT / "assets" / "mobile_aloha"
+
+
+def _mobile_aloha_mesh(filename: str) -> MenagerieMesh:
+    """Resolve a vendored Mobile ALOHA mesh path; raise if missing.
+
+    Same parse-don't-validate pattern as the menagerie helpers — the
+    returned `MenagerieMesh` carries the proof the file exists.
+    """
+    path = _MOBILE_ALOHA_MESHES / filename
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"vendored Mobile ALOHA mesh not found: {path}. "
+            "Re-extract from the Stanford Mobile ALOHA project-page CAD "
+            "(see tools/strip_aloha_arms.py)."
+        )
+    return MenagerieMesh(path)
+
+
+MOBILE_ALOHA_STANFORD_BODY_STL: MenagerieMesh = _mobile_aloha_mesh("aloha_body_no_arms.stl")

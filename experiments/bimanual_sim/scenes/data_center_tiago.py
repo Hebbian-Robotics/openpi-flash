@@ -1,38 +1,39 @@
-"""Data-center server-swap scene — Mobile ALOHA base + UR10e + 2F-85.
+"""Data-center server-swap scene.
 
-A pair of UR10e arms with Robotiq 2F-85 grippers rides on a wheeled
-Mobile-ALOHA-style base parked in front of a rack. No torso lift —
-the UR10e's 1.3 m reach handles all z-motion through its joints.
+A bimanual Piper pair rides on a lift carriage attached to a (static) mobile
+base parked in front of a rack. The task plan runs through a full server swap:
 
-Task plan (same shape as the legacy TIAGo+Piper version, minus the
-lift-related steps):
-
-    home
+    home -> lift to cables
     -> unplug cable 1 (left arm)
     -> unplug cable 2 (right arm)
     -> unplug cable 3 (left arm)
-    -> reverse base
-    -> grip server handles bimanually
-    -> arm-retract pull-out (server slides out of rack)
-    -> rotate base + slide diagonally to cart
-    -> arm-extend lower onto cart bottom shelf
-    -> release on cart
-    -> bimanual grip new server on cart top
-    -> reverse path: rotate + slide back to rack
-    -> arm-extend slide into rack slot
-    -> seat in rack
+    -> both arms grab server handle rails, pull server out of rack
+    -> stow server in lower compartment (old_bin)
+    -> both arms grab replacement from upper compartment (new_bin)
+    -> slide new server into rack
     -> replug cables 1, 2, 3
+    -> retract lift, home both arms
 
-Robot pieces:
-  * `robots.mobile_aloha.load_mobile_aloha` — Stanford Mobile ALOHA
-    CAD silhouette with planar slide-x/slide-y/yaw joints, front
-    arm-mount sites, and a top-camera mount.
-  * `robots.ur10e.load_ur10e_with_gripper` — UR10e + 2F-85 namespaced
-    by side; the gripper sits under a `<side>/gripper/` sub-namescope
-    to avoid a `base` body collision.
+Novel in this scene compared to sink_bimanual:
+  * Pipers attached inside a nested body (lift_carriage) so a slide joint
+    raises/lowers arms + onboard compartments together.
+  * Scene-owned actuator ("lift") controlled via Step.aux_ctrl; IK freezes it
+    via `locked_joint_names=("lift",)` so the solver uses only the arm chain.
+  * Cable objects: 7-segment ball-jointed chains anchored to the rack,
+    terminating in a grippable connector block. Grasp the head to pull out.
+  * Three port shapes + colors (power/net/fiber) for visual distinction.
+  * Three cameras (top + 2 wrist) declared in MJCF for future EGL capture.
 
-Type-safety conventions match the legacy scene: ATTACHMENTS registry,
-StrEnum aux keys, CubeID-bounded grippable indices.
+Type-safety conventions:
+  * Attachment welds live in one registry (`ATTACHMENTS`) iterated by
+    `build_spec`, `_resolve_scene_ids`, and `apply_initial_state` — no more
+    three-way duplication of the same name list with the same active flags.
+  * Weld names are `AttachmentWeldName` (StrEnum) so typos are caught by ty.
+  * Aux actuator keys are `DataCenterAux` (StrEnum) for the same reason.
+  * Grippable objects are addressed by `CubeID` constructed through
+    `grippable_id("cable1_connector")` — the bounds check and the name-to-index
+    translation happen in one place, instead of scattered `_index_of(f"...")`
+    string-building at every call site.
 """
 
 from __future__ import annotations
@@ -51,29 +52,9 @@ from arm_handles import ArmHandles, ArmSide
 from cameras import CameraRole
 from ik import PositionOnly, solve_ik
 from paths import D405_MESH_STL, D435I_XML
-from robots.mobile_aloha import (
-    BASE_X_JOINT_NAME,
-    BASE_Y_JOINT_NAME,
-    BASE_YAW_JOINT_NAME,
-    LEFT_ARM_MOUNT_SITE,
-    RIGHT_ARM_MOUNT_SITE,
-    TOP_CAM_MOUNT_SITE,
-    load_mobile_aloha,
-)
-from robots.ur10e import load_ur10e_with_gripper
-from scene_base import (
-    CubeID,
-    GrippablePoseExpectation,
-    GripperState,
-    PhaseContract,
-    PhaseState,
-    Position3,
-    QaccSentinel,
-    Step,
-    TaskPhase,
-    WeldHoldInvariant,
-    make_cube_id,
-)
+from robots.piper import load_piper
+from robots.tiago import load_tiago
+from scene_base import CubeID, GripperState, Position3, Step, make_cube_id
 from scene_check import (
     AttachmentConstraint,
     CameraInvariant,
@@ -82,20 +63,19 @@ from scene_check import (
     TargetingCameraInvariant,
     WeldAttachment,
 )
-from scenes.data_center_layout import HOME_ARM_Q_BY_SIDE, IK_SEED_Q, LAYOUT
+from scenes.data_center_tiago_layout import HOME_ARM_Q, IK_SEED_Q, LAYOUT
 from welds import activate_attachment_weld
 
-NAME = "data_center"
+NAME = "data_center_tiago"
 # `ROBOT_KIND` is read by `runner.py` / `tools/_runtime.py` to pick the
 # right `arm_handles.get_arm_handles` branch + per-tick gripper-write
-# convention. UR10e + 2F-85 use 6 named joints + a single tendon-
-# driven `fingers_actuator` (ctrl 0..255).
-ROBOT_KIND = "ur10e"
-# Joints the IK solver must lock (not optimise) — the planar base
-# joints. Read by `tools/mj.py ik` and by `make_task_plan` via the
-# DataCenterAux enum below. Exposing as a module-level tuple lets
-# scene-agnostic IK tools share the same lock list across scenes.
-IK_LOCKED_JOINT_NAMES: tuple[str, ...] = ("base_x", "base_y", "base_yaw")
+# convention. The legacy TIAGo+Piper scene stays on the original
+# Piper 8-joint qpos layout.
+ROBOT_KIND = "piper"
+# Joints the IK solver must lock — TIAGo's torso lift is non-arm and
+# moves under aux control; locking it lets mink optimise only the
+# 6-DOF Piper arm chain.
+IK_LOCKED_JOINT_NAMES: tuple[str, ...] = ("torso_lift_joint",)
 ARM_PREFIXES: tuple[ArmSide, ...] = (ArmSide.LEFT, ArmSide.RIGHT)
 # Grippable objects addressable via Step.weld_activate / weld_deactivate.
 # Index order matters: the runner uses it as an int index into this list.
@@ -115,48 +95,33 @@ N_CUBES = len(GRIPPABLES)  # runner uses this to size ArmHandles.weld_ids
 class DataCenterAux(StrEnum):
     """Scene-owned (non-arm) actuators addressable via Step.aux_ctrl.
 
-    `BASE_X` / `BASE_Y` / `BASE_YAW` drive the 3-DOF planar joint
-    `robots.mobile_aloha.load_mobile_aloha` adds on `base_link`. The
-    carry choreography animates these so the robot can step back,
-    rotate to face the cart, place the server, and reverse back —
-    all via puppet-mode qpos writes. mink IK locks these three
-    joints so the planner uses only the arm chain.
+    `LIFT` maps directly to PAL TIAGo's upstream `torso_lift_joint` name so the
+    scene's aux-ctrl dispatch reaches the joint Menagerie already declares in
+    tiago.xml (we add only a position actuator on top).
 
-    No lift entry — the Mobile ALOHA base is lift-less, so all
-    z-motion is delegated to UR10e arm joints.
+    `BASE_X` / `BASE_Y` / `BASE_YAW` drive the 3-DOF planar joint
+    `robots.tiago.load_tiago` adds at `base_link`. Used by the carry
+    choreography so the robot can step back, rotate to face the cart,
+    place the server, and rotate back — all via puppet-mode qpos
+    writes. mink IK locks these three joints so the planner uses only
+    the arm chain.
     """
 
-    BASE_X = BASE_X_JOINT_NAME
-    BASE_Y = BASE_Y_JOINT_NAME
-    BASE_YAW = BASE_YAW_JOINT_NAME
+    LIFT = "torso_lift_joint"
+    BASE_X = "base_x"
+    BASE_Y = "base_y"
+    BASE_YAW = "base_yaw"
 
 
 AUX_ACTUATOR_NAMES: tuple[str, ...] = tuple(m.value for m in DataCenterAux)
-
-# Base qpos targets used by both phase contracts and task-plan steps.
-# `base_link` starts at world origin so qpos values equal world coords.
-BASE_PRE_EXTRACT = -0.10
-BASE_AT_CART_X = 0.25  # cart.center_x
-BASE_AT_CART_Y = -0.35
-YAW_TO_CART = -math.pi / 2.0
-
-
-def base_aux_targets(*, x: float, y: float, yaw: float) -> tuple[tuple[str, float], ...]:
-    """Canonical phase-boundary representation for planar base targets."""
-    return (
-        (DataCenterAux.BASE_X, x),
-        (DataCenterAux.BASE_Y, y),
-        (DataCenterAux.BASE_YAW, yaw),
-    )
-
 
 CAMERAS: tuple[tuple[str, CameraRole], ...] = (
     # Realsense D435i attached at the top of the camera pole. dm_control
     # namespaces names of attached subtrees with `<model>/`, so the camera
     # the d435i.xml declares as `d435i_cam` compiles as `top/d435i_cam`.
     ("top/d435i_cam", CameraRole.TOP),
-    # Wrist D405 cameras are added directly inside the UR10e subtree on
-    # `wrist_3_link` before attach so they pick up the side namespace
+    # Wrist D405 cameras are added directly inside the piper subtree
+    # (`{side}link6`) before attach so they pick up the piper's namespace
     # prefix. Result: `left/wrist_d405_cam`, `right/wrist_d405_cam`.
     ("left/wrist_d405_cam", CameraRole.WRIST),
     ("right/wrist_d405_cam", CameraRole.WRIST),
@@ -169,22 +134,22 @@ CAMERAS: tuple[tuple[str, CameraRole], ...] = (
 # startup with a clear message instead of as "the wrist view looks
 # wrong" days later in viser.
 CAMERA_INVARIANTS: tuple[CameraInvariant, ...] = (
-    # Top camera rides the D435i mesh body (`top/d435i`), attached to
-    # the Mobile ALOHA base via the camera-pole site. The base is the
-    # only moving body it sees; tracking `rack_frame` keeps the
-    # optical axis on the rack regardless of how the base rotates.
+    # Top camera rides the camera pole's mesh body (`top/d435i`), attached
+    # to the static `base_link` (not the moving torso_lift_link) so the
+    # view stays stable regardless of lift qpos. Targets `rack_frame`, so
+    # the optical axis tracks the rack as the robot's base rotates.
     TargetingCameraInvariant(
         name="top/d435i_cam",
         parent_body="top/d435i",
         targetbody="rack_frame",
         mode="targetbody",
     ),
-    # Wrist cams mount on each UR10e's `wrist_3_link` in FIXED mode.
-    # The 180°-x quat on the camera aligns its optical axis (-z) with
-    # link's +z (the gripper / TCP axis), so each wrist view always
-    # looks at whatever the arm is reaching for.
-    FixedCameraInvariant(name="left/wrist_d405_cam", parent_body="left/wrist_3_link"),
-    FixedCameraInvariant(name="right/wrist_d405_cam", parent_body="right/wrist_3_link"),
+    # Wrist cams mount on each arm's link6 (`left/link6`, `right/link6`)
+    # in FIXED mode. The 180°-x quat on the camera makes its optical
+    # axis (-z) align with link6's +z (the gripper axis), so each wrist
+    # view always looks at whatever the arm is reaching for.
+    FixedCameraInvariant(name="left/wrist_d405_cam", parent_body="left/link6"),
+    FixedCameraInvariant(name="right/wrist_d405_cam", parent_body="right/link6"),
 )
 
 
@@ -195,9 +160,8 @@ CAMERA_INVARIANTS: tuple[CameraInvariant, ...] = (
 # (scenes/data_center_layout.py). `LAYOUT` is the module-level default
 # instance; read positions via `LAYOUT.rack.front_face_x`,
 # `LAYOUT.server_world_pos_in_rack`, `LAYOUT.port_world_pos(i)`,
-# `LAYOUT.cable_anchor_world(i)`, etc. `HOME_ARM_Q_BY_SIDE` (a mapping
-# keyed by `ArmSide`) and `IK_SEED_Q` are re-exported from that
-# module for call-site convenience.
+# `LAYOUT.cable_anchor_world(i)`, etc. `HOME_ARM_Q` / `IK_SEED_Q` are
+# re-exported from that module for call-site convenience.
 #
 # World frame: origin at the robot's base centre on the floor, +x toward
 # rack, +y to the robot's right, +z up.
@@ -390,320 +354,6 @@ ATTACHMENTS: tuple[AttachmentConstraint, ...] = (
         body_a="new_server",
         body_b="rack_frame",
         initially_active=False,
-    ),
-)
-
-
-# --- Pose expectation helpers ----------------------------------------------
-# Re-derived from LAYOUT so a layout edit (rack moves, cart shifts)
-# updates the contracts in lockstep. Pose tolerance = 2 cm by default;
-# tighter for the rack server slot since the WELD pose-locks it.
-def _pose(name: str, position: Position3, *, tolerance_m: float = 0.02) -> GrippablePoseExpectation:
-    return GrippablePoseExpectation(
-        name=name,
-        position=(float(position[0]), float(position[1]), float(position[2])),
-        tolerance_m=tolerance_m,
-    )
-
-
-# Tolerances:
-#   * 10 mm for unwelded initial poses (untouched scene-reset bodies —
-#     no constraint solver drift to worry about).
-#   * 60 mm for post-weld poses. mjEQ_WELD's default solref/solimp pulls
-#     the body toward the target but doesn't pin it exactly — under
-#     gravity the welded body settles ~40-50 mm off target. 60 mm is
-#     comfortably above observed drift while still flagging the
-#     "server fell out of the rack entirely" case (~hundreds of mm).
-_SERVER_IN_RACK_POSE = _pose("server", LAYOUT.server_world_pos_in_rack, tolerance_m=0.01)
-_NEW_SERVER_ON_CART_TOP_POSE = _pose(
-    "new_server", LAYOUT.new_server_initial_world_pos, tolerance_m=0.01
-)
-_OLD_SERVER_ON_CART_BOTTOM_POSE = _pose(
-    "server", LAYOUT.old_server_stow_world_pos, tolerance_m=0.06
-)
-_NEW_SERVER_IN_RACK_POSE = _pose("new_server", LAYOUT.server_world_pos_in_rack, tolerance_m=0.06)
-
-
-# QACC sentinel — applies to every phase. The integrator must not raise
-# any new BADQACC warnings during a phase (max_increase=0). The cable-
-# replug phase's tendon equality is the most likely site of a blow-up;
-# attaching this everywhere cheaply protects every other phase too.
-_QACC_SENTINEL = QaccSentinel(max_increase=0)
-
-
-PHASE_CONTRACTS: tuple[PhaseContract, ...] = (
-    PhaseContract(
-        phase=TaskPhase.SETUP,
-        starts=PhaseState(
-            description=(
-                "Scene reset: old server in rack, new server on cart, "
-                "cables plugged into old server."
-            ),
-            active_attachments=(
-                AttachmentWeldName.PORT1_OLD,
-                AttachmentWeldName.PORT2_OLD,
-                AttachmentWeldName.PORT3_OLD,
-                AttachmentWeldName.SERVER_IN_RACK,
-                AttachmentWeldName.NEW_ON_CART_TOP,
-            ),
-            inactive_attachments=(
-                AttachmentWeldName.PORT1_NEW,
-                AttachmentWeldName.PORT2_NEW,
-                AttachmentWeldName.PORT3_NEW,
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_IN_RACK,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(_SERVER_IN_RACK_POSE, _NEW_SERVER_ON_CART_TOP_POSE),
-        ),
-        ends=PhaseState(
-            description="Both arms are at home and ready to disconnect old-server cables.",
-            active_attachments=(
-                AttachmentWeldName.PORT1_OLD,
-                AttachmentWeldName.PORT2_OLD,
-                AttachmentWeldName.PORT3_OLD,
-                AttachmentWeldName.SERVER_IN_RACK,
-                AttachmentWeldName.NEW_ON_CART_TOP,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(_SERVER_IN_RACK_POSE, _NEW_SERVER_ON_CART_TOP_POSE),
-        ),
-        invariants=(
-            _QACC_SENTINEL,
-            WeldHoldInvariant(name=AttachmentWeldName.SERVER_IN_RACK, must_be_active=True),
-            WeldHoldInvariant(name=AttachmentWeldName.NEW_ON_CART_TOP, must_be_active=True),
-        ),
-    ),
-    PhaseContract(
-        phase=TaskPhase.DISCONNECT_CABLES,
-        starts=PhaseState(
-            description=(
-                "Cables are seated in the old server; robot base remains at rack-facing origin."
-            ),
-            active_attachments=(
-                AttachmentWeldName.PORT1_OLD,
-                AttachmentWeldName.PORT2_OLD,
-                AttachmentWeldName.PORT3_OLD,
-                AttachmentWeldName.SERVER_IN_RACK,
-                AttachmentWeldName.NEW_ON_CART_TOP,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(_SERVER_IN_RACK_POSE, _NEW_SERVER_ON_CART_TOP_POSE),
-        ),
-        ends=PhaseState(
-            description="All cable connectors are free, old server remains welded in the rack.",
-            active_attachments=(
-                AttachmentWeldName.SERVER_IN_RACK,
-                AttachmentWeldName.NEW_ON_CART_TOP,
-            ),
-            inactive_attachments=(
-                AttachmentWeldName.PORT1_OLD,
-                AttachmentWeldName.PORT2_OLD,
-                AttachmentWeldName.PORT3_OLD,
-                AttachmentWeldName.PORT1_NEW,
-                AttachmentWeldName.PORT2_NEW,
-                AttachmentWeldName.PORT3_NEW,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(_SERVER_IN_RACK_POSE, _NEW_SERVER_ON_CART_TOP_POSE),
-        ),
-        invariants=(
-            _QACC_SENTINEL,
-            # The server / new_server must stay pinned while the arms work
-            # the cables — a momentary weld flicker would let either body
-            # fall out of its rack/cart slot and the demo never recovers.
-            WeldHoldInvariant(name=AttachmentWeldName.SERVER_IN_RACK, must_be_active=True),
-            WeldHoldInvariant(name=AttachmentWeldName.NEW_ON_CART_TOP, must_be_active=True),
-        ),
-    ),
-    PhaseContract(
-        phase=TaskPhase.REMOVE_OLD_SERVER,
-        starts=PhaseState(
-            description="Old server is cable-free and still pinned in the rack.",
-            active_attachments=(
-                AttachmentWeldName.SERVER_IN_RACK,
-                AttachmentWeldName.NEW_ON_CART_TOP,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(_SERVER_IN_RACK_POSE, _NEW_SERVER_ON_CART_TOP_POSE),
-        ),
-        ends=PhaseState(
-            description="Old server is grasped by the left arm and pulled clear of the rack.",
-            active_attachments=(AttachmentWeldName.NEW_ON_CART_TOP,),
-            inactive_attachments=(AttachmentWeldName.SERVER_IN_RACK,),
-            base_aux=base_aux_targets(x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0),
-            # New server still on the cart; the old one is travelling
-            # with the arm so its pose isn't pinned.
-            expected_grippable_poses=(_NEW_SERVER_ON_CART_TOP_POSE,),
-        ),
-        invariants=(
-            _QACC_SENTINEL,
-            # Don't drop the new server while extracting the old one.
-            WeldHoldInvariant(name=AttachmentWeldName.NEW_ON_CART_TOP, must_be_active=True),
-        ),
-    ),
-    PhaseContract(
-        phase=TaskPhase.STOW_OLD_SERVER,
-        starts=PhaseState(
-            description="Old server is held clear of the rack at the pre-extract base pose.",
-            active_attachments=(AttachmentWeldName.NEW_ON_CART_TOP,),
-            inactive_attachments=(AttachmentWeldName.SERVER_IN_RACK,),
-            base_aux=base_aux_targets(x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0),
-            expected_grippable_poses=(_NEW_SERVER_ON_CART_TOP_POSE,),
-        ),
-        ends=PhaseState(
-            description="Old server is pinned on the cart bottom shelf and released.",
-            active_attachments=(
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_ON_CART_TOP,
-            ),
-            inactive_attachments=(AttachmentWeldName.SERVER_IN_RACK,),
-            base_aux=base_aux_targets(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART),
-            expected_grippable_poses=(
-                _OLD_SERVER_ON_CART_BOTTOM_POSE,
-                _NEW_SERVER_ON_CART_TOP_POSE,
-            ),
-        ),
-        invariants=(
-            _QACC_SENTINEL,
-            WeldHoldInvariant(name=AttachmentWeldName.NEW_ON_CART_TOP, must_be_active=True),
-        ),
-    ),
-    PhaseContract(
-        phase=TaskPhase.RETRIEVE_NEW_SERVER,
-        starts=PhaseState(
-            description="New server is pinned on the cart top shelf; old server is stowed below.",
-            active_attachments=(
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_ON_CART_TOP,
-            ),
-            base_aux=base_aux_targets(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART),
-            expected_grippable_poses=(
-                _OLD_SERVER_ON_CART_BOTTOM_POSE,
-                _NEW_SERVER_ON_CART_TOP_POSE,
-            ),
-        ),
-        ends=PhaseState(
-            description="New server is grasped by the left arm and lifted clear of the cart.",
-            active_attachments=(AttachmentWeldName.SERVER_ON_CART_BOTTOM,),
-            inactive_attachments=(AttachmentWeldName.NEW_ON_CART_TOP,),
-            base_aux=base_aux_targets(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART),
-            # Old server still on the cart bottom; new is in arm grasp.
-            expected_grippable_poses=(_OLD_SERVER_ON_CART_BOTTOM_POSE,),
-        ),
-        invariants=(
-            _QACC_SENTINEL,
-            WeldHoldInvariant(name=AttachmentWeldName.SERVER_ON_CART_BOTTOM, must_be_active=True),
-        ),
-    ),
-    PhaseContract(
-        phase=TaskPhase.INSTALL_NEW_SERVER,
-        starts=PhaseState(
-            description="New server is held above the cart and ready to return to the rack.",
-            active_attachments=(AttachmentWeldName.SERVER_ON_CART_BOTTOM,),
-            inactive_attachments=(AttachmentWeldName.NEW_ON_CART_TOP,),
-            base_aux=base_aux_targets(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART),
-            expected_grippable_poses=(_OLD_SERVER_ON_CART_BOTTOM_POSE,),
-        ),
-        ends=PhaseState(
-            description="New server is pinned in the rack slot and released.",
-            active_attachments=(
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_IN_RACK,
-            ),
-            inactive_attachments=(AttachmentWeldName.NEW_ON_CART_TOP,),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(
-                _OLD_SERVER_ON_CART_BOTTOM_POSE,
-                _NEW_SERVER_IN_RACK_POSE,
-            ),
-        ),
-        invariants=(
-            _QACC_SENTINEL,
-            WeldHoldInvariant(name=AttachmentWeldName.SERVER_ON_CART_BOTTOM, must_be_active=True),
-        ),
-    ),
-    PhaseContract(
-        phase=TaskPhase.RECONNECT_CABLES,
-        starts=PhaseState(
-            description="New server is in the rack and all cable connectors are free.",
-            active_attachments=(
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_IN_RACK,
-            ),
-            inactive_attachments=(
-                AttachmentWeldName.PORT1_NEW,
-                AttachmentWeldName.PORT2_NEW,
-                AttachmentWeldName.PORT3_NEW,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(
-                _OLD_SERVER_ON_CART_BOTTOM_POSE,
-                _NEW_SERVER_IN_RACK_POSE,
-            ),
-        ),
-        ends=PhaseState(
-            description="All cables are plugged into the new server.",
-            active_attachments=(
-                AttachmentWeldName.PORT1_NEW,
-                AttachmentWeldName.PORT2_NEW,
-                AttachmentWeldName.PORT3_NEW,
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_IN_RACK,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(
-                _OLD_SERVER_ON_CART_BOTTOM_POSE,
-                _NEW_SERVER_IN_RACK_POSE,
-            ),
-        ),
-        invariants=(
-            # The cable-replug phase is the highest-risk site for QACC
-            # blow-ups (tendon equality + connector contact). The
-            # sentinel + the two pin-holds together catch the regression
-            # we previously hit when soft-solref was missing.
-            _QACC_SENTINEL,
-            WeldHoldInvariant(name=AttachmentWeldName.NEW_IN_RACK, must_be_active=True),
-            WeldHoldInvariant(name=AttachmentWeldName.SERVER_ON_CART_BOTTOM, must_be_active=True),
-        ),
-    ),
-    PhaseContract(
-        phase=TaskPhase.RESET,
-        starts=PhaseState(
-            description="Task completed; new server is installed and cabled.",
-            active_attachments=(
-                AttachmentWeldName.PORT1_NEW,
-                AttachmentWeldName.PORT2_NEW,
-                AttachmentWeldName.PORT3_NEW,
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_IN_RACK,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(
-                _OLD_SERVER_ON_CART_BOTTOM_POSE,
-                _NEW_SERVER_IN_RACK_POSE,
-            ),
-        ),
-        ends=PhaseState(
-            description="Arms return home while installed/cabled state remains pinned.",
-            active_attachments=(
-                AttachmentWeldName.PORT1_NEW,
-                AttachmentWeldName.PORT2_NEW,
-                AttachmentWeldName.PORT3_NEW,
-                AttachmentWeldName.SERVER_ON_CART_BOTTOM,
-                AttachmentWeldName.NEW_IN_RACK,
-            ),
-            base_aux=base_aux_targets(x=0.0, y=0.0, yaw=0.0),
-            expected_grippable_poses=(
-                _OLD_SERVER_ON_CART_BOTTOM_POSE,
-                _NEW_SERVER_IN_RACK_POSE,
-            ),
-        ),
-        invariants=(
-            _QACC_SENTINEL,
-            WeldHoldInvariant(name=AttachmentWeldName.NEW_IN_RACK, must_be_active=True),
-            WeldHoldInvariant(name=AttachmentWeldName.SERVER_ON_CART_BOTTOM, must_be_active=True),
-        ),
     ),
 )
 
@@ -996,11 +646,12 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
     operates against the standard mujoco.MjModel/MjData API. dm_control
     is used only as the assembly layer.
     """
-    # Mobile ALOHA mobile-base — wheeled chassis with planar slide-x /
-    # slide-y / hinge-yaw joints, a vertical column for arm mounting,
-    # and a top-camera pole at the rear. No lift; arms do all
-    # z-motion through their own joints.
-    root = load_mobile_aloha()
+    # Start from PAL TIAGo (wheels + torso_lift_link). `robots.tiago.load_tiago`
+    # strips the upstream single arm + head, removes the `reference` freejoint
+    # (required for mink IK — see that module's docstring), prunes orphan
+    # contact excludes, and clears the model name so TIAGo's body names
+    # compile unprefixed.
+    root = load_tiago()
 
     # Physics options. mjcf maps these to the `<option>` element's attributes.
     root.option.integrator = "implicitfast"
@@ -1084,47 +735,73 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
         rgba=[0.78, 0.78, 0.80, 1.0],
     )
 
+    # Reference to the moving lift body — Piper arms attach via sites on it.
+    torso = root.find("body", "torso_lift_link")
+    base = root.find("body", "base_link")
+
     # ---------------------- Service cart (new + old server stowage) -----------
     _add_cart(root, "visual")
 
-    # ---------------------- UR10e arms on the Mobile ALOHA front posts -------
-    # `load_mobile_aloha` already provides `left_arm_mount` /
-    # `right_arm_mount` sites on the front CAD mount posts and a
-    # `top_cam_mount` site above the body. We attach the bimanual
-    # UR10e + 2F-85 pair at the arm-mount sites and the D435i at the
-    # camera-mount site.
-    #
-    # For each side: load the UR10e+2F-85 root, add a TCP site + D405
-    # wrist mesh + D405 camera on `wrist_3_link` BEFORE attach so the
-    # added elements pick up the side namespace prefix. UR10e's
-    # `attachment_site` (where the 2F-85 mounts) sits 0 m beyond the
-    # wrist 3 flange; TCP at 0.20 m past that puts the grip-pad
-    # midpoint between the 2F-85's open fingers.
-    TCP_OFFSET_FROM_WRIST = [0.0, 0.20, 0.0]  # 2F-85's lens-of-grip along wrist +y
-    WRIST_MESH_OFFSET = [0.04, 0.0, 0.0]
-    arm_mount_sites = {
-        ArmSide.LEFT: LEFT_ARM_MOUNT_SITE,
-        ArmSide.RIGHT: RIGHT_ARM_MOUNT_SITE,
-    }
-    for side in ARM_PREFIXES:
-        ur10e_root = load_ur10e_with_gripper(side)
-        wrist3 = ur10e_root.find("body", "wrist_3_link")
-        if wrist3 is None:
-            raise RuntimeError(f"ur10e {side!r} missing 'wrist_3_link' after load")
-        # TCP site — IK / weld code addresses this by `f"{side}tcp"`
-        # (e.g. `"left/tcp"`); inside the UR namescope the local name
-        # is `tcp`. Placed 20 cm forward of wrist_3_link along the
-        # tool +y axis (UR10e convention), which lands roughly at the
-        # midpoint between the 2F-85's open finger pads.
-        wrist3.add(
+    # ---------------------- Shoulder bar bridging torso to arm bases ----------
+    # The Piper bases mount at ±arm_mount.y_abs (= 30 cm) outboard of the
+    # torso centreline, but TIAGo's torso shell is much narrower than that
+    # — without a connecting geom the arms read as "floating in mid-air
+    # next to the robot". Add a shoulder bar on the torso at arm_mount.z
+    # (the arms' attach height) spanning the full ±arm_mount.y_abs so
+    # there's a visible structure reaching out from the body to each arm
+    # mount point.
+    arm_mount_cfg = LAYOUT.arm_mount
+    SHOULDER_HALF_Z = 0.07  # 14 cm tall bar
+    SHOULDER_OVERHANG = 0.08  # bar extends past each arm base by this much
+    torso.add(
+        "geom",
+        dclass="visual",
+        name="shoulder_bar",
+        type="box",
+        # Positioned so the bar's TOP face sits at arm_mount.z (where the
+        # arm bases attach) — arms read as "mounted on top of the bar"
+        # rather than embedded in it. Centre is one half-height below.
+        pos=[arm_mount_cfg.x, 0.0, arm_mount_cfg.z - SHOULDER_HALF_Z],
+        # Half-extents in y bumped past arm_mount.y_abs by SHOULDER_OVERHANG
+        # so the bar reads as a substantial cross-piece extending outboard
+        # of the arm mount points, not just spanning between them.
+        size=[
+            0.07,
+            arm_mount_cfg.y_abs + SHOULDER_OVERHANG,
+            SHOULDER_HALF_Z,
+        ],  # 14 cm x 76 cm x 14 cm
+        # Anodised-aluminium grey, distinct from TIAGo's white shell so
+        # the shoulder bar reads as its own structural element bridging
+        # torso ↔ arm bases.
+        rgba=[0.35, 0.36, 0.38, 1.0],
+    )
+
+    # ---------------------- Piper arms on the torso --------------------------
+    # Pre-build each piper, add its TCP site + wrist camera + wrist mesh
+    # INSIDE the piper subtree so they pick up the namespace prefix
+    # (`left/tcp`, `left/wrist_d405_cam`), THEN attach via a site on the
+    # torso. `arm_mount.x = 0` keeps the shoulder pivot at the torso
+    # centreline; arm_mount.z = -0.15 is the natural shoulder height;
+    # ±arm_mount.y_abs places each arm on its respective side.
+    arm_mount = LAYOUT.arm_mount
+    WRIST_MESH_OFFSET = [0.0, 0.0, 0.03]
+    for side, y_sign in ((ArmSide.LEFT, -1.0), (ArmSide.RIGHT, 1.0)):
+        piper = load_piper(side)
+        link6 = piper.find("body", "link6")
+        if link6 is None:
+            raise RuntimeError(f"piper {side!r} missing 'link6' after load")
+        # TCP site — IK / weld code addresses this by `f"{side}tcp"` (e.g.
+        # `"left/tcp"`); inside the piper namescope the local name is `tcp`.
+        link6.add(
             "site",
             name="tcp",
-            pos=TCP_OFFSET_FROM_WRIST,
+            pos=[0.0, 0.0, 0.14],
             size=[0.006, 0.006, 0.006],
         )
-        # Wrist D405 camera mesh — small visual stub so the camera
-        # body reads as physically present on the UR's tool flange.
-        wrist3.add(
+        # Wrist camera mesh — orientation chosen so the mount face sits
+        # against link6 and the lens points sideways (matches how a real
+        # D405 mounts on an Aloha-style Piper wrist).
+        link6.add(
             "geom",
             dclass="visual",
             type="mesh",
@@ -1132,40 +809,62 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
             pos=WRIST_MESH_OFFSET,
             rgba=[0.12, 0.12, 0.14, 1.0],
         )
-        # FIXED-mode camera oriented so its optical axis points along
-        # the same direction as the tool axis (UR10e's tool +y), so
-        # the wrist view always looks at whatever the arm is reaching
-        # for. The 90°-x quat brings cam -z into +y alignment.
-        wrist3.add(
+        # FIXED-mode camera with a 180°-x quat so the optical axis (cam -z)
+        # aligns with link6 +z (the gripper / TCP axis) — the wrist view
+        # always looks at whatever the arm is reaching for, symmetrically
+        # for both sides.
+        link6.add(
             "camera",
             name="wrist_d405_cam",
-            pos=[0.0, 0.10, 0.0],
-            quat=[0.7071067811865476, -0.7071067811865476, 0.0, 0.0],
+            pos=[0.0, 0.0, 0.08],
+            quat=[0.0, 1.0, 0.0, 0.0],
             mode="fixed",
             fovy=87.0,
         )
-        mount_site_name = arm_mount_sites[side]
-        mount_site = root.find("site", mount_site_name)
-        if mount_site is None:
-            raise RuntimeError(
-                f"mobile-aloha mount site {mount_site_name!r} not found — "
-                "did robots/mobile_aloha.py change site names?"
-            )
-        mount_site.attach(ur10e_root)
+        mount_site = torso.add(
+            "site",
+            name=f"{side.rstrip('/')}_arm_mount",
+            pos=[arm_mount.x, y_sign * arm_mount.y_abs, arm_mount.z],
+            quat=[1.0, 0.0, 0.0, 0.0],
+            size=[0.001, 0.001, 0.001],
+        )
+        mount_site.attach(piper)
 
-    # ---------------------- Top camera (D435i) on the camera pole ------------
-    # `load_mobile_aloha` already added the pole geom + the
-    # `top_cam_mount` site. We just attach the D435i sub-MJCF here.
-    # The TARGETBODY camera is added AFTER `rack_frame` is built
-    # (below); mjcf resolves cross-namescope refs by Element identity,
-    # and the rack_frame Element doesn't exist yet at this point.
+    # ---------------------- Top camera pole (static, above the arms) --------
+    # TIAGo's head is stripped in `load_tiago` (we don't actuate it). We
+    # replace it with a tall static pole rigidly welded to `base_link` (not
+    # the moving `torso_lift_link`) so the top camera view stays stable
+    # regardless of the torso lift qpos.
+    TOP_POLE_X = -0.20
+    base.add(
+        "geom",
+        dclass="visual",
+        name="top_camera_pole",
+        type="box",
+        pos=[TOP_POLE_X, 0.0, 0.74],
+        size=[0.025, 0.025, 0.74],
+        rgba=[0.32, 0.32, 0.35, 1.0],
+    )
+    # D435i's native mesh frame has local +z as the long camera-body axis
+    # and local +x as the lens direction. The 90°-x quat below rotates
+    # local +z → world -y so the body lies horizontal; lens still points
+    # +x (toward the rack). Mesh is ~2.6 cm tall after rotation; attach
+    # z = 1.485 puts the bottom flush with the pole top (allowlisted in
+    # ALLOWED_STATIC_OVERLAPS).
     top_d435i = mjcf.from_path(str(D435I_XML))
     top_d435i.model = "top"
     top_d435i_body = top_d435i.find("body", "d435i")
-    top_cam_mount = root.find("site", TOP_CAM_MOUNT_SITE)
-    if top_cam_mount is None:
-        raise RuntimeError(f"mobile-aloha mount site {TOP_CAM_MOUNT_SITE!r} not found")
+    top_cam_mount = base.add(
+        "site",
+        name="top_cam_mount",
+        pos=[TOP_POLE_X, 0.0, 1.485],
+        quat=[0.7071067811865476, 0.7071067811865476, 0.0, 0.0],
+        size=[0.001, 0.001, 0.001],
+    )
     top_cam_mount.attach(top_d435i)
+    # The TARGETBODY camera is added AFTER `rack_frame` is built (below);
+    # mjcf resolves cross-namescope refs by Element identity, and the
+    # rack_frame Element doesn't exist yet at this point.
 
     # ---------------------- Rack (static, open front) ------------------------
     rack_cfg = LAYOUT.rack
@@ -1293,11 +992,26 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
         )
         cable_mount.attach(cable_root)
 
-    # ---------------------- Actuators: planar base only ------------------
-    # No torso lift on the Mobile ALOHA base — UR10e's 1.3 m reach
-    # handles all z-motion. Only the three planar mobility joints get
-    # position actuators; the runner mirrors aux_ctrl writes into both
-    # qpos and ctrl so the actuators don't fight stale targets.
+    # ---------------------- Actuator: torso lift -------------------------
+    # Position actuator on TIAGo's existing torso_lift_joint. TIAGo's
+    # upstream MJCF ships only the joint (no actuator); we add the position
+    # servo here. kp=80000 / kv=800 keeps the torso pinned to its commanded
+    # qpos under puppet mode (qpos is direct-written each tick anyway, so
+    # the actuator's job is mostly cosmetic — but the gain is calibrated
+    # for a possible PD-mode revert).
+    root.actuator.add(
+        "position",
+        name=DataCenterAux.LIFT,
+        joint=DataCenterAux.LIFT,
+        kp=80000.0,
+        kv=800.0,
+        ctrllimited="true",
+        ctrlrange=[0.0, LAYOUT.tiago.lift_range],
+    )
+    # Position actuators for the planar base joints — same puppet-mode
+    # convention as the lift (qpos written each tick; ctrl mirrors it).
+    # Generous ctrlrange so the carry choreography can park the robot
+    # well off-axis from the rack without saturating.
     root.actuator.add(
         "position",
         name=DataCenterAux.BASE_X,
@@ -1329,11 +1043,10 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
     # ---------------------- Welds (grasp + attachment) ---------------------
     # Grasp welds: (arm, grippable_object). All inactive at start. Names
     # must match `grasp_weld(side, i)` — `get_arm_handles` looks them up
-    # via the same `<side>_grasp_cube<i>` formula. The wrist body for
-    # UR10e is `<side>wrist_3_link` (vs Piper's `<side>link6`); the
-    # 2F-85 mounts here, and held objects pin to this body.
+    # via the same `<side>_grasp_cube<i>` formula. The body lookups
+    # use slash-namespaced piper bodies (`left/link6`).
     for side in ARM_PREFIXES:
-        hand = f"{side}wrist_3_link"
+        hand = f"{side}link6"
         side_us = side.replace("/", "_")
         for i, obj_name in enumerate(GRIPPABLES):
             root.equality.add(
@@ -1382,14 +1095,12 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
                 relpose=[0, 0, 0, 1, 0, 0, 0],
             )
 
-    # Exclude fragile contacts that would otherwise thrash. UR10e's
-    # `base` body sits flush against the Mobile ALOHA mount column
-    # (the column geom doesn't actually contact-collide because it's
-    # `dclass="visual"`, but the exclude is cheap insurance against a
-    # future class swap).
-    root.contact.add("exclude", body1="base_link", body2="left/base")
-    root.contact.add("exclude", body1="base_link", body2="right/base")
-    root.contact.add("exclude", body1="base_link", body2="new_server")
+    # Exclude fragile contacts that would otherwise thrash. dm_control
+    # namespacing renamed the piper roots to `left/base_link`,
+    # `right/base_link`.
+    root.contact.add("exclude", body1="torso_lift_link", body2="left/base_link")
+    root.contact.add("exclude", body1="torso_lift_link", body2="right/base_link")
+    root.contact.add("exclude", body1="torso_lift_link", body2="new_server")
     root.contact.add("exclude", body1="rack_frame", body2="server")
 
     # Compile via XML round-trip so the returned (model, data) are owned
@@ -1408,12 +1119,14 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
 
 @dataclass
 class _SceneIds:
+    lift_actuator_id: int
     server_body_id: int
     new_server_body_id: int
     rack_body_id: int
-    # Mobile ALOHA chassis body — used by `apply_initial_state` to
-    # zero the planar joint qpos at scene reset.
-    base_body_id: int
+    # The moving TIAGo body the bins hang off (renamed from `carriage_body_id`
+    # now that the mobile embodiment is TIAGo rather than our hand-built
+    # `lift_carriage`).
+    torso_body_id: int
     cable_connector_body_ids: list[int]
     # Attachment welds by enum member — derived from ATTACHMENTS, so it always
     # matches the spec in build_spec.
@@ -1428,11 +1141,12 @@ def _resolve_scene_ids(model: mujoco.MjModel) -> _SceneIds:
         return mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_EQUALITY, name)
 
     return _SceneIds(
+        lift_actuator_id=mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, DataCenterAux.LIFT),
         server_body_id=body("server"),
         new_server_body_id=body("new_server"),
         rack_body_id=body("rack_frame"),
-        base_body_id=body("base_link"),
-        cable_connector_body_ids=[body(f"cable{i + 1}/connector") for i in range(3)],
+        torso_body_id=body("torso_lift_link"),
+        cable_connector_body_ids=[body(f"cable{i + 1}_connector") for i in range(3)],
         attachment_eq={a.name: eq(a.name) for a in ATTACHMENTS},
     )
 
@@ -1448,23 +1162,27 @@ def apply_initial_state(
     arms: dict[ArmSide, ArmHandles],
     cube_body_ids: list[int],
 ) -> None:
-    """Reset to home arm pose, planar base at origin, and weld defaults."""
+    """Reset to home arm pose, lift at LAYOUT.lift.home, welds at spec defaults."""
     mujoco.mj_resetData(model, data)
     ids = _resolve_scene_ids(model)
     for arm in arms.values():
-        home_q = HOME_ARM_Q_BY_SIDE[arm.side]
         for i, idx in enumerate(arm.arm_qpos_idx):
-            data.qpos[idx] = home_q[i]
-        # Start with gripper CLOSED at home. For UR10e + 2F-85 the
-        # 2F-85's tendon-coupled finger linkage is driven via the
-        # `fingers_actuator` only — no per-finger qpos writes
-        # (`arm_handles.get_arm_handles` returns a 6-long
-        # qpos_idx for ur10e, dropping the Piper finger slides).
-        data.ctrl[arm.act_arm_ids] = home_q
+            data.qpos[idx] = HOME_ARM_Q[i]
+        # Start with gripper CLOSED — matches the Menagerie piper.png
+        # reference pose where the two finger plates sit together as a
+        # wedge. The arms open the gripper just before reaching for a
+        # cable/handle (see the "approach" steps in `make_task_plan`).
+        data.qpos[arm.qpos_idx[6]] = arm.gripper_closed
+        data.qpos[arm.qpos_idx[7]] = -arm.gripper_closed
+        data.ctrl[arm.act_arm_ids] = HOME_ARM_Q
         data.ctrl[arm.act_gripper_id] = arm.gripper_closed
         # All grasp welds start inactive.
         for eq_id in arm.weld_ids:
             data.eq_active[eq_id] = 0
+    # Lift at home
+    data.ctrl[ids.lift_actuator_id] = LAYOUT.lift.home
+    lift_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.LIFT)
+    data.qpos[model.jnt_qposadr[lift_jnt]] = LAYOUT.lift.home
     # Planar base at origin (x=0, y=0, yaw=0). The carry choreography
     # animates these via aux_ctrl during the cart sequence.
     for jname in (DataCenterAux.BASE_X, DataCenterAux.BASE_Y, DataCenterAux.BASE_YAW):
@@ -1522,7 +1240,7 @@ def _snap_factory(
     data: mujoco.MjData,
     arm: ArmHandles,
 ) -> Callable[[Position3], tuple[np.ndarray, float]]:
-    """Position-only IK closure, locking the planar base joints.
+    """Position-only IK closure, locking the lift so the solver can't use it.
 
     The returned `snap(target)` raises `RuntimeError` when the residual
     exceeds `_IK_POSITION_TOL_M` — so an unreachable waypoint aborts plan
@@ -1543,18 +1261,19 @@ def _snap_factory(
             np.asarray(target_pos, dtype=float),
             orientation=PositionOnly(),
             seed_q=q_seed["current"],
-            # Lock the planar base joints — the solver only uses the
-            # 6-DOF UR10e arm chain. Without these locks, mink could
-            # satisfy a world-frame target by sliding/rotating the
-            # whole robot, which produces plans that don't match what
-            # runtime delivers.
+            # Lock the lift AND the planar base — the solver only uses the
+            # 6-DOF arm chain. Without these locks, mink could satisfy a
+            # world-frame target by sliding/rotating the whole robot,
+            # which produces plans that don't match what runtime delivers.
             locked_joint_names=(
+                DataCenterAux.LIFT,
                 DataCenterAux.BASE_X,
                 DataCenterAux.BASE_Y,
                 DataCenterAux.BASE_YAW,
             ),
-            # DAQP over ProxQP: ProxQP raises NoSolutionFound on some
-            # waypoints — DAQP finds a feasible solve in the same cases.
+            # DAQP over ProxQP: ProxQP raises NoSolutionFound on some of the
+            # long-reach TIAGo-mounted targets — DAQP finds a feasible solve
+            # (sub-mm error) in the same cases.
             solver="daqp",
         )
         if err > _IK_POSITION_TOL_M:
@@ -1576,6 +1295,13 @@ def _port_world_pos(port_idx: int) -> Position3:
     """World position of port geom `port_idx` on the rack-mounted server.
     Thin wrapper around `LAYOUT.port_world_pos` kept for legacy call sites."""
     return LAYOUT.port_world_pos(port_idx)
+
+
+def _torso_world_z(lift_qpos: float) -> float:
+    """World z of torso_lift_link at a given lift qpos. Mirrors TIAGo's
+    upstream `<body name="torso_lift_link" pos="-0.062 0 0.8885">` plus the
+    slide displacement."""
+    return LAYOUT.tiago.torso_world_z(lift_qpos)
 
 
 def _other_side(side: ArmSide) -> ArmSide:
@@ -1604,11 +1330,11 @@ def make_task_plan(
         following step releases the grasp.
     """
     scripts: dict[ArmSide, list[Step]] = {side: [] for side in ARM_PREFIXES}
+    lift_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.LIFT)
 
     def push_both(
         label: str,
         duration: float,
-        phase: TaskPhase,
         aux: Mapping[Any, float] | None = None,
         gripper: GripperState = "closed",
     ) -> None:
@@ -1616,10 +1342,9 @@ def make_task_plan(
             scripts[side].append(
                 Step(
                     label=label,
-                    arm_q=HOME_ARM_Q_BY_SIDE[side].copy(),
+                    arm_q=HOME_ARM_Q.copy(),
                     gripper=gripper,
                     duration=duration,
-                    phase=phase,
                     aux_ctrl=aux,
                 )
             )
@@ -1628,7 +1353,6 @@ def make_task_plan(
         other_side: ArmSide,
         label_prefix: str,
         durations: list[float],
-        phase: TaskPhase,
         aux: Mapping[Any, float] | None = None,
     ) -> None:
         """Append matching idle-at-home steps on the other arm's timeline."""
@@ -1636,10 +1360,9 @@ def make_task_plan(
             scripts[other_side].append(
                 Step(
                     label=f"{label_prefix}.{i + 1}",
-                    arm_q=HOME_ARM_Q_BY_SIDE[other_side].copy(),
+                    arm_q=HOME_ARM_Q.copy(),
                     gripper="open",
                     duration=d,
-                    phase=phase,
                     aux_ctrl=aux,
                 )
             )
@@ -1648,22 +1371,23 @@ def make_task_plan(
     base_y_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.BASE_Y)
     base_yaw_jnt = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, DataCenterAux.BASE_YAW)
 
-    def seed_at_base(
+    def seed_at_lift(
+        lift_qpos: float,
         base_x: float = 0.0,
         base_y: float = 0.0,
         base_yaw: float = 0.0,
     ) -> tuple:
-        """Reset state, set base at the given planar pose, return fresh
-        per-arm `snap` closures.
+        """Reset state, set carriage at lift_qpos and base at the given
+        planar pose, return fresh per-arm `snap` closures.
 
         IK targets are world-fixed (cable port world pos, cart shelf
-        world pos, etc.). When the base is moved/rotated, the arms
-        have a different reach geometry to satisfy those targets — so
-        each phase of the carry choreography seeds with its own base
-        pose before running snap. There's no lift on the Mobile ALOHA
-        base; the UR10e arm covers all z-motion via its joints.
+        world pos, etc.). When the base is moved/rotated, the arms have a
+        different reach geometry to satisfy those targets — so each phase
+        of the carry choreography seeds with its own base pose before
+        running snap.
         """
         apply_initial_state(model, data, arms, cube_body_ids)
+        data.qpos[model.jnt_qposadr[lift_jnt]] = lift_qpos
         data.qpos[model.jnt_qposadr[base_x_jnt]] = base_x
         data.qpos[model.jnt_qposadr[base_y_jnt]] = base_y
         data.qpos[model.jnt_qposadr[base_yaw_jnt]] = base_yaw
@@ -1673,12 +1397,18 @@ def make_task_plan(
             _snap_factory(model, data, arms[ArmSide.RIGHT]),
         )
 
-    # 0) Open: both arms at home, base at origin. No lift to ramp on
-    # this robot, so we just hold home for a beat then dive into the
-    # cable-unplug phase. The "settle" hold lets the gripper finish
-    # closing visually before the first approach step.
-    push_both("home", 1.0, TaskPhase.SETUP)
-    push_both("settle at home", 1.0, TaskPhase.SETUP)
+    # 0) Open: both at home, lift down. Then raise lift to cable height and
+    # hold the target for a beat so the TIAGo torso PD has time to track the
+    # step before the IK-planned approach starts. User report: "when it
+    # starts up the telescopic lift pushes the whole platform up which makes
+    # the robot arms not aligned with the cable" — the IK was planned with
+    # lift qpos = LIFT_CABLES, but the commanded ctrl was still settling
+    # when the first approach step began, so the arm landed above the actual
+    # cable position. Bumping the ramp duration to 3 s plus a 1 s hold gives
+    # the physical lift time to catch up with ctrl before arms start moving.
+    push_both("home", 1.0, aux={DataCenterAux.LIFT: LAYOUT.lift.home})
+    push_both("lift to cables", 3.0, aux={DataCenterAux.LIFT: LAYOUT.lift.cables})
+    push_both("settle at cables", 1.0, aux={DataCenterAux.LIFT: LAYOUT.lift.cables})
 
     # Port → its "*_old" and "*_new" attachment welds. Indexed by port_idx.
     _PORT_OLD = (
@@ -1698,10 +1428,10 @@ def make_task_plan(
         cable_grasp_weld = grasp_weld(active_side, cable_id)
         port_weld = _PORT_OLD[port_idx]
 
-        snap_l, snap_r = seed_at_base()
+        snap_l, snap_r = seed_at_lift(LAYOUT.lift.cables)
         snap = snap_l if active_side == ArmSide.LEFT else snap_r
 
-        # Read the connector body's world pose AFTER seed_at_base so the IK
+        # Read the connector body's world pose AFTER seed_at_lift so the IK
         # target actually lands on the connector — not SERVER_FRONT_X minus a
         # few cm, which was the MVP approximation and left TCP 2-3 cm short
         # of the connector geom (user report: "arms never actually touch the
@@ -1732,47 +1462,33 @@ def make_task_plan(
         q_at, _ = snap(at_conn)
         q_pulled, _ = snap(pulled)
 
-        # Step durations leave time for the grip-weld to settle the
-        # connector at the cable-tip pose before the pull-free step
-        # yanks it. No aux_ctrl needed — base stays at origin and
-        # there's no lift on this robot.
+        aux = {DataCenterAux.LIFT: LAYOUT.lift.cables}
+        # Step durations include dedicated settle time before grip: the
+        # piper PD with its stock ±100 N·m forcerange takes ~1.5 s to
+        # converge from a 1-rad-magnitude step change against the arm's
+        # own gravity, and the grasp weld freezes whatever relative pose
+        # link6 has at grip time — so an under-settled approach step
+        # would weld the connector 3-5 cm off-centre and then drag it
+        # around at that offset for the rest of the sequence.
         active_steps = [
-            Step(
-                f"approach c{port_idx + 1}",
-                q_approach,
-                "open",
-                2.0,
-                phase=TaskPhase.DISCONNECT_CABLES,
-            ),
-            Step(
-                f"at connector c{port_idx + 1}",
-                q_at,
-                "open",
-                1.6,
-                phase=TaskPhase.DISCONNECT_CABLES,
-            ),
+            Step(f"approach c{port_idx + 1}", q_approach, "open", 2.0, aux_ctrl=aux),
+            Step(f"at connector c{port_idx + 1}", q_at, "open", 1.6, aux_ctrl=aux),
             Step(
                 f"grip + unplug c{port_idx + 1}",
                 q_at,
                 "closed",
                 0.5,
-                phase=TaskPhase.DISCONNECT_CABLES,
+                aux_ctrl=aux,
                 attach_activate=(cable_grasp_weld,),
                 attach_deactivate=(port_weld,),
             ),
-            Step(
-                f"pull c{port_idx + 1} free",
-                q_pulled,
-                "closed",
-                1.0,
-                phase=TaskPhase.DISCONNECT_CABLES,
-            ),
+            Step(f"pull c{port_idx + 1} free", q_pulled, "closed", 1.0, aux_ctrl=aux),
             Step(
                 f"release c{port_idx + 1}",
                 q_pulled,
                 "open",
                 0.4,
-                phase=TaskPhase.DISCONNECT_CABLES,
+                aux_ctrl=aux,
                 attach_deactivate=(cable_grasp_weld,),
             ),
         ]
@@ -1781,7 +1497,7 @@ def make_task_plan(
             _other_side(active_side),
             f"wait c{port_idx + 1}",
             [s.duration for s in active_steps],
-            TaskPhase.DISCONNECT_CABLES,
+            aux=aux,
         )
 
     plan_unplug(0, ArmSide.LEFT)
@@ -1802,14 +1518,14 @@ def make_task_plan(
     #   b) Slide out (base_x: 0 → -0.30, arms held)
     #   c) Rotate to face cart (base_yaw: 0 → -π/2, arms held)
     #   d) Slide toward cart (base_y: 0 → -0.30, arms held)
-    #   e) Arm-only descent so server reaches cart shelf height
+    #   e) Lower the lift so server reaches cart shelf height
     #   f) Release: server pinned to cart via SERVER_ON_CART_BOTTOM
     #
     # Inverse for new-server pickup + install in rack.
 
-    # Base poses for each phase of the carry. The two UR10e arms are
-    # mounted on the front CAD posts; both can grip the same server
-    # only when the robot's centre x keeps the rack handles in reach.
+    # Base poses for each phase of the carry. The robot's two Piper arms
+    # are 60 cm apart on the shoulder bar; both can grip the same server
+    # only when the robot's centre x is within ~20 cm of the server's x.
     # Cart server lives at world (0.25, -0.65), so we park the robot
     # centre at (0.25, -0.35) facing -y to get both arms within reach.
     # Extraction needs to back the robot far enough that the server's
@@ -1829,34 +1545,37 @@ def make_task_plan(
     #      own axis. From the side it looks like the arm V-shape's
     #      top angle (elbow) closing as the forearm folds back toward
     #      the upper arm.
-    # All base_x values below are PASSED TO data.qpos[base_x_idx], not
-    # absolute world coords. The mobile-aloha root parks `base_link` at
-    # world x = -0.65 (so the body's front platform clears the rack —
-    # see `robots/mobile_aloha.py`), so qpos=0 is the rack-facing pose
-    # at world x = -0.65 and a target world x of W requires qpos =
-    # W + 0.65.
-    def base_aux(*, x: float, y: float, yaw: float) -> dict[str, float]:
-        return dict(base_aux_targets(x=x, y=y, yaw=yaw))
+    BASE_PRE_EXTRACT = -0.10
+    BASE_AT_CART_X = 0.25  # robot centre over cart's x (= cart.center_x)
+    BASE_AT_CART_Y = -0.35  # robot 30 cm north of cart, facing it
+    YAW_TO_CART = -math.pi / 2.0  # 90° clockwise about +z (face world -y)
 
-    aux_at_rack = base_aux(x=0.0, y=0.0, yaw=0.0)
+    def base_aux(*, lift: float, x: float, y: float, yaw: float) -> dict[str, float]:
+        return {
+            DataCenterAux.LIFT: lift,
+            DataCenterAux.BASE_X: x,
+            DataCenterAux.BASE_Y: y,
+            DataCenterAux.BASE_YAW: yaw,
+        }
+
+    aux_at_rack = base_aux(lift=LAYOUT.lift.server, x=0.0, y=0.0, yaw=0.0)
     # After the pre-extract reverse, the robot stays at this offset
     # through the grip + arm-retract phases.
-    aux_pre_extract = base_aux(x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0)
-    aux_facing_cart = base_aux(x=BASE_PRE_EXTRACT, y=0.0, yaw=YAW_TO_CART)
-    aux_at_cart = base_aux(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART)
-    # `aux_at_cart_low` no longer drops a lift — instead the "lower
-    # onto cart" step re-IKs the arm to a target ~25 cm below
-    # slot_z (the cart bottom shelf height). Base pose stays at the
-    # cart waypoint; only the arm joints fold further to lower the
-    # server onto the shelf.
-    aux_at_cart_low = base_aux(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART)
+    aux_pre_extract = base_aux(lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0)
+    aux_facing_cart = base_aux(lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=YAW_TO_CART)
+    aux_at_cart = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
+    aux_at_cart_low = base_aux(
+        lift=LAYOUT.lift.stow, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
 
     # IK for the extraction is solved with the base already reversed
     # by BASE_PRE_EXTRACT — the arm pose in world coords is what
     # changes during the pull (TCP slides in world -x at constant z),
     # so the arm joints have to be solved against the reversed base
     # geometry to land the right world-frame TCP.
-    snap_l, snap_r = seed_at_base(base_x=BASE_PRE_EXTRACT)
+    snap_l, snap_r = seed_at_lift(LAYOUT.lift.server, base_x=BASE_PRE_EXTRACT)
     handle_x = LAYOUT.server_front_x - 0.015
     handle_L = np.array([handle_x, -0.15, LAYOUT.server.slot_z])
     handle_R = np.array([handle_x, +0.15, LAYOUT.server.slot_z])
@@ -1870,34 +1589,6 @@ def make_task_plan(
     qR_app, _ = snap_r(approach_R)
     qR_at, _ = snap_r(handle_R)
     qR_out, _ = snap_r(pulled_out_R)
-
-    # Re-IK at the cart waypoint (base translated + rotated -π/2): the
-    # arm extends downward at the rotated base to deposit the server
-    # on the cart's bottom shelf. Without a lift, this descent has to
-    # come from the arm joints alone. Targets are chosen so the TCP
-    # lands ~25 cm below where it would be if the arm held qL_out at
-    # the same base — i.e., the carried server descends to the cart
-    # bottom shelf height (z ≈ 0.645) while staying centred over the
-    # cart in world x/y.
-    snap_l_cart_low, snap_r_cart_low = seed_at_base(
-        base_x=BASE_AT_CART_X, base_y=BASE_AT_CART_Y, base_yaw=YAW_TO_CART
-    )
-    cart_lower_target_L = np.array(
-        [
-            float(LAYOUT.old_server_stow_world_pos[0]) - 0.20,
-            float(LAYOUT.old_server_stow_world_pos[1]) - 0.15,
-            float(LAYOUT.old_server_stow_world_pos[2]),
-        ]
-    )
-    cart_lower_target_R = np.array(
-        [
-            float(LAYOUT.old_server_stow_world_pos[0]) - 0.20,
-            float(LAYOUT.old_server_stow_world_pos[1]) + 0.15,
-            float(LAYOUT.old_server_stow_world_pos[2]),
-        ]
-    )
-    qL_lower, _ = snap_l_cart_low(cart_lower_target_L)
-    qR_lower, _ = snap_r_cart_low(cart_lower_target_R)
 
     # SERVER GRASPING POLICY: only the LEFT arm welds to the server.
     # Activating two grasp welds (one per arm) over-constrains the
@@ -1916,34 +1607,18 @@ def make_task_plan(
             # reverse so they don't wave around.
             Step(
                 "reverse base L",
-                HOME_ARM_Q_BY_SIDE[ArmSide.LEFT].copy(),
+                HOME_ARM_Q.copy(),
                 "closed",
                 1.2,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
                 aux_ctrl=aux_pre_extract,
             ),
-            Step(
-                "to handle L",
-                qL_app,
-                "open",
-                1.8,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
-                aux_ctrl=aux_pre_extract,
-            ),
-            Step(
-                "at handle L",
-                qL_at,
-                "open",
-                0.8,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
-                aux_ctrl=aux_pre_extract,
-            ),
+            Step("to handle L", qL_app, "open", 1.8, aux_ctrl=aux_pre_extract),
+            Step("at handle L", qL_at, "open", 0.8, aux_ctrl=aux_pre_extract),
             Step(
                 "grip server L",
                 qL_at,
                 "closed",
                 0.6,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
                 aux_ctrl=aux_pre_extract,
                 attach_activate=(grasp_L,),
                 attach_deactivate=(AttachmentWeldName.SERVER_IN_RACK,),
@@ -1955,54 +1630,20 @@ def make_task_plan(
             # closes as the elbow flexes. Server slides 40 cm in world
             # -x and is fully clear of the rack opening. Base
             # stationary throughout this phase.
-            Step(
-                "pull server out L",
-                qL_out,
-                "closed",
-                2.8,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
-                aux_ctrl=aux_pre_extract,
-            ),
+            Step("pull server out L", qL_out, "closed", 2.8, aux_ctrl=aux_pre_extract),
             # Rotate body in place to face cart (yaw 0 → -π/2). Arm pose
             # held; server rotates with the robot.
-            Step(
-                "rotate to cart",
-                qL_out,
-                "closed",
-                2.5,
-                phase=TaskPhase.STOW_OLD_SERVER,
-                aux_ctrl=aux_facing_cart,
-            ),
+            Step("rotate to cart", qL_out, "closed", 2.5, aux_ctrl=aux_facing_cart),
             # Slide diagonally toward cart (base x: 0 → 0.25, y: 0 → -0.35).
-            Step(
-                "slide to cart",
-                qL_out,
-                "closed",
-                2.0,
-                phase=TaskPhase.STOW_OLD_SERVER,
-                aux_ctrl=aux_at_cart,
-            ),
-            # Arm-only descent (no lift on this base). The arm
-            # transitions from qL_out → qL_lower at the cart waypoint,
-            # extending downward through the elbow/shoulder so the
-            # held server lands on the cart's bottom shelf.
-            Step(
-                "lower onto cart",
-                qL_lower,
-                "closed",
-                1.5,
-                phase=TaskPhase.STOW_OLD_SERVER,
-                aux_ctrl=aux_at_cart_low,
-            ),
+            Step("slide to cart", qL_out, "closed", 2.0, aux_ctrl=aux_at_cart),
+            # Drop the lift to descend the server onto the cart's bottom shelf.
+            Step("lower onto cart", qL_out, "closed", 1.5, aux_ctrl=aux_at_cart_low),
             # Release: pin server at canonical cart-shelf pose; drop grasp.
-            # Arm stays at qL_lower (already over cart shelf) — the
-            # weld snaps the canonical pose, then the next phase repos.
             Step(
                 "release on cart L",
-                qL_lower,
+                qL_out,
                 "open",
                 0.8,
-                phase=TaskPhase.STOW_OLD_SERVER,
                 aux_ctrl=aux_at_cart_low,
                 attach_activate_at=(
                     (
@@ -2023,95 +1664,39 @@ def make_task_plan(
         [
             Step(
                 "reverse base R",
-                HOME_ARM_Q_BY_SIDE[ArmSide.RIGHT].copy(),
+                HOME_ARM_Q.copy(),
                 "closed",
                 1.2,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
                 aux_ctrl=aux_pre_extract,
             ),
-            Step(
-                "to handle R",
-                qR_app,
-                "open",
-                1.8,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
-                aux_ctrl=aux_pre_extract,
-            ),
-            Step(
-                "at handle R",
-                qR_at,
-                "open",
-                0.8,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
-                aux_ctrl=aux_pre_extract,
-            ),
-            Step(
-                "hold handle R",
-                qR_at,
-                "open",
-                0.6,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
-                aux_ctrl=aux_pre_extract,
-            ),
-            Step(
-                "pull server out R",
-                qR_out,
-                "open",
-                2.8,
-                phase=TaskPhase.REMOVE_OLD_SERVER,
-                aux_ctrl=aux_pre_extract,
-            ),
-            Step(
-                "rotate R",
-                qR_out,
-                "open",
-                2.5,
-                phase=TaskPhase.STOW_OLD_SERVER,
-                aux_ctrl=aux_facing_cart,
-            ),
-            Step(
-                "slide to cart R",
-                qR_out,
-                "open",
-                2.0,
-                phase=TaskPhase.STOW_OLD_SERVER,
-                aux_ctrl=aux_at_cart,
-            ),
-            Step(
-                "lower onto cart R",
-                qR_lower,
-                "open",
-                1.5,
-                phase=TaskPhase.STOW_OLD_SERVER,
-                aux_ctrl=aux_at_cart_low,
-            ),
-            Step(
-                "release R",
-                qR_lower,
-                "open",
-                0.8,
-                phase=TaskPhase.STOW_OLD_SERVER,
-                aux_ctrl=aux_at_cart_low,
-            ),
+            Step("to handle R", qR_app, "open", 1.8, aux_ctrl=aux_pre_extract),
+            Step("at handle R", qR_at, "open", 0.8, aux_ctrl=aux_pre_extract),
+            Step("hold handle R", qR_at, "open", 0.6, aux_ctrl=aux_pre_extract),
+            Step("pull server out R", qR_out, "open", 2.8, aux_ctrl=aux_pre_extract),
+            Step("rotate R", qR_out, "open", 2.5, aux_ctrl=aux_facing_cart),
+            Step("slide to cart R", qR_out, "open", 2.0, aux_ctrl=aux_at_cart),
+            Step("lower onto cart R", qR_out, "open", 1.5, aux_ctrl=aux_at_cart_low),
+            Step("release R", qR_out, "open", 0.8, aux_ctrl=aux_at_cart_low),
         ]
     )
 
     # 3) New server pickup from cart top + install in rack via reverse
     # path. Robot is currently at base = (-BASE_BACK, BASE_AT_CART_Y,
     # YAW_TO_CART) facing the cart. We:
-    #   a) Re-IK both arms from the cart waypoint to cart-top height.
+    #   a) Lift up to cart-top height (lift.pick_new).
     #   b) Re-IK both arms onto new_server's handles at the cart top.
     #   c) Grip new server.
     #   d) Slide back from cart (base_y: -0.30 → 0).
     #   e) Rotate back (base_yaw: -π/2 → 0).
     #   f) Slide forward to rack (base_x: -BASE_BACK → 0).
     #   g) Re-IK the slot insert pose.
-    #   h) Slide server in at rack slot height.
+    #   h) Slide server in (lift up to server height).
     #   i) Release: pin via NEW_IN_RACK.
     #
     # IK for the cart-top grip is solved at the rotated base pose so the
     # grip handles map to world coords correctly.
-    snap_l_cart, snap_r_cart = seed_at_base(
+    snap_l_cart, snap_r_cart = seed_at_lift(
+        LAYOUT.lift.pick_new,
         base_x=BASE_AT_CART_X,
         base_y=BASE_AT_CART_Y,
         base_yaw=YAW_TO_CART,
@@ -2133,13 +1718,19 @@ def make_task_plan(
     new_server_id = grippable_id("new_server")
     grasp_new_L = grasp_weld(ArmSide.LEFT, new_server_id)
 
-    aux_pick_at_cart = base_aux(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART)
-    aux_carry_at_cart = base_aux(x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART)
-    # During the new-server install the base mirrors the extract:
-    # stays at BASE_PRE_EXTRACT so the same qL_out / qL_at arm poses
-    # (solved against that base) describe the slide-in symmetrically.
-    aux_carry_facing_cart = base_aux(x=BASE_PRE_EXTRACT, y=0.0, yaw=YAW_TO_CART)
-    aux_carry_back = base_aux(x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0)
+    aux_pick_at_cart = base_aux(
+        lift=LAYOUT.lift.pick_new, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
+    aux_carry_at_cart = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_AT_CART_X, y=BASE_AT_CART_Y, yaw=YAW_TO_CART
+    )
+    # During the new-server install the base mirrors the extract: stays
+    # at BASE_PRE_EXTRACT so the same qL_out / qL_at arm poses (solved
+    # against that base) describe the slide-in motion symmetrically.
+    aux_carry_facing_cart = base_aux(
+        lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=YAW_TO_CART
+    )
+    aux_carry_back = base_aux(lift=LAYOUT.lift.server, x=BASE_PRE_EXTRACT, y=0.0, yaw=0.0)
 
     # Install motion is the mirror of extract: arm starts at qL_out
     # (server held in front of rack) and extends to qL_at (server slid
@@ -2149,83 +1740,39 @@ def make_task_plan(
 
     scripts[ArmSide.LEFT].extend(
         [
-            Step(
-                "to cart top L",
-                qL_napp,
-                "open",
-                1.6,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
-                aux_ctrl=aux_pick_at_cart,
-            ),
-            Step(
-                "at cart top L",
-                qL_ngrip,
-                "open",
-                0.8,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
-                aux_ctrl=aux_pick_at_cart,
-            ),
+            Step("to cart top L", qL_napp, "open", 1.6, aux_ctrl=aux_pick_at_cart),
+            Step("at cart top L", qL_ngrip, "open", 0.8, aux_ctrl=aux_pick_at_cart),
             Step(
                 "grip new L",
                 qL_ngrip,
                 "closed",
                 0.6,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
                 aux_ctrl=aux_pick_at_cart,
                 attach_activate=(grasp_new_L,),
                 attach_deactivate=(AttachmentWeldName.NEW_ON_CART_TOP,),
             ),
-            # Arm-only lift off cart shelf (no torso lift on this
-            # base) — pull the arm back up to the same elevation it
-            # held while sliding to the cart, so the held server
-            # clears the cart top before the body starts retreating.
+            # Lift up off cart shelf (raise lift, hold arm pose).
+            Step("lift off cart L", qL_ngrip, "closed", 1.5, aux_ctrl=aux_carry_at_cart),
+            # Slide back from cart.
+            Step("slide back from cart L", qL_ngrip, "closed", 2.0, aux_ctrl=aux_carry_facing_cart),
+            # Rotate back to face rack.
+            Step("rotate to rack L", qL_ngrip, "closed", 2.5, aux_ctrl=aux_carry_back),
+            # Re-pose arm to "out" — server now held in front of robot,
+            # ready to slide into the rack. Mirror of post-extract pose.
             Step(
-                "lift off cart L",
+                "ready to insert L",
                 qL_out,
                 "closed",
                 1.5,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
-                aux_ctrl=aux_carry_at_cart,
-            ),
-            # Slide back from cart.
-            Step(
-                "slide back from cart L",
-                qL_out,
-                "closed",
-                2.0,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_carry_facing_cart,
-            ),
-            # Rotate back to face rack.
-            Step(
-                "rotate to rack L",
-                qL_out,
-                "closed",
-                2.5,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
                 aux_ctrl=aux_carry_back,
             ),
             # ARM-EXTEND slide-in: TCP traces a horizontal line at constant
             # z=slot_z, moving from "out" (-x) to "at handle" (+x). Server
             # slides into the rack slot — exact reverse of extract pull.
-            Step(
-                "slide into rack L",
-                qL_at,
-                "closed",
-                2.0,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_carry_back,
-            ),
+            Step("slide into rack L", qL_at, "closed", 2.0, aux_ctrl=aux_carry_back),
             # Robot rolls forward to base origin so the slot/server pose
             # matches the canonical world position before the weld pins.
-            Step(
-                "roll forward L",
-                qL_at,
-                "closed",
-                1.0,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_at_rack,
-            ),
+            Step("roll forward L", qL_at, "closed", 1.0, aux_ctrl=aux_at_rack),
             # Release: pin new_server at canonical rack pose, drop grasp.
             # Arm stays at qL_at (TCP at handle) — server is already in
             # the slot from the slide-in step; the weld just snaps the
@@ -2235,7 +1782,6 @@ def make_task_plan(
                 qL_at,
                 "open",
                 0.8,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
                 aux_ctrl=aux_at_rack,
                 attach_activate_at=(
                     (
@@ -2254,78 +1800,16 @@ def make_task_plan(
     )
     scripts[ArmSide.RIGHT].extend(
         [
-            Step(
-                "to cart top R",
-                qR_napp,
-                "open",
-                1.6,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
-                aux_ctrl=aux_pick_at_cart,
-            ),
-            Step(
-                "at cart top R",
-                qR_ngrip,
-                "open",
-                0.8,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
-                aux_ctrl=aux_pick_at_cart,
-            ),
-            Step(
-                "grip new R",
-                qR_ngrip,
-                "open",
-                0.6,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
-                aux_ctrl=aux_pick_at_cart,
-            ),
-            Step(
-                "lift off cart R",
-                qR_out,
-                "open",
-                1.5,
-                phase=TaskPhase.RETRIEVE_NEW_SERVER,
-                aux_ctrl=aux_carry_at_cart,
-            ),
-            Step(
-                "slide back R2",
-                qR_out,
-                "open",
-                2.0,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_carry_facing_cart,
-            ),
-            Step(
-                "rotate to rack R",
-                qR_out,
-                "open",
-                2.5,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_carry_back,
-            ),
-            Step(
-                "slide into rack R",
-                qR_at,
-                "open",
-                2.0,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_carry_back,
-            ),
-            Step(
-                "roll forward R",
-                qR_at,
-                "open",
-                1.0,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_at_rack,
-            ),
-            Step(
-                "seat in rack R",
-                qR_at,
-                "open",
-                0.8,
-                phase=TaskPhase.INSTALL_NEW_SERVER,
-                aux_ctrl=aux_at_rack,
-            ),
+            Step("to cart top R", qR_napp, "open", 1.6, aux_ctrl=aux_pick_at_cart),
+            Step("at cart top R", qR_ngrip, "open", 0.8, aux_ctrl=aux_pick_at_cart),
+            Step("grip new R", qR_ngrip, "open", 0.6, aux_ctrl=aux_pick_at_cart),
+            Step("lift off cart R", qR_ngrip, "open", 1.5, aux_ctrl=aux_carry_at_cart),
+            Step("slide back R2", qR_ngrip, "open", 2.0, aux_ctrl=aux_carry_facing_cart),
+            Step("rotate to rack R", qR_ngrip, "open", 2.5, aux_ctrl=aux_carry_back),
+            Step("ready to insert R", qR_out, "open", 1.5, aux_ctrl=aux_carry_back),
+            Step("slide into rack R", qR_at, "open", 2.0, aux_ctrl=aux_carry_back),
+            Step("roll forward R", qR_at, "open", 1.0, aux_ctrl=aux_at_rack),
+            Step("seat in rack R", qR_at, "open", 0.8, aux_ctrl=aux_at_rack),
         ]
     )
 
@@ -2335,7 +1819,7 @@ def make_task_plan(
         cable_grasp_weld = grasp_weld(active_side, cable_id)
         port_weld_new = _PORT_NEW[port_idx]
 
-        snap_l, snap_r = seed_at_base()
+        snap_l, snap_r = seed_at_lift(LAYOUT.lift.cables)
         snap = snap_l if active_side == ArmSide.LEFT else snap_r
 
         # After unplug, cable was released at "pulled" pose = port - 14 cm
@@ -2354,35 +1838,24 @@ def make_task_plan(
         q_a, _ = snap(approach)
         q_s, _ = snap(seated)
 
+        aux = {DataCenterAux.LIFT: LAYOUT.lift.cables}
         active_steps = [
-            Step(
-                f"to c{port_idx + 1}",
-                q_regrip,
-                "open",
-                1.2,
-                phase=TaskPhase.RECONNECT_CABLES,
-            ),
+            Step(f"to c{port_idx + 1}", q_regrip, "open", 1.2, aux_ctrl=aux),
             Step(
                 f"grip c{port_idx + 1}",
                 q_regrip,
                 "closed",
                 0.5,
-                phase=TaskPhase.RECONNECT_CABLES,
+                aux_ctrl=aux,
                 attach_activate=(cable_grasp_weld,),
             ),
-            Step(
-                f"approach port {port_idx + 1}",
-                q_a,
-                "closed",
-                1.0,
-                phase=TaskPhase.RECONNECT_CABLES,
-            ),
+            Step(f"approach port {port_idx + 1}", q_a, "closed", 1.0, aux_ctrl=aux),
             Step(
                 f"plug port {port_idx + 1}",
                 q_s,
                 "closed",
                 0.7,
-                phase=TaskPhase.RECONNECT_CABLES,
+                aux_ctrl=aux,
                 attach_activate=(port_weld_new,),
             ),
             Step(
@@ -2390,7 +1863,7 @@ def make_task_plan(
                 q_s,
                 "open",
                 0.4,
-                phase=TaskPhase.RECONNECT_CABLES,
+                aux_ctrl=aux,
                 attach_deactivate=(cable_grasp_weld,),
             ),
         ]
@@ -2399,7 +1872,7 @@ def make_task_plan(
             _other_side(active_side),
             f"wait replug{port_idx + 1}",
             [s.duration for s in active_steps],
-            TaskPhase.RECONNECT_CABLES,
+            aux=aux,
         )
 
     plan_replug(0, ArmSide.LEFT)
@@ -2407,7 +1880,7 @@ def make_task_plan(
     plan_replug(2, ArmSide.LEFT)
 
     # 5) Return home
-    push_both("return home", 1.6, TaskPhase.RESET)
+    push_both("return home", 1.6, aux={DataCenterAux.LIFT: LAYOUT.lift.home})
 
     for side in ARM_PREFIXES:
         print(f"  [{side}] {len(scripts[side])} steps planned")

@@ -136,7 +136,7 @@ def update_frustum_widgets(
     if not handles:
         return
 
-    wsi = handles[0].handle._impl.api._websock_interface  # noqa: SLF001
+    wsi = handles[0].handle._impl.api._websock_interface
     buffer_push = wsi.get_message_buffer().push
 
     set_pos_msg = SetPositionMessage
@@ -161,7 +161,7 @@ def update_frustum_widgets(
                 float(quat_buf[2]),
                 float(quat_buf[3]),
             )
-            impl = fh.handle._impl  # noqa: SLF001 — viser-internal fast path
+            impl = fh.handle._impl
             impl.position[:] = pos_tuple
             impl.wxyz[:] = wxyz_tuple
             name = impl.name

@@ -7,7 +7,7 @@ actuator parameters via dm_control.mjcf attribute set, then attaches the
 piper subtree at `mount_site`.
 
 Why we override: upstream ships `kp=80 N·m/rad kv=5 forcerange=±100` on
-joints 1–3, tuned for an empty wrist. Our scene carries a wrist camera
+joints 1-3, tuned for an empty wrist. Our scene carries a wrist camera
 payload and plans far-reach cable poses where gravity torque on joint 2
 reaches ~8 N·m; at the default PD that lands ~0.55 rad of steady-state
 droop (~28 cm of TCP offset). The override stays additive — we don't
@@ -63,9 +63,9 @@ class PiperConfig:
 
 # Default gain profile used by the data-center scene. Calibrated to
 # eliminate gravity droop on loaded cable-reach poses:
-#   * kp bumped ~60× over upstream's 80 N·m/rad so kp·err doesn't saturate
+#   * kp bumped ~60x over upstream's 80 N·m/rad so kp·err doesn't saturate
 #     at modest tracking error.
-#   * kv ≈ 1.2× critical damping (2·√(kp·I)) for each joint's effective
+#   * kv ≈ 1.2x critical damping (2·√(kp·I)) for each joint's effective
 #     inertia — same damping ratio upstream uses, just at a stiffer kp.
 #     Over-damping (an earlier kv=150 try) asymptoted slowly; under-damping
 #     introduces audible oscillation at the PD step-response.
@@ -114,7 +114,7 @@ def _assert_menagerie_shape(piper: mjcf.RootElement, config: PiperConfig) -> Non
 
 def load_piper(
     side: ArmSide,
-    config: PiperConfig = PiperConfig(),  # noqa: B008 — frozen dataclass, no shared state
+    config: PiperConfig = PiperConfig(),
 ) -> mjcf.RootElement:
     """Load Menagerie's Piper, set the dm_control namespace prefix from
     `side`, and apply the gain/forcerange overrides per `config`.

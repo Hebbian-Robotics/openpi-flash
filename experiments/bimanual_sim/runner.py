@@ -33,6 +33,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import mujoco
 import numpy as np
@@ -41,10 +43,13 @@ import viser
 # Make sibling modules importable regardless of the invoking cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from arm_handles import ArmHandles, ArmSide, get_arm_handles
+from arm_handles import ArmHandles, ArmSide, arm_joint_suffixes, get_arm_handles
 from cameras import CameraRole, add_frustum_widgets, update_frustum_widgets
-from scene_base import Step
+from phase_guard import PhaseContractViolation, PhaseRuntimeGuard
+from rerun_stream import RerunStreamer
+from scene_base import PhaseContract, Step
 from scene_check import AttachmentConstraint, CameraInvariant, check_scene, print_schematic
+from teleop import TeleopController
 from viser_render import build_viser_scene, update_viser
 from welds import (
     activate_attachment_weld,
@@ -69,7 +74,7 @@ class ArmTimelineState:
     t: float = 0.0
 
 
-def _load_scene(name: str):
+def _load_scene(name: str) -> ModuleType:
     return importlib.import_module(f"scenes.{name}")
 
 
@@ -77,7 +82,7 @@ def _collect_cube_body_ids(model: mujoco.MjModel, n_cubes: int) -> list[int]:
     return [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"cube{i}") for i in range(n_cubes)]
 
 
-def _extract_attachment_constraints(scene) -> tuple[AttachmentConstraint, ...]:
+def _extract_attachment_constraints(scene: Any) -> tuple[AttachmentConstraint, ...]:
     """Read a scene's `ATTACHMENTS` tuple — already a tuple of the
     `WeldAttachment | ConnectAttachment` union from `scene_check`. Scenes
     without the registry get an empty tuple, and `check_scene` silently
@@ -116,7 +121,77 @@ def main() -> None:
             "layout edit to confirm the scene still passes invariants."
         ),
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "if the scene exposes PHASE_CONTRACTS, raise the moment any "
+            "contract (boundary expectation or in-phase invariant) fails. "
+            "Without --strict, contract failures are collected and printed "
+            "at exit but the demo keeps running."
+        ),
+    )
+    parser.add_argument(
+        "--rerun-port",
+        type=int,
+        default=None,
+        help=(
+            "open a rerun gRPC server on localhost:PORT and stream qpos / "
+            "body transforms / phase events live. For EC2→laptop streaming, "
+            "SSH-tunnel with `-L PORT:localhost:PORT` then connect a local "
+            "rerun viewer to `rerun+http://localhost:PORT`."
+        ),
+    )
+    parser.add_argument(
+        "--rerun-connect",
+        type=str,
+        default=None,
+        help=(
+            "push events to an already-running rerun viewer at URL "
+            "(e.g. `rerun+http://laptop.local:9876`). Mutually exclusive "
+            "with --rerun-port."
+        ),
+    )
+    parser.add_argument(
+        "--rerun-rrd",
+        type=Path,
+        default=None,
+        help="write the same rerun stream to a `.rrd` file for offline replay.",
+    )
+    parser.add_argument(
+        "--rerun-camera-every",
+        type=int,
+        default=0,
+        help=(
+            "if >0, log named-camera frames every N render ticks (e.g. 5 → "
+            "9 Hz at the default 45 Hz render rate). 0 disables camera "
+            "logging — recommended over slow SSH tunnels."
+        ),
+    )
+    parser.add_argument(
+        "--teleop",
+        action="store_true",
+        help=(
+            "skip the scripted task plan; instead expose viser drag handles "
+            "for each arm's TCP and run live IK. Use the in-browser GUI to "
+            "capture keyframes per phase and save them to JSON for later "
+            "replay via --play-recording."
+        ),
+    )
+    parser.add_argument(
+        "--play-recording",
+        type=Path,
+        default=None,
+        help=(
+            "load a teleop JSON recording (saved by --teleop) and replay "
+            "it as the task plan. Mutually exclusive with --teleop."
+        ),
+    )
     args = parser.parse_args()
+    if args.teleop and args.play_recording is not None:
+        parser.error("--teleop and --play-recording are mutually exclusive")
+    if args.rerun_port is not None and args.rerun_connect is not None:
+        parser.error("--rerun-port and --rerun-connect are mutually exclusive")
 
     scene = _load_scene(args.scene)
     print(f"Building scene: {getattr(scene, 'NAME', args.scene)}")
@@ -129,9 +204,13 @@ def main() -> None:
 
     arm_sides: tuple[ArmSide, ...] = getattr(scene, "ARM_PREFIXES", ())
     n_cubes: int = getattr(scene, "N_CUBES", 0)
+    # Scene declares which robot family it loaded so `arm_handles` looks
+    # up the right joint names + gripper actuator. Default piper for
+    # backward compatibility with scenes pre-dating the dispatch.
+    robot_kind = getattr(scene, "ROBOT_KIND", "piper")
     cube_body_ids = _collect_cube_body_ids(model, n_cubes)
     arms: dict[ArmSide, ArmHandles] = {
-        side: get_arm_handles(model, side, n_cubes) for side in arm_sides
+        side: get_arm_handles(model, side, n_cubes, robot_kind) for side in arm_sides
     }
 
     # Scene-owned actuators (e.g. a lift prismatic). Resolved once at startup;
@@ -202,13 +281,75 @@ def main() -> None:
     )
 
     task_plan: dict[ArmSide, list[Step]] | None = None
-    if hasattr(scene, "make_task_plan"):
+    if args.teleop:
+        # Teleop mode skips the scripted plan; the user authors steps
+        # via TeleopController. apply_initial_state has already run.
+        print("Teleop mode: dragging TCP handles drives live IK.")
+    elif args.play_recording is not None:
+        # Replay mode: load a captured JSON file as the task plan and
+        # use it just like a scripted scene's output.
+        from teleop import load_recording
+
+        loaded = load_recording(args.play_recording)
+        task_plan = {side: list(steps) for side, steps in loaded.items()}
+        scene.apply_initial_state(model, data, arms, cube_body_ids)
+        print(f"Replaying recording: {args.play_recording}")
+        for side in arm_sides:
+            print(f"  [{side}] {len(task_plan[side])} steps loaded")
+    elif hasattr(scene, "make_task_plan"):
         print("Solving IK waypoints...")
         task_plan = scene.make_task_plan(model, data, arms, cube_body_ids)
         scene.apply_initial_state(model, data, arms, cube_body_ids)
 
+    # Phase contract guard. The scene declares `PHASE_CONTRACTS` (a
+    # tuple of PhaseContract); the guard fires `check_phase_state` at
+    # every transition + samples `check_phase_invariants` per tick.
+    # `--strict` raises on the first failure; otherwise failures are
+    # printed at exit and the demo keeps running.
+    phase_contracts: tuple[PhaseContract, ...] = getattr(scene, "PHASE_CONTRACTS", ())
+    phase_guard = PhaseRuntimeGuard(phase_contracts, strict=args.strict)
+    if phase_guard.enabled:
+        print(f"PhaseRuntimeGuard active ({len(phase_contracts)} contracts, strict={args.strict})")
+
+    # Rerun streamer (one source feeds at most one sink: gRPC server,
+    # viewer connect, or .rrd file). Constructed lazily so scenes that
+    # don't request rerun pay no per-tick cost.
+    rerun_streamer: RerunStreamer | None = None
+    if args.rerun_port is not None:
+        rerun_streamer = RerunStreamer.serve_grpc(scene_name=args.scene, grpc_port=args.rerun_port)
+    elif args.rerun_connect is not None:
+        rerun_streamer = RerunStreamer.connect_grpc(scene_name=args.scene, url=args.rerun_connect)
+    elif args.rerun_rrd is not None:
+        rerun_streamer = RerunStreamer.save_rrd(scene_name=args.scene, rrd_path=args.rerun_rrd)
+
+    # Cache the body ids + joint suffixes the streamer needs every
+    # tick. Doing the lookup once at startup avoids per-tick name
+    # resolution. Bodies covered: each grippable + each arm's wrist
+    # body (link6 / wrist_3_link). Camera frames are off by default
+    # (set --rerun-camera-every >0 to enable).
+    rerun_body_ids: dict[str, int] = {}
+    rerun_joint_names: dict[ArmSide, tuple[str, ...]] = {}
+    if rerun_streamer is not None:
+        for grippable_name in grippable_names:
+            bid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, grippable_name)
+            if bid >= 0:
+                rerun_body_ids[grippable_name] = bid
+        for side, arm in arms.items():
+            wrist_id = arm.link6_id
+            if wrist_id >= 0:
+                rerun_body_ids[f"{side.rstrip('/')}/wrist"] = wrist_id
+        # `arm_joint_suffixes` is the single source of truth for the
+        # canonical joint names per robot kind. Used here for rerun
+        # scalar entity paths and by teleop for per-joint slider
+        # labels — keep both call sites in sync via the accessor.
+        suffixes = arm_joint_suffixes(robot_kind)
+        for side in arm_sides:
+            rerun_joint_names[side] = suffixes
+
+    rerun_tick_counter = {"n": 0}
+
     has_free_play = hasattr(scene, "step_free_play")
-    if task_plan is None and not has_free_play:
+    if task_plan is None and not has_free_play and not args.teleop:
         print(
             "warning: scene provides neither make_task_plan nor step_free_play; "
             "arms will hold their initial pose"
@@ -238,14 +379,46 @@ def main() -> None:
             side.rstrip("_") or "arm", initial_value="-", disabled=True
         )
 
+    # Teleop controller: live IK off viser drag handles + capture/save
+    # GUI. Built only when --teleop is set; the main loop routes the
+    # per-frame update through `teleop.tick(dt)` instead of advance_arm.
+    teleop_controller: TeleopController | None = None
+    if args.teleop:
+        # `IK_LOCKED_JOINT_NAMES` is a scene-side attribute. Teleop
+        # requires a 3-tuple of (base_x, base_y, base_yaw) joint names
+        # so the controller can drive the chassis from a base handle —
+        # raise a clear error rather than silently building a broken
+        # controller for scenes that don't expose this.
+        teleop_locked = tuple(getattr(scene, "IK_LOCKED_JOINT_NAMES", ()))
+        if len(teleop_locked) != 3:
+            raise SystemExit(
+                f"--teleop requires the scene to expose IK_LOCKED_JOINT_NAMES as a "
+                f"3-tuple (base_x, base_y, base_yaw); got {teleop_locked!r}"
+            )
+        a, b, c = teleop_locked
+        teleop_base_aux: tuple[str, str, str] = (str(a), str(b), str(c))
+        teleop_controller = TeleopController.attach(
+            server,
+            model=model,
+            data=data,
+            arms=arms,
+            locked_joint_names=teleop_locked,
+            attachments=attachment_constraints,
+            phase_contracts=phase_contracts,
+            grippable_names=grippable_names,
+            cube_body_ids=tuple(cube_body_ids),
+            base_aux_names=teleop_base_aux,
+            scene_name=args.scene,
+        )
+
     control = {"playing": True, "reset_requested": False}
 
     @gui_play.on_click
-    def _on_play(_event):
+    def _on_play(_event: Any) -> None:
         control["playing"] = not control["playing"]
 
     @gui_reset.on_click
-    def _on_reset(_event):
+    def _on_reset(_event: Any) -> None:
         control["reset_requested"] = True
 
     sim_dt = float(model.opt.timestep)
@@ -255,13 +428,13 @@ def main() -> None:
     # the per-second viser work of the previous 125 Hz loop for the same
     # simulated-time budget.
     render_dt = 1.0 / max(args.render_hz, 1e-3)
-    phys_steps_per_frame = max(1, int(round(render_dt / sim_dt)))
+    phys_steps_per_frame = max(1, round(render_dt / sim_dt))
     # Re-derive render_dt from the rounded step count so the physics clock and
     # the sleep throttle agree exactly.
     render_dt = sim_dt * phys_steps_per_frame
     print(
         f"render: {1.0 / render_dt:.1f} Hz "
-        f"({phys_steps_per_frame} physics steps × {sim_dt * 1000:.1f} ms)"
+        f"({phys_steps_per_frame} physics steps x {sim_dt * 1000:.1f} ms)"
         + (" [max-rate: throttle off]" if args.max_rate else "")
     )
 
@@ -280,6 +453,7 @@ def main() -> None:
         nonlocal per_arm
         scene.apply_initial_state(model, data, arms, cube_body_ids)
         per_arm = fresh_state()
+        phase_guard.reset()
 
     def advance_arm(side: ArmSide, dt: float) -> str:
         assert task_plan is not None
@@ -297,6 +471,11 @@ def main() -> None:
         st.t += dt
 
         if first_tick:
+            # Phase guard sees the step before any weld toggles fire so
+            # phase-end checks reflect the state the *previous* step
+            # left behind, and phase-start baselines capture before the
+            # incoming step mutates anything.
+            phase_guard.on_step_started(step, model, data)
             if step.weld_activate is not None:
                 activate_grasp_weld(
                     model,
@@ -365,13 +544,18 @@ def main() -> None:
 
         tgt_g = arm.gripper_open if step.gripper == "open" else arm.gripper_closed
         curr_g = (1.0 - alpha_s) * st.start_g + alpha_s * tgt_g
-        # Gripper joint7 (index 6) and joint8 (index 7) are tendon-coupled
-        # mirrors; write both so mj_step's tendon constraint has nothing
-        # to enforce.
-        data.qpos[arm.qpos_idx[6]] = curr_g
-        data.qpos[arm.qpos_idx[7]] = -curr_g
-        data.qvel[arm.dof_idx[6]] = 0.0
-        data.qvel[arm.dof_idx[7]] = 0.0
+        if arm.robot_kind == "piper":
+            # Piper gripper: joint7 (index 6) and joint8 (index 7) are
+            # tendon-coupled finger slides. Puppet-write both so
+            # mj_step's tendon equality has nothing to enforce.
+            data.qpos[arm.qpos_idx[6]] = curr_g
+            data.qpos[arm.qpos_idx[7]] = -curr_g
+            data.qvel[arm.dof_idx[6]] = 0.0
+            data.qvel[arm.dof_idx[7]] = 0.0
+        # UR10e + 2F-85: the 4-bar finger linkage is tendon-driven by
+        # `fingers_actuator` (ctrl 0..255). The actuator's force pushes
+        # the tendon equality and the linkage joints settle on their
+        # own — no per-joint qpos writes.
         data.ctrl[arm.act_gripper_id] = curr_g
 
         # Scene-owned auxiliary actuators (e.g. lift). Multiple arms may
@@ -379,11 +563,12 @@ def main() -> None:
         # — scenes are expected to keep their targets consistent.
         if step.aux_ctrl:
             for aux_name, aux_target in step.aux_ctrl.items():
-                aid = aux_name_to_id[aux_name]
-                start = st.start_aux.get(aux_name, float(data.qpos[aux_qposadr[aux_name]]))
+                aux_key = str(aux_name)
+                aid = aux_name_to_id[aux_key]
+                start = st.start_aux.get(aux_key, float(data.qpos[aux_qposadr[aux_key]]))
                 curr_aux = (1.0 - alpha_s) * start + alpha_s * aux_target
-                data.qpos[aux_qposadr[aux_name]] = curr_aux
-                data.qvel[aux_dofadr[aux_name]] = 0.0
+                data.qpos[aux_qposadr[aux_key]] = curr_aux
+                data.qvel[aux_dofadr[aux_key]] = 0.0
                 data.ctrl[aid] = curr_aux
 
         label = step.label
@@ -392,7 +577,7 @@ def main() -> None:
             st.start_g = tgt_g
             if step.aux_ctrl:
                 for aux_name, aux_target in step.aux_ctrl.items():
-                    st.start_aux[aux_name] = aux_target
+                    st.start_aux[str(aux_name)] = aux_target
             st.step += 1
             st.t = 0.0
             return f"{st.step}/{len(script)} {label} ✓"
@@ -415,18 +600,32 @@ def main() -> None:
     next_tick = time.perf_counter()
     sim_t = 0.0
 
+    plan_finished_announced = False
+
     try:
         while True:
             if control["reset_requested"]:
                 restart()
                 sim_t = 0.0
+                plan_finished_announced = False
                 control["reset_requested"] = False
 
-            if control["playing"]:
+            # Teleop tick is unconditional — the play/pause button only
+            # gates the scripted advancement (mj_step + advance_arm).
+            # When the user is in teleop, dragging a handle MUST always
+            # move the arm even if they've paused the sim, because the
+            # whole point of teleop is interactive authoring.
+            if teleop_controller is not None:
+                teleop_controller.tick(render_dt)
+                gui_state.value = "teleop"
+            elif control["playing"]:
                 if task_plan is not None:
                     for side in arm_sides:
                         per_arm_gui[side].value = advance_arm(side, render_dt)
                     if all_done():
+                        if not plan_finished_announced:
+                            phase_guard.on_plan_finished(model, data)
+                            plan_finished_announced = True
                         gui_state.value = "done — press reset"
                         control["playing"] = False
                     else:
@@ -441,11 +640,33 @@ def main() -> None:
 
             for _ in range(phys_steps_per_frame):
                 mujoco.mj_step(model, data)
+                phase_guard.on_tick(model, data)
             sim_t += render_dt
 
             update_viser(server, model, data, handles)
             if frustum_handles:
                 update_frustum_widgets(server, data, frustum_handles)
+
+            # Rerun stream: log once per render tick (not per physics
+            # tick) — render_dt is the rate the user-visible scene
+            # advances at, and rerun is for user-visible debugging.
+            if rerun_streamer is not None:
+                rerun_streamer.set_sim_time(sim_t)
+                for side in arm_sides:
+                    arm = arms[side]
+                    qpos = np.asarray([data.qpos[i] for i in arm.arm_qpos_idx], dtype=float)
+                    rerun_streamer.log_joint_scalars(
+                        side_prefix=str(side),
+                        joint_names=rerun_joint_names[side],
+                        qpos=qpos,
+                    )
+                for body_name, body_id in rerun_body_ids.items():
+                    rerun_streamer.log_body_transform(
+                        name=body_name,
+                        xpos=np.asarray(data.xpos[body_id], dtype=float),
+                        xquat=np.asarray(data.xquat[body_id], dtype=float),
+                    )
+                rerun_tick_counter["n"] += 1
 
             if not args.max_rate:
                 next_tick += render_dt
@@ -456,6 +677,14 @@ def main() -> None:
                     next_tick = time.perf_counter()
     except KeyboardInterrupt:
         print("stopped")
+    except PhaseContractViolation as exc:
+        print(f"\n[strict] phase contract violation:\n  {exc}")
+        sys.exit(2)
+    finally:
+        if phase_guard.enabled and phase_guard.failures:
+            print(f"\nPhaseRuntimeGuard: {len(phase_guard.failures)} contract failure(s):")
+            for failure in phase_guard.failures:
+                print(f"  [{failure.kind}] {failure.name}: {failure.message}")
 
 
 if __name__ == "__main__":

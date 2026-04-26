@@ -2,10 +2,10 @@
 
 MuJoCo + Viser sim experiment. One scene today:
 
-- `data_center` — bimanual AgileX Pipers on a PAL TIAGo mobile base performing
-  a rack server swap: unplug 3 color-coded cables, pull the old server out,
-  stow in an onboard compartment, slot a replacement in from the upper
-  compartment, replug the cables.
+- `data_center` — bimanual UR10e arms with Robotiq 2F-85 grippers on a
+  Mobile-ALOHA-style base performing a rack server swap: unplug 3 color-coded
+  cables, pull the old server out, stow it on a service cart, retrieve a
+  replacement server, install it in the rack, and replug the cables.
 
 Scene modules live under `scenes/`. The runner in `runner.py` is scene-agnostic
 so additional scenes slot in without touching the shared infra.
@@ -18,33 +18,33 @@ scene_base.py                Step dataclass + shape aliases + CubeID helper
 scene_check.py               compile-time sanity checks + schematic printer
                              (AttachmentConstraint, check_scene, print_schematic)
 ik.py                        mink-backed differential IK
-arm_handles.py               Piper-specific joint/actuator/body lookups + ArmSide enum
+arm_handles.py               robot-specific joint/actuator/body lookups + ArmSide enum
 cameras.py                   Viser camera-frustum widgets + CameraRole enum
 viser_render.py              MuJoCo geom → Viser mesh bridge
 welds.py                     equality-weld grasp cheat + generic attachment welds
 paths.py                     Menagerie path resolution
                              (PIPER_XML / TIAGO_XML / D435I_XML / D405_MESH_STL)
 robots/
-  tiago.py                   TIAGo loader: TiagoConfig + load_tiago() — strip
-                             upstream single arm + head, drop base freejoint,
-                             prune orphan excludes. Menagerie-shape assertions.
-  piper.py                   Piper loader: PiperConfig + attach_piper() — attach
-                             with prefix, override per-joint kp/kv/forcerange.
+  mobile_aloha.py            Mobile ALOHA base loader with planar x/y/yaw joints
+  ur10e.py                   UR10e + 2F-85 loader with namespaced wrist cameras
 scenes/
   data_center.py             the scene (MJCF build, IK task plan, weld registry)
   data_center_layout.py      declarative geometry: every dimension/anchor as a
                              frozen dataclass with cross-component invariants
 tools/
   mj.py                      unified debug CLI (typer): snapshot / video / grid /
-                             plan / diff / ik — `uv run python tools/mj.py --help`
+                             plan / contracts / phase / diff / ik / review
+                             — `uv run python tools/mj.py --help`
   _runtime.py                shared scene-build + timeline-advance helpers
+  observability.py           run artifacts, JSONL events, phase snapshots,
+                             executable phase-contract checks
 serve.sh                     start/stop/status/logs helper
 ```
 
 ## Debug tools (`tools/mj.py`)
 
 Headless renders + plan inspection for agent-driven debugging. One
-typer CLI, six subcommands; every subcommand defaults to
+typer CLI; every subcommand defaults to
 `--scene data_center`. Renders go through MuJoCo's native `Renderer`
 over EGL (forced before the `mujoco` import so no X display is
 needed); on a GPU host the GL driver offloads rendering automatically
@@ -71,12 +71,25 @@ uv run python tools/mj.py grid --t 22 --out /tmp/grid.png
 # Task plan as a timeline table: side, start, dur, gripper, label, attach±, weld±
 uv run python tools/mj.py plan | less
 
+# Assert every declared phase boundary and write structured artifacts:
+# events.jsonl, summary.json, phase_contracts.json, snapshots/*.npz, renders/*.png
+uv run python tools/mj.py contracts --out-root results/runs
+
+# Replay one phase and save before/after state snapshots and renders
+uv run python tools/mj.py phase remove_old_server --out-root results/runs
+
+# Optional: also emit a Rerun recording with phase-boundary TextLog events
+uv run python tools/mj.py contracts --rerun-rrd results/runs/data_center.rrd
+
 # Pixel-diff heat-map between two equal-size renders; prints max/mean/%changed
 uv run python tools/mj.py diff --a /tmp/before.png --b /tmp/after.png --out /tmp/d.png
 
 # IK feasibility sweep: replays each waypoint's arm_q, re-solves from 5 seeds,
 # labels each step OK / FRAGILE (converges from only some seeds) / FAIL.
 uv run python tools/mj.py ik
+
+# Partner-facing regression packet: review.png keyframes + review.mp4 timelapse
+uv run python tools/mj.py review --out-dir results/review
 ```
 
 Run `tools/mj.py --help` or `tools/mj.py <subcommand> --help` for the full
@@ -120,6 +133,28 @@ uv run python runner.py --scene data_center [--speed 1.0] [--render-hz 60] [--ma
 The Viser page exposes runtime controls: ▶ play / ⏸ pause, ↺ reset, speed
 slider, per-arm status lines.
 
+## Phase Debug Workflow
+
+The data-center scene defines named `TaskPhase` values and `PHASE_CONTRACTS`.
+Each contract declares what must be true at the start and end of the phase:
+which attachment equalities are active or inactive, and where the planar base
+must be. This gives every demo failure a narrower question: did setup,
+disconnect, remove, stow, retrieve, install, reconnect, or reset violate its
+boundary?
+
+Use `contracts` after changing scene geometry, IK targets, attachment names, or
+step timing. Use `phase PHASE_NAME` when one stage looks wrong in Viser and you
+want exact before/after MuJoCo snapshots for that stage.
+
+Artifacts are intentionally plain files:
+
+- `events.jsonl` is append-only structured logging for each boundary.
+- `summary.json` is the CI-friendly pass/fail summary.
+- `phase_contracts.json` records the expected phase states for that run.
+- `snapshots/*.npz` stores `qpos`, `qvel`, `ctrl`, `eq_active`, `eq_data`, and
+  sim time for exact reproduction.
+- `renders/*.png` stores a visual before/after for each checked boundary.
+
 ## Running on a remote GPU box
 
 `serve.sh` is location-agnostic — it `cd`s to its own directory via
@@ -155,6 +190,37 @@ open http://localhost:8080
 
 The runner binds to `127.0.0.1` by default — 8080 is never exposed publicly,
 the SSH tunnel is the only way to reach it.
+
+For your Malaysia EC2 instance, the same pattern is:
+
+```bash
+ssh -i ~/.ssh/openpi-seoul.pem -L 8080:localhost:8080 ubuntu@43.217.252.75
+open http://localhost:8080
+```
+
+Run phase checks on the EC2 host and keep artifacts in the repo-local
+`results/` directory:
+
+```bash
+uv run python tools/mj.py contracts --out-root results/runs
+uv run python tools/mj.py review --out-dir results/review
+```
+
+To inspect artifacts locally without manual sync, either tunnel a simple file
+server from the EC2 box:
+
+```bash
+# on EC2, from this directory
+uv run python -m http.server 8090 --directory results
+
+# on your Mac
+ssh -i ~/.ssh/openpi-seoul.pem -L 8090:localhost:8090 ubuntu@43.217.252.75
+open http://localhost:8090
+```
+
+Or write a Rerun `.rrd` on EC2 and open it through the same tunneled file
+server. Rerun can also stream to a viewer in another process; the CLI keeps Rerun
+optional so the base demo still runs with only MuJoCo, Viser, and ImageIO.
 
 ## Scene contract (if adding another)
 

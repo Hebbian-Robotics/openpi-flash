@@ -124,7 +124,7 @@ def solve_ik(
     arm: ArmHandles,
     target_pos: Position3,
     *,
-    orientation: OrientationMode = PositionOnly(),  # noqa: B008  — frozen dataclass, no shared state
+    orientation: OrientationMode = PositionOnly(),
     seed_q: JointConfig | None = None,
     max_iters: int = 400,
     rate_dt: float = 0.02,

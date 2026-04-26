@@ -1,6 +1,7 @@
 """Unified debug CLI for the bimanual sim.
 
-One entrypoint, six subcommands. Replaces the per-tool scripts:
+One entrypoint for rendering, timeline inspection, phase checks, and review
+artifacts. Replaces the per-tool scripts:
 
     uv run python tools/mj.py snapshot --out /tmp/home.png
     uv run python tools/mj.py snapshot --t 22 --camera top_d435i_cam --out /tmp/cable.png
@@ -8,6 +9,8 @@ One entrypoint, six subcommands. Replaces the per-tool scripts:
     uv run python tools/mj.py video    --prefix /tmp/run_ --fps 20 --out /tmp/run.mp4
     uv run python tools/mj.py grid     --t 22 --out /tmp/grid.png
     uv run python tools/mj.py plan
+    uv run python tools/mj.py contracts --out-root results/runs
+    uv run python tools/mj.py phase remove_old_server --out-root results/runs
     uv run python tools/mj.py diff     --a /tmp/a.png --b /tmp/b.png --out /tmp/d.png
     uv run python tools/mj.py ik
 
@@ -25,17 +28,14 @@ from __future__ import annotations
 import math
 import os
 import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
-# Force EGL before any `import mujoco` so headless rendering works on
-# servers without an X display. `os.environ.setdefault` means a caller
-# that set MUJOCO_GL=osmesa (or similar) still wins, but an unset env
-# no longer falls through to GLFW — which silently half-inits the
-# Renderer and later crashes in __del__ with AttributeError on
-# `_mjr_context`. Must be before the mujoco import below; `_runtime`
-# already does this but mj.py imports mujoco first.
-os.environ.setdefault("MUJOCO_GL", "egl")
+# Pick a safe MuJoCo GL backend before importing mujoco. Linux EC2 needs
+# EGL for headless rendering; macOS rejects `egl`, so use GLFW there.
+os.environ.setdefault("MUJOCO_GL", "glfw" if sys.platform == "darwin" else "egl")
 
 # Bootstrap the project root onto sys.path before importing the sibling
 # `tools._runtime` module — running `python tools/mj.py` only puts
@@ -43,24 +43,37 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 # scene modules must be added by hand.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import imageio.v3 as iio  # noqa: E402
-import mujoco  # noqa: E402
-import numpy as np  # noqa: E402
-import typer  # noqa: E402
+import imageio.v3 as iio
+import mujoco
+import numpy as np
+import typer
 
-from tools._runtime import (  # noqa: E402
+from rerun_stream import RerunStreamer
+from scene_base import PhaseContract, PhaseState, Step, TaskPhase
+from tools._runtime import (
     AzimuthDeg,
     CameraSpec,
     ElevationDeg,
     FreeCameraPose,
     Metres,
+    SceneContext,
     Seconds,
-    advance_timeline,
+    TimelineState,
+    advance_timeline_with_state,
     build_free_cam,
     build_scene_and_advance,
+    make_timeline_state,
     parse_video_format,
     parse_world_point,
     render_frame,
+)
+from tools.observability import (
+    ContractCheckReport,
+    PhaseBoundary,
+    RunArtifactWriter,
+    check_phase_state,
+    make_run_directory,
+    phase_contract_to_json_dict,
 )
 
 app = typer.Typer(
@@ -102,6 +115,186 @@ def _resolve_camera(
         lookat=parse_world_point(lookat, field_name="lookat"),
     )
     return build_free_cam(pose)
+
+
+@dataclass(frozen=True)
+class PhaseWindow:
+    """Timeline interval covered by one high-level task phase."""
+
+    phase: TaskPhase
+    start_s: float
+    end_s: float
+
+    @property
+    def duration_s(self) -> float:
+        return self.end_s - self.start_s
+
+
+def _aux_name_to_id(ctx: SceneContext) -> dict[str, int]:
+    return {
+        name: mujoco.mj_name2id(ctx.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        for name in getattr(ctx.scene_module, "AUX_ACTUATOR_NAMES", ())
+    }
+
+
+def _parse_task_phase(raw_phase: str) -> TaskPhase:
+    normalized = raw_phase.strip().lower()
+    for phase in TaskPhase:
+        if normalized in {phase.value, phase.name.lower()}:
+            return phase
+    available = ", ".join(phase.value for phase in TaskPhase if phase is not TaskPhase.UNPHASED)
+    raise typer.BadParameter(f"unknown phase {raw_phase!r}; available: {available}")
+
+
+def _phase_contracts_by_phase(
+    phase_contracts: tuple[PhaseContract, ...],
+) -> dict[TaskPhase, PhaseContract]:
+    return {contract.phase: contract for contract in phase_contracts}
+
+
+def _phase_windows(task_plan: Mapping[Any, list[Step]]) -> dict[TaskPhase, PhaseWindow]:
+    windows: dict[TaskPhase, tuple[float, float]] = {}
+    for script in task_plan.values():
+        elapsed = 0.0
+        for step in script:
+            step_start = elapsed
+            step_end = elapsed + step.duration
+            elapsed = step_end
+            if step.phase is TaskPhase.UNPHASED:
+                continue
+            if step.phase not in windows:
+                windows[step.phase] = (step_start, step_end)
+                continue
+            current_start, current_end = windows[step.phase]
+            windows[step.phase] = (min(current_start, step_start), max(current_end, step_end))
+    return {
+        phase: PhaseWindow(phase=phase, start_s=start_s, end_s=end_s)
+        for phase, (start_s, end_s) in windows.items()
+    }
+
+
+def _sorted_phase_windows(task_plan: Mapping[Any, list[Step]]) -> list[PhaseWindow]:
+    return sorted(_phase_windows(task_plan).values(), key=lambda window: window.start_s)
+
+
+def _render_phase_boundary(
+    ctx: SceneContext,
+    writer: RunArtifactWriter,
+    *,
+    phase: TaskPhase,
+    boundary: PhaseBoundary,
+    camera_spec: CameraSpec,
+    width: int,
+    height: int,
+) -> Path:
+    frame = render_frame(ctx.model, ctx.data, camera=camera_spec, width=width, height=height)
+    path = writer.run_dir / "renders" / f"{phase.value}_{boundary}.png"
+    iio.imwrite(path, frame)
+    return path
+
+
+def _write_optional_rerun_phase_log(
+    rrd_path: Path | None,
+    *,
+    scene_name: str,
+    phase_events: list[dict[str, Any]],
+) -> None:
+    """Write phase-boundary text events to an `.rrd` file for offline replay.
+
+    Thin wrapper around `rerun_stream.RerunStreamer.save_rrd` so the
+    contract / phase subcommands share the same lifecycle code as the
+    live runner. The streamer raises a clear error if `rerun-sdk` is
+    missing.
+    """
+    if rrd_path is None:
+        return
+    try:
+        streamer = RerunStreamer.save_rrd(scene_name=scene_name, rrd_path=rrd_path)
+    except RuntimeError as err:
+        raise typer.BadParameter(str(err)) from err
+
+    for event in phase_events:
+        streamer.set_sim_time(float(event["time_s"]))
+        streamer.log_phase_event(
+            phase=event["phase"],
+            boundary=event["boundary"],
+            contract_ok=bool(event["contract_ok"]),
+            message="ok" if event["contract_ok"] else "failed",
+        )
+
+
+def _advance_context(
+    ctx: SceneContext,
+    duration_s: float,
+    timeline_state: TimelineState | None = None,
+) -> TimelineState:
+    actual_timeline_state = timeline_state or make_timeline_state(ctx.data, ctx.arms)
+    if duration_s <= 0:
+        mujoco.mj_forward(ctx.model, ctx.data)
+        return actual_timeline_state
+    if ctx.task_plan is None:
+        raise typer.BadParameter(f"scene {ctx.scene_module.NAME!r} has no make_task_plan")
+    advance_timeline_with_state(
+        ctx.model,
+        ctx.data,
+        ctx.arms,
+        ctx.task_plan,
+        actual_timeline_state,
+        _aux_name_to_id(ctx),
+        float(ctx.model.opt.timestep),
+        Seconds(duration_s),
+    )
+    mujoco.mj_forward(ctx.model, ctx.data)
+    return actual_timeline_state
+
+
+def _record_phase_boundary(
+    ctx: SceneContext,
+    writer: RunArtifactWriter,
+    *,
+    phase: TaskPhase,
+    boundary: PhaseBoundary,
+    phase_state: PhaseState,
+    camera_spec: CameraSpec | None,
+    width: int,
+    height: int,
+    base_tolerance: float,
+) -> tuple[ContractCheckReport, dict[str, Any]]:
+    report = check_phase_state(
+        ctx.model,
+        ctx.data,
+        phase_state,
+        base_tolerance=base_tolerance,
+    )
+    snapshot_path = writer.write_snapshot(
+        ctx.model,
+        ctx.data,
+        phase=phase,
+        boundary=boundary,
+        phase_state=phase_state,
+        contract_report=report,
+    )
+    render_path = None
+    if camera_spec is not None:
+        render_path = _render_phase_boundary(
+            ctx,
+            writer,
+            phase=phase,
+            boundary=boundary,
+            camera_spec=camera_spec,
+            width=width,
+            height=height,
+        )
+    event = {
+        "phase": phase.value,
+        "boundary": boundary,
+        "time_s": float(ctx.data.time),
+        "contract_ok": report.ok,
+        "snapshot": str(snapshot_path),
+        "render": str(render_path) if render_path is not None else None,
+        "failures": [failure.message for failure in report.failures],
+    }
+    return report, event
 
 
 # ---- snapshot ----------------------------------------------------------------
@@ -167,15 +360,17 @@ def snapshot(
     }
     sim_dt = float(ctx.model.opt.timestep)
     prev_t = 0.0
+    timeline_state = make_timeline_state(ctx.data, ctx.arms)
     assert out_prefix is not None
     for target_t in np.arange(0.0, t + 1e-9, every):
         dt = float(target_t) - prev_t
         if dt > 0:
-            advance_timeline(
+            advance_timeline_with_state(
                 ctx.model,
                 ctx.data,
                 ctx.arms,
                 ctx.task_plan,
+                timeline_state,
                 aux_name_to_id,
                 sim_dt,
                 Seconds(dt),
@@ -199,7 +394,7 @@ def video(
 ) -> None:
     """Stitch a sequence of PNGs into an mp4 or gif."""
     prefix_path = Path(prefix)
-    search_dir = prefix_path.parent if str(prefix_path.parent) else Path(".")
+    search_dir = prefix_path.parent if str(prefix_path.parent) else Path()
     stem = prefix_path.name
     frames = sorted(search_dir.glob(f"{stem}*.png"))
     if not frames:
@@ -262,7 +457,7 @@ _GRID_FONT: dict[str, tuple[str, ...]] = {
 
 def _draw_label(grid: np.ndarray, top: int, left: int, width: int, height: int, text: str) -> None:
     """Paint `text` into the top strip of one grid tile. Uses an inline
-    5×7 pixel font to avoid pulling PIL in just for labels."""
+    5x7 pixel font to avoid pulling PIL in just for labels."""
     glyph_w, glyph_h = 5, 7
     scale = max(1, (height - 4) // glyph_h)
     cursor = left + 4
@@ -376,14 +571,26 @@ def plan(
         for name in getattr(scene_mod, "GRIPPABLES", ())
     ]
     task_plan = scene_mod.make_task_plan(ctx.model, ctx.data, ctx.arms, cube_body_ids)
+    phase_contracts = getattr(scene_mod, "PHASE_CONTRACTS", ())
+    if phase_contracts:
+        _print_phase_contracts(phase_contracts)
+        typer.echo("")
 
     label_w = (
         max((len(step.label) for script in task_plan.values() for step in script), default=10) + 1
+    )
+    phase_w = (
+        max(
+            (len(step.phase.value) for script in task_plan.values() for step in script),
+            default=5,
+        )
+        + 1
     )
     widths = {
         "side": 7,
         "start": 7,
         "dur": 5,
+        "phase": phase_w,
         "grip": 6,
         "label": label_w,
         "aplus": 32,
@@ -393,7 +600,8 @@ def plan(
     }
     header = (
         f"{'side':<{widths['side']}} {'start':>{widths['start']}} "
-        f"{'dur':>{widths['dur']}} {'grip':<{widths['grip']}} "
+        f"{'dur':>{widths['dur']}} {'phase':<{widths['phase']}} "
+        f"{'grip':<{widths['grip']}} "
         f"{'label':<{widths['label']}} {'attach+':<{widths['aplus']}} "
         f"{'attach-':<{widths['aminus']}} {'weld+':<{widths['wplus']}} "
         f"{'weld-':<{widths['wminus']}}"
@@ -408,7 +616,38 @@ def plan(
         typer.echo("")
 
 
-def _format_plan_row(side: str, start_s: float, step, widths: dict[str, int]) -> str:  # type: ignore[no-untyped-def]
+def _print_phase_contracts(phase_contracts: tuple[PhaseContract, ...]) -> None:
+    typer.echo("phase contracts")
+    typer.echo("-" * 80)
+    for contract in phase_contracts:
+        typer.echo(f"[{contract.phase.value}]")
+        typer.echo(f"  start: {contract.starts.description}")
+        typer.echo(f"  end:   {contract.ends.description}")
+        start_facts = _format_phase_state_facts(contract.starts)
+        end_facts = _format_phase_state_facts(contract.ends)
+        if start_facts:
+            typer.echo(f"  start facts: {start_facts}")
+        if end_facts:
+            typer.echo(f"  end facts:   {end_facts}")
+
+
+def _format_phase_state_facts(state: PhaseState) -> str:
+    parts: list[str] = []
+    if state.active_attachments:
+        parts.append("active=" + ",".join(str(name) for name in state.active_attachments))
+    if state.inactive_attachments:
+        parts.append("inactive=" + ",".join(str(name) for name in state.inactive_attachments))
+    if state.base_aux:
+        parts.append("base=" + ",".join(f"{name}:{value:+.2f}" for name, value in state.base_aux))
+    return " | ".join(parts)
+
+
+def _format_plan_row(
+    side: str,
+    start_s: float,
+    step: Step,
+    widths: dict[str, int],
+) -> str:
     def fmt_attach(items: tuple[str, ...]) -> str:
         return ",".join(str(i) for i in items) if items else "-"
 
@@ -419,6 +658,7 @@ def _format_plan_row(side: str, start_s: float, step, widths: dict[str, int]) ->
         f"{side:<{widths['side']}} "
         f"{start_s:>{widths['start']}.2f} "
         f"{step.duration:>{widths['dur']}.2f} "
+        f"{step.phase.value:<{widths['phase']}} "
         f"{step.gripper:<{widths['grip']}} "
         f"{step.label:<{widths['label']}} "
         f"{fmt_attach(step.attach_activate):<{widths['aplus']}} "
@@ -426,6 +666,248 @@ def _format_plan_row(side: str, start_s: float, step, widths: dict[str, int]) ->
         f"{fmt_weld(step.weld_activate):<{widths['wplus']}} "
         f"{fmt_weld(step.weld_deactivate):<{widths['wminus']}}"
     )
+
+
+# ---- phase contracts + replay ------------------------------------------------
+
+
+@app.command()
+def contracts(
+    out_root: Annotated[
+        Path,
+        typer.Option(help="root directory for structured run artifacts"),
+    ] = Path("results/runs"),
+    scene: SceneOpt = "data_center",
+    render: Annotated[
+        bool,
+        typer.Option("--render/--no-render", help="write a PNG at every checked boundary"),
+    ] = True,
+    rerun_rrd: Annotated[
+        Path | None,
+        typer.Option(
+            "--rerun-rrd",
+            help="optional .rrd file with phase-boundary TextLog events",
+        ),
+    ] = None,
+    base_tolerance: Annotated[
+        float,
+        typer.Option(help="absolute tolerance for base qpos contract checks"),
+    ] = 1e-3,
+    fail_on_error: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-error/--no-fail-on-error", help="exit non-zero on contract failure"
+        ),
+    ] = True,
+    camera: Annotated[
+        str | None,
+        typer.Option(help="named scene camera for boundary renders"),
+    ] = None,
+    width: WidthOpt = 960,
+    height: HeightOpt = 720,
+    az: AzOpt = 40.0,
+    el: ElOpt = -15.0,
+    dist: DistOpt = 2.2,
+    lookat: LookatOpt = "0.30,0.0,0.9",
+) -> None:
+    """Replay the full task and assert every declared phase boundary."""
+    ctx = build_scene_and_advance(scene, Seconds(0.0))
+    if ctx.task_plan is None:
+        raise typer.BadParameter(f"scene {scene!r} has no make_task_plan")
+
+    phase_contracts: tuple[PhaseContract, ...] = tuple(
+        getattr(ctx.scene_module, "PHASE_CONTRACTS", ())
+    )
+    if not phase_contracts:
+        raise typer.BadParameter(f"scene {scene!r} does not define PHASE_CONTRACTS")
+
+    run_dir = make_run_directory(out_root, scene_name=scene)
+    writer = RunArtifactWriter(run_dir, scene_name=scene)
+    writer.write_phase_contracts(phase_contracts)
+    writer.write_event("run_start", command="contracts")
+
+    camera_spec = _resolve_camera(camera, az, el, dist, lookat) if render else None
+    contracts_by_phase = _phase_contracts_by_phase(phase_contracts)
+    timeline_state = make_timeline_state(ctx.data, ctx.arms)
+    current_time_s = 0.0
+    phase_events: list[dict[str, Any]] = []
+    all_ok = True
+
+    for window in _sorted_phase_windows(ctx.task_plan):
+        contract = contracts_by_phase.get(window.phase)
+        if contract is None:
+            continue
+        timeline_state = _advance_context(ctx, window.start_s - current_time_s, timeline_state)
+        current_time_s = window.start_s
+        start_report, start_event = _record_phase_boundary(
+            ctx,
+            writer,
+            phase=window.phase,
+            boundary="start",
+            phase_state=contract.starts,
+            camera_spec=camera_spec,
+            width=width,
+            height=height,
+            base_tolerance=base_tolerance,
+        )
+        phase_events.append(start_event)
+
+        timeline_state = _advance_context(ctx, window.duration_s, timeline_state)
+        current_time_s = window.end_s
+        end_report, end_event = _record_phase_boundary(
+            ctx,
+            writer,
+            phase=window.phase,
+            boundary="end",
+            phase_state=contract.ends,
+            camera_spec=camera_spec,
+            width=width,
+            height=height,
+            base_tolerance=base_tolerance,
+        )
+        phase_events.append(end_event)
+
+        phase_ok = start_report.ok and end_report.ok
+        all_ok = all_ok and phase_ok
+        typer.echo(f"{window.phase.value:<22} {'OK' if phase_ok else 'FAIL'}")
+        for report in (start_report, end_report):
+            for failure in report.failures:
+                typer.echo(f"  - {failure.message}")
+
+    _write_optional_rerun_phase_log(rerun_rrd, scene_name=scene, phase_events=phase_events)
+    writer.write_summary(
+        {
+            "scene": scene,
+            "command": "contracts",
+            "ok": all_ok,
+            "phase_events": phase_events,
+        }
+    )
+    writer.write_event("run_end", ok=all_ok)
+    typer.echo(f"artifacts → {run_dir}")
+    if not all_ok and fail_on_error:
+        raise typer.Exit(code=1)
+
+
+@app.command("phase")
+def replay_phase(
+    phase: Annotated[str, typer.Argument(help="phase name, e.g. remove_old_server")],
+    out_root: Annotated[
+        Path,
+        typer.Option(help="root directory for structured phase replay artifacts"),
+    ] = Path("results/runs"),
+    scene: SceneOpt = "data_center",
+    rerun_rrd: Annotated[
+        Path | None,
+        typer.Option(
+            "--rerun-rrd",
+            help="optional .rrd file with this phase's boundary TextLog events",
+        ),
+    ] = None,
+    base_tolerance: Annotated[
+        float,
+        typer.Option(help="absolute tolerance for base qpos contract checks"),
+    ] = 1e-3,
+    fail_on_error: Annotated[
+        bool,
+        typer.Option(
+            "--fail-on-error/--no-fail-on-error", help="exit non-zero on contract failure"
+        ),
+    ] = True,
+    camera: Annotated[
+        str | None,
+        typer.Option(help="named scene camera for boundary renders"),
+    ] = None,
+    width: WidthOpt = 960,
+    height: HeightOpt = 720,
+    az: AzOpt = 40.0,
+    el: ElOpt = -15.0,
+    dist: DistOpt = 2.2,
+    lookat: LookatOpt = "0.30,0.0,0.9",
+) -> None:
+    """Replay one phase, saving before/after snapshots and renders."""
+    task_phase = _parse_task_phase(phase)
+    ctx = build_scene_and_advance(scene, Seconds(0.0))
+    if ctx.task_plan is None:
+        raise typer.BadParameter(f"scene {scene!r} has no make_task_plan")
+
+    phase_contracts: tuple[PhaseContract, ...] = tuple(
+        getattr(ctx.scene_module, "PHASE_CONTRACTS", ())
+    )
+    contracts_by_phase = _phase_contracts_by_phase(phase_contracts)
+    contract = contracts_by_phase.get(task_phase)
+    if contract is None:
+        raise typer.BadParameter(f"scene {scene!r} has no contract for phase {task_phase.value!r}")
+
+    windows = _phase_windows(ctx.task_plan)
+    window = windows.get(task_phase)
+    if window is None:
+        raise typer.BadParameter(f"task plan has no steps for phase {task_phase.value!r}")
+
+    run_dir = make_run_directory(out_root, scene_name=f"{scene}_{task_phase.value}")
+    writer = RunArtifactWriter(run_dir, scene_name=scene)
+    writer.write_json("phase_contract.json", phase_contract_to_json_dict(contract))
+    writer.write_event(
+        "run_start",
+        command="phase",
+        phase=task_phase.value,
+        start_s=window.start_s,
+        end_s=window.end_s,
+    )
+
+    camera_spec = _resolve_camera(camera, az, el, dist, lookat)
+    timeline_state = make_timeline_state(ctx.data, ctx.arms)
+    timeline_state = _advance_context(ctx, window.start_s, timeline_state)
+    start_report, start_event = _record_phase_boundary(
+        ctx,
+        writer,
+        phase=task_phase,
+        boundary="start",
+        phase_state=contract.starts,
+        camera_spec=camera_spec,
+        width=width,
+        height=height,
+        base_tolerance=base_tolerance,
+    )
+
+    timeline_state = _advance_context(ctx, window.duration_s, timeline_state)
+    end_report, end_event = _record_phase_boundary(
+        ctx,
+        writer,
+        phase=task_phase,
+        boundary="end",
+        phase_state=contract.ends,
+        camera_spec=camera_spec,
+        width=width,
+        height=height,
+        base_tolerance=base_tolerance,
+    )
+
+    phase_events = [start_event, end_event]
+    _write_optional_rerun_phase_log(rerun_rrd, scene_name=scene, phase_events=phase_events)
+    all_ok = start_report.ok and end_report.ok
+    writer.write_summary(
+        {
+            "scene": scene,
+            "command": "phase",
+            "phase": task_phase.value,
+            "start_s": window.start_s,
+            "end_s": window.end_s,
+            "ok": all_ok,
+            "phase_events": phase_events,
+        }
+    )
+    writer.write_event("run_end", ok=all_ok)
+    typer.echo(
+        f"{task_phase.value}: {'OK' if all_ok else 'FAIL'} "
+        f"({window.start_s:.2f}s → {window.end_s:.2f}s)"
+    )
+    for report in (start_report, end_report):
+        for failure in report.failures:
+            typer.echo(f"  - {failure.message}")
+    typer.echo(f"artifacts → {run_dir}")
+    if not all_ok and fail_on_error:
+        raise typer.Exit(code=1)
 
 
 # ---- diff --------------------------------------------------------------------
@@ -468,13 +950,26 @@ def diff(
 
 
 _IK_TOL_M = 0.02
-_IK_SEEDS: list[np.ndarray] = [
-    np.array([0.0, 1.57, -1.3485, 0.0, 0.2, 0.0]),
-    np.array([0.5, 1.2, -1.0, 0.0, 0.3, 0.0]),
-    np.array([-0.5, 1.8, -1.5, 0.0, 0.1, 0.0]),
-    np.array([0.0, 2.0, -1.8, 0.5, 0.5, 0.0]),
-    np.array([0.0, 1.0, -0.8, -0.5, -0.2, 0.0]),
-]
+
+
+def _build_ik_seeds(home: np.ndarray) -> list[np.ndarray]:
+    """Five-seed spread around the scene's home joint config.
+
+    The home pose is one seed; the other four are small joint-wise
+    perturbations (±0.5, ±0.3 rad on a couple of joints) that exercise
+    different convergence basins. Built from `home` so the seed shape
+    + magnitudes are robot-agnostic — works for Piper's 6-joint arm
+    chain just as well as UR10e's.
+    """
+    home = np.asarray(home, dtype=float)
+    perturbations = [
+        np.zeros_like(home),
+        np.array([+0.5, +0.3, -0.3, 0.0, +0.1, 0.0])[: len(home)],
+        np.array([-0.5, -0.3, +0.3, 0.0, -0.1, 0.0])[: len(home)],
+        np.array([0.0, +0.5, -0.5, +0.5, +0.3, 0.0])[: len(home)],
+        np.array([0.0, -0.5, +0.5, -0.5, -0.3, 0.0])[: len(home)],
+    ]
+    return [home + p for p in perturbations]
 
 
 @app.command()
@@ -498,6 +993,12 @@ def ik(
     ]
     task_plan = scene_mod.make_task_plan(ctx.model, ctx.data, ctx.arms, cube_body_ids)
 
+    # Scene exposes which joints to lock during IK + a home-pose array
+    # to seed the solver with. Both vary by robot kind so they belong
+    # to the scene module rather than this tool.
+    locked_joint_names: tuple[str, ...] = scene_mod.IK_LOCKED_JOINT_NAMES
+    ik_seeds = _build_ik_seeds(np.asarray(scene_mod.IK_SEED_Q, dtype=float))
+
     typer.echo("status   side    conv  err(mm)  tcp(world)          label")
     typer.echo("-" * 80)
     failed = fragile = robust = 0
@@ -511,7 +1012,7 @@ def ik(
             best_err = np.inf
             n_conv = 0
             unreachable = False
-            for seed in _IK_SEEDS:
+            for seed in ik_seeds:
                 try:
                     _, err = solve_ik(
                         ctx.model,
@@ -520,7 +1021,7 @@ def ik(
                         tcp,
                         orientation=PositionOnly(),
                         seed_q=seed,
-                        locked_joint_names=("torso_lift_joint",),
+                        locked_joint_names=locked_joint_names,
                         solver="daqp",
                     )
                 except RuntimeError:
@@ -532,14 +1033,14 @@ def ik(
             if best_err > _IK_TOL_M:
                 status = "FAIL"
                 failed += 1
-            elif unreachable or n_conv < len(_IK_SEEDS):
+            elif unreachable or n_conv < len(ik_seeds):
                 status = "FRAGILE"
                 fragile += 1
             else:
                 status = "OK"
                 robust += 1
             typer.echo(
-                f"{status:<8} {side:<7} {n_conv:>2}/{len(_IK_SEEDS)} "
+                f"{status:<8} {side:<7} {n_conv:>2}/{len(ik_seeds)} "
                 f"{best_err * 1000:>7.2f} ({tcp[0]:+.2f},{tcp[1]:+.2f},{tcp[2]:+.2f}) "
                 f"{step.label}"
             )
@@ -641,15 +1142,17 @@ def review(
     }
     sim_dt = float(ctx.model.opt.timestep)
     prev_t = 0.0
+    timeline_state = make_timeline_state(ctx.data, ctx.arms)
 
     for t, label in _REVIEW_KEYFRAMES_DATA_CENTER:
         dt = t - prev_t
         if dt > 0:
-            advance_timeline(
+            advance_timeline_with_state(
                 ctx.model,
                 ctx.data,
                 ctx.arms,
                 ctx.task_plan,
+                timeline_state,
                 aux_name_to_id,
                 sim_dt,
                 Seconds(dt),
@@ -679,18 +1182,25 @@ def review(
     ctx = build_scene_and_advance(scene, Seconds(0.0))  # reset sim for clean advance
     if ctx.task_plan is None:
         raise typer.BadParameter(f"scene {scene!r} has no make_task_plan")
+    aux_name_to_id = {
+        name: mujoco.mj_name2id(ctx.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        for name in getattr(ctx.scene_module, "AUX_ACTUATOR_NAMES", ())
+    }
+    sim_dt = float(ctx.model.opt.timestep)
     video_task_plan = ctx.task_plan
     prev_t = 0.0
+    timeline_state = make_timeline_state(ctx.data, ctx.arms)
     frames: list[np.ndarray] = []
     step_s = 1.0 / video_fps
     for target_t in np.arange(0.0, video_end + 1e-9, step_s):
         dt = float(target_t) - prev_t
         if dt > 0:
-            advance_timeline(
+            advance_timeline_with_state(
                 ctx.model,
                 ctx.data,
                 ctx.arms,
                 video_task_plan,
+                timeline_state,
                 aux_name_to_id,
                 sim_dt,
                 Seconds(dt),
