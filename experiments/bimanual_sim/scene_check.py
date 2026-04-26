@@ -589,8 +589,8 @@ def _check_attachment_constraints(
                             f"attachment {c.name!r} anchor ({ax[0]:.3f}, "
                             f"{ax[1]:.3f}, {ax[2]:.3f}) in body_a={c.body_a!r} "
                             f"local frame is outside body AABB "
-                            f"[{mins[0]:.3f},{maxs[0]:.3f}] × "
-                            f"[{mins[1]:.3f},{maxs[1]:.3f}] × "
+                            f"[{mins[0]:.3f},{maxs[0]:.3f}] x "
+                            f"[{mins[1]:.3f},{maxs[1]:.3f}] x "
                             f"[{mins[2]:.3f},{maxs[2]:.3f}]"
                         ),
                     )
@@ -633,8 +633,8 @@ def print_schematic(
         print(
             f"  {name:<22} pos=({body_pos[0]:+.3f}, {body_pos[1]:+.3f}, {body_pos[2]:+.3f})"
             f"  AABB=[{body_min[0]:+.3f},{body_max[0]:+.3f}]"
-            f"×[{body_min[1]:+.3f},{body_max[1]:+.3f}]"
-            f"×[{body_min[2]:+.3f},{body_max[2]:+.3f}]"
+            f"x[{body_min[1]:+.3f},{body_max[1]:+.3f}]"
+            f"x[{body_min[2]:+.3f},{body_max[2]:+.3f}]"
             f"  geoms={len(geoms)}"
         )
 
@@ -674,7 +674,7 @@ def print_schematic(
         connect_count = sum(1 for c in attachment_constraints if isinstance(c, ConnectAttachment))
         print(
             f"Attachment constraints ({len(attachment_constraints)}): "
-            f"{connect_count}× CONNECT, {weld_count}× WELD"
+            f"{connect_count}x CONNECT, {weld_count}x WELD"
         )
         for c in attachment_constraints:
             eq_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_EQUALITY, c.name)

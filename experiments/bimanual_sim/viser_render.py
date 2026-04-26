@@ -16,7 +16,7 @@ walls, bin walls, cable anchors are all static).
 Matrix → quaternion conversion uses `mujoco.mju_mat2Quat` (C kernel) rather
 than `viser.transforms.SO3.from_matrix`. The latter runs multiple
 `np.allclose` scans per call to pick between four quaternion branches and,
-with ~60 geoms × 125 Hz, dominated the runtime profile at ~45 % of wallclock.
+with ~60 geoms x 125 Hz, dominated the runtime profile at ~45 % of wallclock.
 
 Per-frame pose push bypasses viser's `MeshHandle.position` / `.wxyz`
 property setters. The property setters each run `np.allclose(new, current)`
@@ -181,7 +181,7 @@ def update_viser(
     # All handles from the same `ViserServer` share the broadcast buffer.
     # `wsi.get_message_buffer()` returns `WebsockServer._broadcast_buffer`;
     # `server.atomic()` starts/ends an atomic block on that same buffer.
-    wsi = handles[0][1]._impl.api._websock_interface  # noqa: SLF001
+    wsi = handles[0][1]._impl.api._websock_interface
     buffer_push = wsi.get_message_buffer().push
 
     # Local-bind hot-path symbols. Inside a ~60-iteration loop at 60 Hz this
@@ -205,7 +205,7 @@ def update_viser(
                 float(quat_buf[2]),
                 float(quat_buf[3]),
             )
-            impl = h._impl  # noqa: SLF001 — intentional viser-internal fast path
+            impl = h._impl
             impl.position[:] = pos_tuple
             impl.wxyz[:] = wxyz_tuple
             name = impl.name

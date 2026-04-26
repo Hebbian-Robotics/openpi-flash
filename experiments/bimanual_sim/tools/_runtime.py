@@ -24,9 +24,9 @@ from pathlib import Path
 from types import ModuleType
 from typing import Literal, NewType
 
-# Set EGL before mujoco import so headless Linux rendering works without
-# an X server. Tool invocations set this via env or we default it here.
-os.environ.setdefault("MUJOCO_GL", "egl")
+# Pick a safe MuJoCo GL backend before importing mujoco. Linux EC2 needs
+# EGL for headless rendering; macOS rejects `egl`, so use GLFW there.
+os.environ.setdefault("MUJOCO_GL", "glfw" if sys.platform == "darwin" else "egl")
 
 # Add the scene root (parent of tools/) to sys.path so tool scripts can
 # import `arm_handles`, `scenes`, etc. regardless of cwd.
@@ -147,6 +147,27 @@ class _ArmTimelineState:
     start_aux: dict[str, float]
 
 
+TimelineState = dict[ArmSide, _ArmTimelineState]
+
+
+def make_timeline_state(data: mujoco.MjData, arms: dict[ArmSide, ArmHandles]) -> TimelineState:
+    """Capture the current per-arm interpolation state before replay.
+
+    Callers that advance in chunks must keep and reuse this object; otherwise
+    every chunk would restart at script step zero.
+    """
+    return {
+        side: _ArmTimelineState(
+            step=0,
+            t=0.0,
+            start_q=np.array([data.qpos[i] for i in arms[side].arm_qpos_idx]),
+            start_g=float(data.ctrl[arms[side].act_gripper_id]),
+            start_aux={},
+        )
+        for side in arms
+    }
+
+
 def _advance_one_arm(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -214,19 +235,24 @@ def _advance_one_arm(
 
     target_gripper = arm.gripper_open if step.gripper == "open" else arm.gripper_closed
     curr_g = (1.0 - alpha_s) * st.start_g + alpha_s * target_gripper
-    data.qpos[arm.qpos_idx[6]] = curr_g
-    data.qpos[arm.qpos_idx[7]] = -curr_g
-    data.qvel[arm.dof_idx[6]] = 0.0
-    data.qvel[arm.dof_idx[7]] = 0.0
+    if arm.robot_kind == "piper":
+        # Piper finger slides at qpos_idx[6/7]; tendon-coupled mirrors.
+        data.qpos[arm.qpos_idx[6]] = curr_g
+        data.qpos[arm.qpos_idx[7]] = -curr_g
+        data.qvel[arm.dof_idx[6]] = 0.0
+        data.qvel[arm.dof_idx[7]] = 0.0
+    # UR10e + 2F-85: actuator-only path. The 4-bar finger linkage's
+    # tendon equality settles under the actuator's force.
     data.ctrl[arm.act_gripper_id] = curr_g
 
     if step.aux_ctrl:
         for aux_name, aux_target in step.aux_ctrl.items():
-            aid = aux_name_to_id[aux_name]
+            aux_key = str(aux_name)
+            aid = aux_name_to_id[aux_key]
             jnt_id = int(model.actuator_trnid[aid][0])
             qadr = int(model.jnt_qposadr[jnt_id])
             dadr = int(model.jnt_dofadr[jnt_id])
-            start = st.start_aux.get(aux_name, float(data.qpos[qadr]))
+            start = st.start_aux.get(aux_key, float(data.qpos[qadr]))
             curr_aux = (1.0 - alpha_s) * start + alpha_s * aux_target
             data.qpos[qadr] = curr_aux
             data.qvel[dadr] = 0.0
@@ -237,7 +263,7 @@ def _advance_one_arm(
         st.start_g = target_gripper
         if step.aux_ctrl:
             for aux_name, aux_target in step.aux_ctrl.items():
-                st.start_aux[aux_name] = aux_target
+                st.start_aux[str(aux_name)] = aux_target
         st.step += 1
         st.t = 0.0
 
@@ -250,25 +276,40 @@ def advance_timeline(
     aux_name_to_id: dict[str, int],
     sim_dt: float,
     until_s: Seconds,
-) -> None:
+) -> TimelineState:
     """Replay the task plan's per-arm step loop until sim time reaches
     `until_s`. Every `sim_dt` runs one interpolation pass per arm then
     one `mj_step`. Mutates `data` in place."""
-    state = {
-        side: _ArmTimelineState(
-            step=0,
-            t=0.0,
-            start_q=np.array([data.qpos[i] for i in arms[side].arm_qpos_idx]),
-            start_g=float(data.ctrl[arms[side].act_gripper_id]),
-            start_aux={},
-        )
-        for side in arms
-    }
+    state = make_timeline_state(data, arms)
+    return advance_timeline_with_state(
+        model,
+        data,
+        arms,
+        task_plan,
+        state,
+        aux_name_to_id,
+        sim_dt,
+        until_s,
+    )
+
+
+def advance_timeline_with_state(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    arms: dict[ArmSide, ArmHandles],
+    task_plan: dict[ArmSide, list[Step]],
+    state: TimelineState,
+    aux_name_to_id: dict[str, int],
+    sim_dt: float,
+    until_s: Seconds,
+) -> TimelineState:
+    """Advance a task plan while preserving caller-owned timeline state."""
     n_steps = int(float(until_s) / sim_dt)
     for _ in range(n_steps):
         for side, arm in arms.items():
             _advance_one_arm(model, data, arm, task_plan[side], state[side], sim_dt, aux_name_to_id)
         mujoco.mj_step(model, data)
+    return state
 
 
 @dataclass
@@ -295,12 +336,13 @@ def build_scene_and_advance(scene_name: SceneName | str, t: Seconds | float = 0.
 
     arm_sides: tuple[ArmSide, ...] = getattr(scene, "ARM_PREFIXES", ())
     n_cubes: int = getattr(scene, "N_CUBES", 0)
+    robot_kind = getattr(scene, "ROBOT_KIND", "piper")
     cube_body_ids = [
         mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
         for name in getattr(scene, "GRIPPABLES", ())
     ]
     arms: dict[ArmSide, ArmHandles] = {
-        side: get_arm_handles(model, side, n_cubes) for side in arm_sides
+        side: get_arm_handles(model, side, n_cubes, robot_kind) for side in arm_sides
     }
     aux_name_to_id = {
         name: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)

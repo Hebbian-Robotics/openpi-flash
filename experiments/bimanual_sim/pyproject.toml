@@ -1,30 +1,31 @@
 [project]
 name = "sim"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    # dm_control.mjcf is the assembly layer for nested robot/cable/camera
-    # subtrees. Native MuJoCo APIs (mj_step / MjModel / MjData) still drive
-    # runtime; mjcf is only used inside scenes/<name>.build_spec to compose
-    # XML before compilation.
-    "dm-control>=1.0.20",
+    "dm-control>=1.0.40",
     "imageio[ffmpeg]>=2.37.3",
     "jaxtyping>=0.3.9",
+    "matplotlib>=3.10.9",
     "mink>=1.1.0",
-    "mujoco>=3.7.0",
+    "mujoco>=3.8.0",
     "numpy>=2.4.4",
     # 0.7.2 ships cp312/cp313 wheels; the 0.7.2.post1 tag is cp310-only, so
     # pinning to or above the post1 bound would wedge any non-3.10 environment.
     "proxsuite>=0.7.2,!=0.7.2.post1",
-    # Typer (FastAPI author, built on Click) powers tools/mj.py — one CLI
-    # with subcommands for snapshot / video / grid / plan / diff / ik.
-    "typer>=0.12.5",
+    # `rerun-sdk` is the rerun.io visualization tool (3D + scalars +
+    # text logs + camera frames). The bare `rerun` package on PyPI is
+    # an unrelated file-change-detector library — do NOT swap them.
+    # Both expose the `rerun` import namespace; pinning rerun-sdk
+    # specifically avoids the namespace collision warning.
+    "rerun-sdk>=0.31.3",
+    "typer>=0.24.2",
     "viser>=1.0.26",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.15.11", #
+    "ruff>=0.15.12", #
     "ty>=0.0.32",
 ]
 
@@ -35,16 +36,20 @@ target-version = "py312"
 [tool.ruff.lint]
 select = [
     "E",
+    "W",
     "F",
-    "W",   # pycodestyle + pyflakes
-    "I",   # isort
-    "UP",  # pyupgrade
-    "B",   # bugbear
-    "SIM", # simplify
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "ANN",
+    "PTH",
+    "RET",
+    "SIM",
+    "TID",
+    "RUF",
 ]
-ignore = [
-    "E501", # line too long — ruff format handles this; complaints usually noise
-]
+ignore = ["E501", "B008", "C901", "RET504", "ANN401"]
 
 [tool.ty.rules]
 # mujoco ships as C extensions without .pyi stubs, so every mujoco.* access
@@ -53,8 +58,7 @@ ignore = [
 # the tradeoff: runtime will surface real typos in dataclass field access
 # quickly during dev.
 unresolved-attribute = "ignore"
-# dm_control depends on labmaze, which doesn't build on macOS (Bazel toolchain
-# requirement; Linux EC2 installs cleanly). We use only `dm_control.mjcf` —
-# the mujoco scene-assembly layer — at runtime on the EC2 box. Locally, ty
-# can't resolve the import; ignore so static checks pass on either machine.
-unresolved-import = "ignore"
+division-by-zero = "error"
+deprecated = "error"
+unused-ignore-comment = "error"
+possibly-unresolved-reference = "error"

@@ -128,7 +128,7 @@ def _assert_menagerie_shape(root: mjcf.RootElement, config: TiagoConfig) -> None
         )
 
 
-def load_tiago(config: TiagoConfig = TiagoConfig()) -> mjcf.RootElement:  # noqa: B008 — frozen dataclass, no shared state
+def load_tiago(config: TiagoConfig = TiagoConfig()) -> mjcf.RootElement:
     """Return a customized, uncompiled TIAGo `mjcf.RootElement` per `config`.
 
     Callers typically treat this as the root and compose more children

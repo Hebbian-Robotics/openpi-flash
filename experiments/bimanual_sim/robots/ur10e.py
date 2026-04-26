@@ -85,11 +85,12 @@ UR10E_ACTUATOR_NAMES: tuple[str, ...] = (
 `UR10E_JOINT_NAMES`. Note: actuator names DROP the `_joint` suffix
 (Menagerie convention)."""
 
-GRIPPER_ACTUATOR_NAME = "fingers_actuator"
+GRIPPER_ACTUATOR_LOCAL_NAME = "fingers_actuator"
 """Single driving actuator on the 2F-85. ctrlrange 0..255 in the
-upstream MJCF; 0 = fully open, 255 = fully closed."""
+upstream MJCF; 0 = fully open, 255 = fully closed. Compiled as
+`<side>/gripper/fingers_actuator` once attached."""
 
-GRIPPER_DRIVER_JOINT_NAME = "right_driver_joint"
+GRIPPER_DRIVER_JOINT_LOCAL_NAME = "right_driver_joint"
 """One of the 8 joints in the 2F-85 finger linkage. We read this
 joint's `qpos` to inspect gripper state; the others are coupled via
 tendons / equality constraints."""
@@ -115,9 +116,7 @@ def _assert_menagerie_shape(root: mjcf.RootElement) -> None:
             )
     for jname in UR10E_JOINT_NAMES:
         if root.find("joint", jname) is None:
-            raise RuntimeError(
-                f"UR10e upstream XML missing expected joint {jname!r}."
-            )
+            raise RuntimeError(f"UR10e upstream XML missing expected joint {jname!r}.")
     if root.find("site", _UR10E_TOOL_SITE_NAME) is None:
         raise RuntimeError(
             f"UR10e upstream XML missing tool-mount site "
@@ -127,7 +126,7 @@ def _assert_menagerie_shape(root: mjcf.RootElement) -> None:
 
 def load_ur10e_with_gripper(
     side: ArmSide,
-    config: UR10eConfig = UR10eConfig(),  # noqa: B008 — frozen dataclass
+    config: UR10eConfig = UR10eConfig(),
 ) -> mjcf.RootElement:
     """Load UR10e, attach a Robotiq 2F-85 to its wrist flange, and
     namespace the whole assembly with `side`'s value (e.g. `left/`).
@@ -144,17 +143,22 @@ def load_ur10e_with_gripper(
     arm.model = side.rstrip("/")
     _assert_menagerie_shape(arm)
 
-    # Attach the 2F-85 at the UR's `attachment_site`. dm_control's
-    # site.attach() returns the attachment frame body — we don't need
-    # the handle here; the gripper's own internal joints/tendons run
-    # the parallel-jaw motion.
+    # Attach the 2F-85 at the UR's `attachment_site`. Set the gripper's
+    # model to `"gripper"` so its bodies compile under
+    # `<side>/gripper/...` — both UR10e and 2F-85 declare a body named
+    # `base`, so a flat empty-model attach would produce a duplicate-
+    # name collision at compile time. Result: `left/gripper/base`,
+    # `left/gripper/fingers_actuator`, `left/gripper/right_driver_joint`,
+    # etc. Arm-handles knows to look under the `gripper/` sub-namescope.
     gripper = mjcf.from_path(str(ROBOTIQ_2F85_XML))
-    # Empty model so gripper bodies sit directly under `<side>/` rather
-    # than `<side>/<gripper-model>/`. Matches a flat arm-with-tool
-    # naming convention; if a future scene wants to address the
-    # gripper subtree distinctly, set this to e.g. `gripper`.
-    gripper.model = ""
+    gripper.model = "gripper"
     tool_site = arm.find("site", _UR10E_TOOL_SITE_NAME)
     tool_site.attach(gripper)
 
     return arm
+
+
+GRIPPER_NAMESPACE = "gripper/"
+"""Sub-namespace prefix the 2F-85 sits under inside the UR's namescope.
+Combined with the side prefix it gives compiled names like
+`left/gripper/fingers_actuator`. Exposed for `arm_handles.py`."""
