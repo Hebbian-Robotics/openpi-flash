@@ -27,14 +27,13 @@ from dm_control import mjcf
 
 from arm_handles import ArmHandles, ArmSide, arm_joint_suffixes
 from cameras import CameraRole
-from paths import D435I_XML
+from paths import D405_MESH_STL, D435I_XML
 from robots.mobile_aloha import (
     BASE_X_JOINT_NAME,
     BASE_Y_JOINT_NAME,
     BASE_YAW_JOINT_NAME,
     LEFT_ARM_MOUNT_SITE,
     RIGHT_ARM_MOUNT_SITE,
-    TOP_CAM_MOUNT_SITE,
     load_mobile_aloha,
 )
 from robots.piper import load_piper
@@ -88,16 +87,24 @@ def base_aux_targets(*, x: float, y: float, yaw: float) -> tuple[tuple[str, floa
     )
 
 
-CAMERAS: tuple[tuple[str, CameraRole], ...] = (("forward_cam", CameraRole.TOP),)
+CAMERAS: tuple[tuple[str, CameraRole], ...] = (
+    ("forward_cam", CameraRole.TOP),
+    ("left/wrist_d405_cam", CameraRole.WRIST),
+    ("right/wrist_d405_cam", CameraRole.WRIST),
+)
 
-# Top cam is rigidly attached to base_link with optical axis along chassis
-# +x, so the view always frames whatever the robot is facing — no yaw-driven
-# swing. The d435i mesh body is still parented to the pole site for visual
-# fidelity, but the camera itself bypasses it to keep the frame story simple.
+# `forward_cam` is rigidly attached to base_link with optical axis along
+# chassis +x, so the view always frames whatever the robot is facing — no
+# yaw-driven swing. The d435i mesh sits beside the camera, oriented to match.
+# Wrist cameras live on each Piper's link6 and look along the gripper's +z
+# axis (the tool-use direction), giving two POV-style views that pair well
+# with the static top view for video rendering.
 _ALERT_RACK_BODY_NAME = f"rack_{LAYOUT.alert.row}_r{LAYOUT.alert.rack_index}"
 
 CAMERA_INVARIANTS: tuple[CameraInvariant, ...] = (
     FixedCameraInvariant(name="forward_cam", parent_body="base_link"),
+    FixedCameraInvariant(name="left/wrist_d405_cam", parent_body="left/link6"),
+    FixedCameraInvariant(name="right/wrist_d405_cam", parent_body="right/link6"),
 )
 
 # All static geometry sits inside one `data_center` body (racks + servers +
@@ -413,15 +420,40 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
     # Racks + servers + indicator lights.
     _add_data_center(root)
 
-    # Bimanual Piper arms on Mobile ALOHA's front mount sites. Mirrors the
-    # legacy tiago_piper scene's per-arm subtree-prep (TCP site on link6,
-    # then attach), but with no wrist camera (Piper's wrist orientation
-    # convention differs from UR10e and the legacy scene didn't wire
-    # wrist cams either).
+    # Shared D405 mesh asset, referenced by both pipers' wrist visuals.
+    # Declared on the parent root once (not per-arm) so the compiled model
+    # has a single mesh asset instead of two redundant copies — mjcf
+    # resolves the cross-namescope reference by Element identity.
+    d405_mesh = root.asset.add("mesh", name="d405", file=str(D405_MESH_STL))
+
+    # Bimanual Piper arms on Mobile ALOHA's front mount sites. Each arm
+    # carries a TCP site, a D405 visual mesh, and a wrist camera on link6
+    # — the wrist cam looks along link6 +z (the gripper / tool axis) so
+    # the view always frames whatever the arm is reaching for.
     arm_mount_sites = {
         ArmSide.LEFT: LEFT_ARM_MOUNT_SITE,
         ArmSide.RIGHT: RIGHT_ARM_MOUNT_SITE,
     }
+    # Wrist-cam mount offset, expressed in link6's local frame:
+    #   link6 +z is the gripper axis (fingers attach at z = +0.135).
+    #   link6 -x is the dorsal "top" of the wrist at home pose, where
+    #     a D405 typically mounts on ALOHA-style Piper rigs. Verified
+    #     by trial: -y_link6 reads as "right side", +x_link6 reads as
+    #     "bottom", so -x_link6 is the perpendicular "top" axis.
+    # Offsetting perpendicular (rather than along z) keeps the cam body
+    # OUT of the finger volume; the small +z component lifts it past
+    # the wrist motor housing so the lens isn't occluded by link6 mesh.
+    # link6 itself rotates with joint6, so the cam follows the wrist
+    # roll automatically — whichever side the cam starts on stays its
+    # side after every rotation.
+    wrist_cam_pos = [-0.05, 0.0, 0.04]
+    # Camera quat = (+90° about z_link6) ∘ (180° about x_link6), pre-
+    # composed: the 180°-x flip points -z_cam onto +z_link6 (look
+    # direction = down the gripper), and the +90° z roll rotates the
+    # camera "up" axis onto +x_link6 so the rendered frame is upright
+    # when the cam sits on the dorsal -y side of the wrist.
+    _SQRT_HALF = 0.5**0.5
+    wrist_cam_quat = [0.0, _SQRT_HALF, _SQRT_HALF, 0.0]
     for side in ARM_PREFIXES:
         piper = load_piper(side)
         link6 = piper.find("body", "link6")
@@ -436,6 +468,27 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
             pos=[0.0, 0.0, 0.14],
             size=[0.006, 0.006, 0.006],
         )
+        # D405 visual mesh — co-located with the camera so the body
+        # reads as a real D405 sitting on top of the wrist. Mesh quat
+        # matches the cam quat so the mesh's lens face aligns with the
+        # cam's optical axis.
+        link6.add(
+            "geom",
+            dclass="visual",
+            type="mesh",
+            mesh=d405_mesh,
+            pos=wrist_cam_pos,
+            quat=wrist_cam_quat,
+            rgba=[0.12, 0.12, 0.14, 1.0],
+        )
+        link6.add(
+            "camera",
+            name="wrist_d405_cam",
+            pos=wrist_cam_pos,
+            quat=wrist_cam_quat,
+            mode="fixed",
+            fovy=87.0,
+        )
         mount_site_name = arm_mount_sites[side]
         mount_site = root.find("site", mount_site_name)
         if mount_site is None:
@@ -445,32 +498,41 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
             )
         mount_site.attach(piper)
 
-    # D435i mesh body on the camera pole (purely visual — gives the camera
-    # something to look like). The actual camera is attached separately to
-    # `base_link` below so we have direct control over its frame.
-    top_d435i = mjcf.from_path(str(D435I_XML))
-    top_d435i.model = "top"
-    top_cam_mount = root.find("site", TOP_CAM_MOUNT_SITE)
-    if top_cam_mount is None:
-        raise RuntimeError(f"mobile-aloha mount site {TOP_CAM_MOUNT_SITE!r} not found")
-    top_cam_mount.attach(top_d435i)
-
-    # Forward-facing top camera, rigidly attached to the chassis. Bypass the
-    # d435i body so the camera frame doesn't depend on the menagerie XML's
-    # internal orientation — this gives a predictable, always-faces-forward
-    # cinematic. `quat = (0.7071, 0, -0.7071, 0)` is -π/2 about base_link's
-    # +y axis, which rotates the camera's default look direction (-z_cam) so
-    # it points along base_link's +x axis (chassis forward). The camera
-    # rotates with the chassis through the planar yaw joint, so the view
-    # always frames whatever direction the robot is heading.
+    # Top-camera + d435i mesh, both attached directly to base_link via a
+    # scene-local site. We deliberately bypass the shared `top_cam_mount`
+    # site (whose +90°-x quat was authored for the legacy live scene's
+    # camera convention) so this scene can specify the orientation
+    # explicitly without touching robots/mobile_aloha.py.
     base_link_body = root.find("body", "base_link")
     if base_link_body is None:
         raise RuntimeError("Mobile ALOHA chassis body 'base_link' not found")
+    # Site quat = composition of (+90° about x) · (-90° about z), pre-
+    # composed once: this yaws the d435i mesh -90° about its post-rotation
+    # vertical axis after laying it horizontal. Empirically this lines the
+    # lens up with chassis +x — the prior orientation read as "facing
+    # left" because the bare +90°-x rotation pointed the lens along
+    # chassis +y.
+    indicator_top_cam_mount = base_link_body.add(
+        "site",
+        name="indicator_top_cam_mount",
+        pos=[0.076, 0.0, 1.600],
+        quat=[0.5, 0.5, -0.5, -0.5],
+        size=[0.001, 0.001, 0.001],
+    )
+    top_d435i = mjcf.from_path(str(D435I_XML))
+    top_d435i.model = "top"
+    indicator_top_cam_mount.attach(top_d435i)
+
+    # `forward_cam` uses xyaxes (rather than a quat) so the orientation is
+    # spelled out in the parent (base_link) frame: cam +x = -y_body
+    # (camera right), cam +y = +z_body (camera up), and -z_cam = +x_body
+    # (look direction). This produces a horizontal forward-facing view
+    # that yaws with the chassis.
     base_link_body.add(
         "camera",
         name="forward_cam",
-        pos=[0.076, 0.0, 1.6],  # at the camera-pole top, in chassis local frame
-        quat=[0.7071067811865476, 0.0, -0.7071067811865476, 0.0],
+        pos=[0.076, 0.0, 1.6],
+        xyaxes=[0.0, -1.0, 0.0, 0.0, 0.0, 1.0],
         mode="fixed",
         fovy=69.0,
     )
