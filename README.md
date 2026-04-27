@@ -6,6 +6,14 @@ openpi-flash gives robots the task-specific brain they need to actually ship
 into production environments like fulfillment, retail, and other commercial
 deployments where a general-purpose policy isn't enough.
 
+## Key features
+
+If you're coming from the upstream [openpi](https://github.com/Physical-Intelligence/openpi) server, these are the key additions openpi-flash includes:
+
+- **Planner module** — specialize a general VLA to your task distribution with a fine-tuned pi0.5 subtask generator using language coaching. Loads alongside the action policy, and jointly conditions the high level task prompts with the subtask steering before action inference. See [Subtask generation (planner)](#subtask-generation-planner).
+- **QUIC-first inference transport** — we replaced the upstream WebSocket-only path with a QUIC-first transport stack for low latency inference, up to 10x improvement over WebSocket in a single round trip. See [QUIC (recommended for EC2/Docker)](#quic-recommended-for-ec2docker).
+- **Rust transport layer** — a Rust binary that handles what Python cannot do efficiently per inference call, like network transport, serialization, and image preprocessing, all running outside the Python GIL for true concurrency. It bridges the openpi-flash server (fronting the inference backend) and the openpi-flash client (embedded in the robot control loop) with a new transport layer for further latency improvements. See [`flash-transport/`](flash-transport/).
+
 ## Prerequisites
 
 - Python 3.11
