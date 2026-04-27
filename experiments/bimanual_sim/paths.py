@@ -5,17 +5,22 @@ vs. EC2, etc.) doesn't require editing Python. Convention: clone
 `mujoco_menagerie` into `$HOME/mujoco_menagerie`; override with the
 `MENAGERIE_PATH` env var if you put it elsewhere.
 
-External filesystem paths are parsed at import via `parse_menagerie_xml`: a
-missing MJCF raises a clear error here rather than later as a cryptic MuJoCo
-load failure downstream. Downstream code consumes the refined `MenagerieXml`
-type, which carries the proof that the file exists.
+Each menagerie-relative path validates the file exists at *first access*, not
+at module import. This matters because `paths` is imported transitively by
+every scene module: eager validation would force the Piper / TIAGo legacy
+assets to be present even when the live UR10e + Mobile-ALOHA scene doesn't
+touch them. Lazy access localises the failure to "this scene actually uses
+this asset and the asset is missing", which is the only useful failure mode.
+
+Downstream code consumes the refined `MenagerieXml` / `MenagerieMesh` types,
+which carry the proof that the file exists.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import NewType
+from typing import TYPE_CHECKING, NewType
 
 # A menagerie-relative XML path whose existence has been verified at
 # construction time. Produced only by `parse_menagerie_xml`.
@@ -38,7 +43,7 @@ def _resolve_menagerie() -> Path:
 def parse_menagerie_xml(*parts: str) -> MenagerieXml:
     """Resolve a menagerie-relative MJCF path; raise if it doesn't exist.
 
-    The raise-at-import gives one clear failure site ("menagerie not cloned"
+    The raise-at-access gives one clear failure site ("menagerie not cloned"
     or "that XML path is wrong") instead of the opaque MuJoCo parse error
     you'd get when `MjSpec.from_file` is eventually called on a missing file.
     """
@@ -64,26 +69,41 @@ def parse_menagerie_mesh(*parts: str) -> MenagerieMesh:
     return MenagerieMesh(path)
 
 
-MENAGERIE: Path = _resolve_menagerie()
-PIPER_XML: MenagerieXml = parse_menagerie_xml("agilex_piper", "piper.xml")
-# Universal Robots UR10e — 6-DoF revolute arm with 1.3 m reach. Used by
-# scenes/data_center.py as the bimanual workhorse; the upstream MJCF
-# ships standalone (no built-in gripper) so we attach a Robotiq 2F-85
-# at its `attachment_site` on `wrist_3_link`.
-UR10E_XML: MenagerieXml = parse_menagerie_xml("universal_robots_ur10e", "ur10e.xml")
-# Robotiq 2F-85 parallel-jaw gripper — tendon-coupled, single actuator
-# (`fingers_actuator`, ctrl 0..255). Mounts on the UR10e's wrist flange.
-ROBOTIQ_2F85_XML: MenagerieXml = parse_menagerie_xml("robotiq_2f85", "2f85.xml")
-FRANKA_SCENE_XML: MenagerieXml = parse_menagerie_xml("franka_emika_panda", "scene.xml")
-# PAL TIAGo single-arm: differential-drive base + torso lift. Used by
-# scenes/data_center.py as the mobile embodiment (its single arm gets stripped
-# by robots.tiago.load_tiago).
-TIAGO_XML: MenagerieXml = parse_menagerie_xml("pal_tiago", "tiago.xml")
-# Intel RealSense D435i package (mesh assets + standalone MJCF).
-D435I_XML: MenagerieXml = parse_menagerie_xml("realsense_d435i", "d435i.xml")
-# D405 wrist cam mesh lives inside ALOHA's asset dir. Referenced directly
-# (no separate D405 package in Menagerie).
-D405_MESH_STL: MenagerieMesh = parse_menagerie_mesh("aloha", "assets", "d405_solid.stl")
+# Lazy menagerie-relative paths. `from paths import UR10E_XML` triggers
+# `__getattr__("UR10E_XML")` exactly once on first import; the resolved path
+# is then bound on the consumer module's namespace, so subsequent accesses
+# are free. Adding a new entry is two lines: append to the right registry
+# below, and declare the type under `TYPE_CHECKING`.
+_MENAGERIE_XMLS: dict[str, tuple[str, ...]] = {
+    "PIPER_XML": ("agilex_piper", "piper.xml"),
+    "UR10E_XML": ("universal_robots_ur10e", "ur10e.xml"),
+    "ROBOTIQ_2F85_XML": ("robotiq_2f85", "2f85.xml"),
+    "TIAGO_XML": ("pal_tiago", "tiago.xml"),
+    "D435I_XML": ("realsense_d435i", "d435i.xml"),
+}
+
+_MENAGERIE_MESHES: dict[str, tuple[str, ...]] = {
+    "D405_MESH_STL": ("aloha", "assets", "d405_solid.stl"),
+}
+
+if TYPE_CHECKING:
+    # Type-only declarations so static analysis sees the names with the
+    # right refined type. At runtime they're produced by `__getattr__`.
+    PIPER_XML: MenagerieXml
+    UR10E_XML: MenagerieXml
+    ROBOTIQ_2F85_XML: MenagerieXml
+    TIAGO_XML: MenagerieXml
+    D435I_XML: MenagerieXml
+    D405_MESH_STL: MenagerieMesh
+
+
+def __getattr__(name: str) -> MenagerieXml | MenagerieMesh:
+    if name in _MENAGERIE_XMLS:
+        return parse_menagerie_xml(*_MENAGERIE_XMLS[name])
+    if name in _MENAGERIE_MESHES:
+        return parse_menagerie_mesh(*_MENAGERIE_MESHES[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Stanford Mobile ALOHA body — combined chassis + lift column + top
 # platform extracted from the project-page CAD download. The original

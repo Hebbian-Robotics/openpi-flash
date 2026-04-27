@@ -5,18 +5,13 @@
 IK code use to drive one prefixed arm. Two robot families are supported:
 
 * `"piper"` — AgileX Piper 6-DoF arm + parallel-jaw with two
-  tendon-coupled finger slide joints (`{side}joint7` / `{side}joint8`).
-  `qpos_idx` / `dof_idx` are length-8 arrays (joints 1..8).
-* `"ur10e"` — Universal Robots UR10e + Robotiq 2F-85 grippper. UR has
-  6 named revolute joints (`{side}shoulder_pan_joint` …
-  `{side}wrist_3_joint`); the 2F-85's tendon-driven 4-bar linkage is
-  driven by a single `{side}fingers_actuator` (ctrl 0..255). Finger
-  joint qpos is NOT puppet-written — the actuator pushes the tendon
-  equality and the linkage settles. `qpos_idx` / `dof_idx` are
-  length-6 arrays (no finger entries).
-
-Per-robot constants (joint name lists, gripper ranges) live here so
-the scene module's only obligation is declaring `ROBOT_KIND`.
+  tendon-coupled finger slide joints. `qpos_idx` / `dof_idx` are
+  length-8 (joints 1..8).
+* `"ur10e"` — Universal Robots UR10e + Robotiq 2F-85. The 2F-85's
+  4-bar linkage is tendon-driven by a single `fingers_actuator`
+  (ctrl 0..255); finger qpos is NOT puppet-written — the actuator
+  pushes the tendon equality and the linkage settles.
+  `qpos_idx` / `dof_idx` are length-6 (no finger entries).
 """
 
 from __future__ import annotations
@@ -58,24 +53,18 @@ _UR10E_ARM_JOINT_SUFFIXES: tuple[str, ...] = (
     "wrist_2_joint",
     "wrist_3_joint",
 )
-"""UR10e arm DoFs in canonical chain order. The 2F-85 mounted at the
-wrist has its own joints but they're tendon-driven and not addressed
-through `qpos_idx` / `dof_idx`."""
+"""UR10e arm DoFs in canonical chain order. 2F-85 finger joints are
+tendon-driven and not addressed through `qpos_idx` / `dof_idx`."""
 
 
 def arm_joint_suffixes(robot_kind: RobotKind) -> tuple[str, ...]:
-    """Return the canonical-order arm joint suffixes for a robot kind.
+    """Return canonical-order arm joint suffixes for a robot kind.
 
-    Single source of truth shared by `get_arm_handles` (resolves IDs
-    from these), the runner (per-tick rerun scalar logging), and
-    teleop (per-joint slider labels). Callers must NOT redefine this
-    list locally — fixing one place + missing the others is the
-    classic drift bug, and these enums are short enough that the
-    type system can't fully prevent transposition.
+    Single source of truth shared by `get_arm_handles`, the runner's
+    rerun scalar logging, and teleop's per-joint slider labels.
+    Callers must NOT redefine this list locally.
     """
     if robot_kind == "piper":
-        # Drop the two finger slides for piper — only the 6 arm DoFs
-        # are user-relevant for IK / per-joint sliders.
         return _PIPER_ARM_JOINT_SUFFIXES[:6]
     if robot_kind == "ur10e":
         return _UR10E_ARM_JOINT_SUFFIXES
@@ -86,34 +75,27 @@ def arm_joint_suffixes(robot_kind: RobotKind) -> tuple[str, ...]:
 class ArmHandles:
     side: ArmSide
     robot_kind: RobotKind
-    # qpos/dof indices for the per-tick puppet writes. Length depends on
-    # robot_kind: piper=8 (joints 1..8), ur10e=6 (UR's 6 DoFs).
+    # piper=8 (joints 1..8), ur10e=6.
     qpos_idx: np.ndarray
     dof_idx: np.ndarray
-    # Joint ids and arm-DoF subset (always the first 6 entries — UR has
-    # exactly 6, Piper's first 6 are the arm joints, the trailing 2
-    # are gripper fingers).
     jnt_ids: np.ndarray
     arm_dof_idx: np.ndarray
-    # Position-actuator ids for the 6 arm DoFs (used by the runner to
-    # mirror puppet qpos into ctrl so the position servos don't fight
-    # back with stale targets).
+    # Position-actuator ids for the 6 arm DoFs. The runner mirrors
+    # puppet qpos into ctrl so position servos don't fight back with
+    # stale targets.
     act_arm_ids: np.ndarray
-    # Single gripper actuator id. Piper: `{side}gripper`. UR10e + 2F-85:
-    # `{side}fingers_actuator`.
     act_gripper_id: int
-    # Body the grasp weld attaches to. Piper: link6 (parent of fingers).
-    # UR10e: wrist_3_link (parent of the 2F-85 attachment frame).
+    # Grasp-weld parent. Piper: link6. UR10e: wrist_3_link (the 2F-85
+    # attachment frame).
     link6_id: int
     tcp_site_id: int
-    gripper_open: float  # ctrl/qpos value for "open"
-    gripper_closed: float  # ctrl/qpos value for "closed"
+    gripper_open: float
+    gripper_closed: float
     weld_ids: np.ndarray  # equality ids, one per cube (may be empty)
 
     @property
     def arm_qpos_idx(self) -> np.ndarray:
-        """qpos indices for the 6 arm DoFs only (drops Piper's gripper
-        slides; same as `qpos_idx` for UR10e since it's already 6-long)."""
+        """qpos indices for the 6 arm DoFs only (drops Piper's gripper slides)."""
         return self.qpos_idx[:6]
 
     @property
@@ -149,12 +131,9 @@ def get_arm_handles(
     elif robot_kind == "ur10e":
         joint_suffixes = _UR10E_ARM_JOINT_SUFFIXES
         # 2F-85 mounts under a `gripper/` sub-namescope (set by
-        # `robots/ur10e.py` to avoid a `base` body-name collision with
-        # the UR), so the driving actuator's compiled name is
-        # `<side>/gripper/fingers_actuator`.
+        # `robots/ur10e.py` to dodge a `base` body-name collision with
+        # the UR).
         gripper_actuator_suffix = "gripper/fingers_actuator"
-        # UR10e's tool flange — the 2F-85 mounts here, and the grasp
-        # weld pins held objects to this body.
         wrist_body_suffix = "wrist_3_link"
     else:  # pragma: no cover — Literal exhausts at type-check time
         raise ValueError(f"unknown robot_kind: {robot_kind!r}")
@@ -166,12 +145,10 @@ def get_arm_handles(
     qpos_idx = np.array([model.jnt_qposadr[j] for j in jnt_ids])
     dof_idx = np.array([model.jnt_dofadr[j] for j in jnt_ids])
 
-    # Arm position actuators — one per arm DoF (Piper: joint1..joint6;
-    # UR10e: shoulder_pan/shoulder_lift/elbow/wrist_1/wrist_2/wrist_3,
-    # which drop the `_joint` suffix per the upstream Menagerie naming).
+    # UR10e actuators drop the `_joint` suffix per upstream Menagerie naming.
     if robot_kind == "piper":
         act_arm_names = [f"{side}joint{i}" for i in range(1, 7)]
-    else:  # ur10e
+    else:
         act_arm_names = [
             f"{side}shoulder_pan",
             f"{side}shoulder_lift",
@@ -194,27 +171,20 @@ def get_arm_handles(
     )
     tcp_site_id = _resolve_id(model, mujoco.mjtObj.mjOBJ_SITE, f"{side}tcp", "TCP site")
 
-    # Gripper open/closed values.
     if robot_kind == "piper":
-        # Piper joint7 is a slide (range 0..0.035 m). Joint8 mirrors it
-        # via tendon. We read the joint range to derive open/closed
-        # rather than hardcoding numerics.
+        # Piper joint7 is a slide (range 0..0.035 m); joint8 mirrors via
+        # tendon. Read the range rather than hardcoding numerics.
         gripper_jnt_id = _resolve_id(
             model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}joint7", "Piper joint7"
         )
         lo, hi = model.jnt_range[gripper_jnt_id]
         gripper_open = float(hi)
         gripper_closed = float(lo)
-    else:  # ur10e + 2F-85
-        # Robotiq 2F-85 driving actuator: ctrlrange [0, 255] — 0 fully
-        # open, 255 fully closed. Tendon equality propagates the
-        # actuator force to the 4-bar finger linkage.
+    else:
+        # Robotiq 2F-85 ctrlrange: 0 fully open, 255 fully closed.
         gripper_open = 0.0
         gripper_closed = 255.0
 
-    # Weld equalities for grasp interactions (one per cube). Names
-    # follow the same `<side>_grasp_cube<i>` convention regardless of
-    # robot kind — the grasp-weld registry is robot-agnostic.
     weld_ids = np.array(
         [
             mujoco.mj_name2id(

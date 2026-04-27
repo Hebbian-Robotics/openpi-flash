@@ -1,31 +1,26 @@
-"""Declarative geometry for the new (mobile-aloha + UR10e) data-center scene.
+"""Declarative geometry for the mobile-ALOHA + UR10e + 2F-85 data-center
+scene, sized per `experiments/bimanual_sim/NEW_LAYOUT.md`.
 
-Mirrors `scenes/data_center_tiago_layout.py` for everything that's
-robot-agnostic — rack, cart, servers, ports, cables — but swaps the
-mobile-base specifics:
+Single source of truth for rack / server / cart / bezel-handle world
+coordinates. Robot chassis geometry lives in `robots/mobile_aloha.py`.
 
-* Mobile-base geometry and UR10e mount sites live in
-  `robots/mobile_aloha.py`, which is the source of truth for the CAD
-  mesh's frame-specific constants.
-* No `_LiftTargets` dataclass — the UR10e does all z-motion via its
-  own joints, so there's no aux lift to interpolate.
-* `_Arm.home_q` / `ik_seed_q` retuned for UR10e's joint convention
-  (6 named revolute joints).
+The scene narrative is the four-action server swap:
 
-Rack dims, server slot z, port positions, cable derivations, and cart
-shelf heights all stay verbatim from the legacy layout — the world-
-frame IK targets are robot-agnostic.
+    A. Extract old server from rack
+    B. Place old server on trolley bottom tray
+    C. Pick new server from trolley top shelf
+    D. Insert new server back into rack
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from arm_handles import ArmSide
-from scene_base import JointConfig, Position3
+from scene_base import JointConfig, Position3, TaskPhase
 
 Half3 = tuple[float, float, float]
 Rgba = tuple[float, float, float, float]
@@ -38,58 +33,52 @@ Rgba = tuple[float, float, float, float]
 
 @dataclass(frozen=True)
 class _Cart:
-    """Floor-standing service cart parked next to the robot.
+    """Mobile service trolley parked to the robot's right.
 
-    Two shelves sized to hold 2-3 servers each. Same dimensions as the
-    legacy scene — robot-agnostic since the cart sits on the floor at
-    fixed world coords.
+    Sized to a generic two-shelf datacenter utility cart (~36" x 24" x
+    36" — Uline / Lakeside / Rubbermaid form factor for general service
+    work, as opposed to a purpose-built ServerLIFT with hydraulics).
+
+    Footprint 0.90 m x 0.60 m centered at world (0.30, 0.90). The 0.60 m
+    Y span gives 6 cm clearance per side around a 0.48 m wide server.
+    Bottom tray Z = 0.25 m, top shelf Z = 0.85 m — 60 cm clearance is
+    plenty for a 4U server with hand room.
+
+    The bottom tray is modelled as a static low shelf — real cart trays
+    slide forward but the demo doesn't require it.
     """
 
-    center_x: float = 0.25
-    center_y: float = -0.65
+    center_x: float = 0.30
+    center_y: float = 0.90
     half_x: float = 0.45
     half_y: float = 0.30
     top_shelf_z: float = 0.85
-    bottom_shelf_z: float = 0.60
+    bottom_shelf_z: float = 0.25
     shelf_thickness: float = 0.01
     post_half: float = 0.020
     caster_radius: float = 0.035
-    handle_height: float = 0.95
-
-
-@dataclass(frozen=True)
-class _Bins:
-    """Legacy on-torso bins — unused by the mobile-aloha scene but
-    retained for backward-compat (the legacy `_Tiago` scene's
-    `new_server_initial_world_pos` referenced these). The new scene
-    sources `new_server_initial_world_pos` from `_Cart.top_shelf_z`
-    directly so these are dead in this layout — kept only because
-    the old layout's typed shape used them; safe to delete in a
-    follow-up cleanup."""
-
-    half: Half3 = (0.24, 0.28, 0.08)
-    local_x: float = 0.16
-    new_local_z: float = 0.13
-    old_local_z: float = -0.28
-    wall_thickness: float = 0.01
+    handle_height: float = 0.97
 
 
 @dataclass(frozen=True)
 class _Rack:
-    """Static 19" cabinet parked in front of the robot.
+    """Static 19" 42U rack standing in front of the robot.
 
-    Centre pushed to world x = +1.30 m (front face at +1.00 m) so the
-    Stanford ALOHA body's forward boom (which extends to world x =
-    +0.926 m at z ≈ 1.0 m) clears the rack front face by ~74 mm. The
-    UR10e arms mounted at body centre then reach forward ~1.0 m to
-    grip cables / extract servers — well within UR10e's 1.3 m reach
-    envelope, and matches the real Stanford ALOHA "drives up to a
-    workbench" use case.
+    Outer dimensions per NEW_LAYOUT §1: 0.60 m wide x 1.00 m deep x
+    2.00 m tall, with the front face at world X = 0.60 m. That puts
+    the rack center at X = 1.10 m (front + half-depth = 0.60 + 0.50)
+    and Z = 1.00 m, so the server slot at world Z = 1.00 m sits
+    exactly mid-rack — natural for both arm reach (UR10e arm bases at
+    Z = 1.00 m) and the wrist camera's view angle.
+
+    The robot at world origin facing +X, with a chassis ~0.40 m deep,
+    leaves ~20 cm front-edge-to-rack-face clearance — matching the
+    spec's "front edge 20 cm from rack face" callout.
     """
 
-    center_x: float = 1.30
-    half: Half3 = (0.30, 0.30, 0.65)
-    center_z: float = 0.65
+    center_x: float = 1.10
+    half: Half3 = (0.50, 0.30, 1.00)
+    center_z: float = 1.00
     wall_thickness: float = 0.012
 
     @property
@@ -126,39 +115,52 @@ class _Rack:
 
 @dataclass(frozen=True)
 class _Server:
-    """Server chassis geometry (shared by `server` and `new_server`)."""
+    """Server chassis geometry per NEW_LAYOUT §1.
 
-    half: Half3 = (0.18, 0.22, 0.045)
-    slot_z: float = 0.88
-    mass: float = 0.5
+    Half-extents in (X depth, Y width, Z height): the spec's full
+    dimensions are 0.70 x 0.48 x 0.09 m. 12 kg mass — heavy enough
+    that the demo motion has to be bimanual (one UR10e wrist torque
+    rating ≈ 12.5 kg payload at standard reach, so a 12 kg load at
+    full extension would saturate a single arm).
+    """
 
-
-@dataclass(frozen=True)
-class _Ports:
-    """Three ports across the server front face (power / network / fiber)."""
-
-    local_x_depth: float = 0.01
-    y_offsets: tuple[float, float, float] = (-0.12, 0.0, +0.12)
-    colors: tuple[Rgba, Rgba, Rgba] = (
-        (0.90, 0.22, 0.22, 1.0),  # red — power
-        (0.20, 0.78, 0.30, 1.0),  # green — network
-        (0.22, 0.42, 0.90, 1.0),  # blue — fiber
-    )
+    half: Half3 = (0.35, 0.24, 0.045)
+    slot_z: float = 1.00
+    mass: float = 12.0
 
 
 @dataclass(frozen=True)
-class _Cables:
-    """Cable rod + patch-panel placement. Robot-agnostic."""
+class _BezelHandles:
+    """Front-bezel handle pair on each server.
 
-    n_seg: int = 14
-    seg_len: float = 0.07
-    seg_radius: float = 0.009
-    conn_len: float = 0.02
-    patch_panel_z_below_server: float = 0.07
-    patch_panel_half_x: float = 0.012
-    patch_panel_half_y: float = 0.20
-    patch_panel_half_z: float = 0.025
-    connector_stub_len: float = 0.04
+    In the rack-inserted pose, handles sit on the server's -X face
+    (the bezel) at Y offsets ±0.12 m from the server centerline. The
+    grippers approach along -X (TCP normal pointing into rack). When
+    the server is on the cart, handles are still at ±0.12 m from
+    server centerline along Y, but the grippers approach from -Y
+    (chassis facing +Y to reach the cart).
+    """
+
+    y_offset_abs: float = 0.12
+    """Half the handle separation (24 cm bezel-to-bezel)."""
+
+    handle_radius: float = 0.012
+    """Visual cylinder radius — small enough to fit between the
+    2F-85's 85 mm finger gap."""
+
+    handle_length: float = 0.04
+    """Length of the handle cylinder normal to the bezel face."""
+
+
+@dataclass(frozen=True)
+class _Base:
+    """Mobile ALOHA chassis starting pose (x, y, yaw) in world coordinates.
+
+    Capture a new pose via teleop's "Print base pose for layout" — that
+    emits a copy-pasteable line for this default factory.
+    """
+
+    home_pose: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)
@@ -171,37 +173,50 @@ class _Arm:
     `home_q` is keyed by `ArmSide` because the two arms mount at
     mirrored chassis positions (left at body Y = +0.295, right at
     body Y = -0.295) — a single shared joint vector produces non-
-    mirrored visual poses, so each side gets its own. The values
-    were captured live via teleop's "Print home_q for layout"
-    button after hand-posing the arms into a symmetric stow.
+    mirrored visual poses, so each side gets its own.
 
     `ik_seed_q` stays a single shared vector — it's the DAQP starting
     hint, not a visible pose, and the same forward-reaching basin
-    works for both arms after solve-time mirroring of the seed if
-    needed.
+    works for both arms.
     """
 
     home_q: Mapping[ArmSide, JointConfig] = field(
         default_factory=lambda: {
             ArmSide.LEFT: np.array([-3.14, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]),
-            # Same joint vector as LEFT — visualises what "identical
-            # joint states" looks like. Because the two arms mount at
-            # mirrored chassis Y positions, this is NOT a mirror-image
-            # pose; the right arm will match left's joint angles
-            # numerically but face the opposite chassis side.
             ArmSide.RIGHT: np.array([-3.14, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]),
         }
     )
-    # IK seed = half-extended forward pose: shoulder_lift = -45°,
-    # elbow = +45° puts the TCP roughly 0.85 m forward and 0.42 m up
-    # from the base — close to where rack/cart targets live, so DAQP
-    # converges from the first snap. The folded `home_q` (shoulder
-    # lift = -90°, elbow = +90°) leaves the TCP ~1 m above the base
-    # which is too far from the basin for rack reaches now that the
-    # bases are pulled back to the body x = 0.226.
     ik_seed_q: JointConfig = field(
         default_factory=lambda: np.array([0.0, -0.7854, 0.7854, 0.0, -1.5708, 0.0])
     )
+
+
+@dataclass(frozen=True)
+class _PhasePose:
+    """Hand-authored start pose for a specific TaskPhase.
+
+    Captured via teleop's "Save current as start of [phase]" button
+    and dumped via "Print phase homes for layout". Lets the user boot
+    the scene mid-demo by passing `--start-phase REMOVE_OLD_SERVER`
+    instead of always starting at scene home — useful for iterating on
+    just one phase without replaying the whole pickup sequence.
+    """
+
+    arm_q: Mapping[ArmSide, JointConfig]
+    base_pose: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class _PhaseHomes:
+    """Per-phase saved start poses.
+
+    Default factory ships an empty mapping; the user populates it from
+    teleop captures. Empty is a valid state — `apply_initial_state`
+    falls back to the scene home pose if `start_phase` isn't in the
+    map, so unauthored phases just behave like the default boot.
+    """
+
+    by_phase: Mapping[TaskPhase, _PhasePose] = field(default_factory=dict)
 
 
 # -----------------------------------------------------------------------------
@@ -213,22 +228,20 @@ class _Arm:
 class DataCenterLayout:
     """Single source of truth for `scenes/data_center.py` geometry.
 
-    Same shape as the legacy layout, with robot-base geometry kept in
-    `robots/mobile_aloha.py` and `_LiftTargets` removed. World-frame
-    derived properties (server slot pose, port world positions, cart
-    shelf poses, patch panel anchors) are robot-agnostic and identical
-    to the legacy layout.
+    Robot-base geometry lives in `robots/mobile_aloha.py`. World-frame
+    derived properties (server slot pose, bezel handle positions,
+    cart shelf poses) are computed from the dataclass fields below.
     """
 
-    bins: _Bins = field(default_factory=_Bins)
     cart: _Cart = field(default_factory=_Cart)
     rack: _Rack = field(default_factory=_Rack)
     server: _Server = field(default_factory=_Server)
-    ports: _Ports = field(default_factory=_Ports)
-    cables: _Cables = field(default_factory=_Cables)
+    handles: _BezelHandles = field(default_factory=_BezelHandles)
+    base: _Base = field(default_factory=_Base)
     arm: _Arm = field(default_factory=_Arm)
+    phase_homes: _PhaseHomes = field(default_factory=_PhaseHomes)
 
-    # ---- Rack / server cross-derivations (verbatim from legacy) ----
+    # ---- Rack / server cross-derivations ----
 
     @property
     def server_front_x(self) -> float:
@@ -242,67 +255,80 @@ class DataCenterLayout:
     def server_world_pos_in_rack(self) -> Position3:
         return np.array([self.server_center_x_in_rack, 0.0, self.server.slot_z])
 
-    @property
-    def port_local_x_on_server(self) -> float:
-        return -self.server.half[0] + self.ports.local_x_depth
+    # In rack: bezel face at X = front_face_x = 0.60 m, handles at Y = ±0.12 m,
+    # Z = slot_z. World-frame IK targets for Action A grasp / Action D release.
 
-    def port_world_pos(self, i: int) -> Position3:
-        return np.array(
-            [
-                self.server_center_x_in_rack + self.port_local_x_on_server,
-                self.ports.y_offsets[i],
-                self.server.slot_z,
-            ]
-        )
+    def handle_world_pos_in_rack(self, side: ArmSide) -> Position3:
+        y = self.handles.y_offset_abs if side is ArmSide.RIGHT else -self.handles.y_offset_abs
+        return np.array([self.rack.front_face_x, y, self.server.slot_z])
 
-    def port_anchor_in_server_frame(self, i: int) -> tuple[float, float, float]:
-        return (self.port_local_x_on_server, self.ports.y_offsets[i], 0.0)
+    def handle_local_pos_on_server(self, side: ArmSide) -> tuple[float, float, float]:
+        """Handle position in the server's local frame — used to attach
+        the handle geom to the server body."""
+        y = self.handles.y_offset_abs if side is ArmSide.RIGHT else -self.handles.y_offset_abs
+        return (-self.server.half[0], y, 0.0)
 
-    # ---- Patch-panel + cable-anchor derivations ----
+    # Cart center is at (0.30, 0.90), but the server rests at (0.30, 0.80) —
+    # offset -0.10 m in Y so it occupies the robot-side half of the cart
+    # footprint, leaving the trolley handle / back-rail on the +Y side
+    # (matches NEW_LAYOUT "Old server rest position: Center (30, 80, 29.5)").
 
-    @property
-    def patch_panel_world_pos(self) -> Position3:
-        return np.array(
-            [
-                self.rack.front_face_x + self.cables.patch_panel_half_x,
-                0.0,
-                self.server.slot_z - self.cables.patch_panel_z_below_server,
-            ]
-        )
-
-    def cable_anchor_world(self, cable_idx: int) -> Position3:
-        return np.array(
-            [
-                self.rack.front_face_x + 2 * self.cables.patch_panel_half_x,
-                self.ports.y_offsets[cable_idx],
-                self.server.slot_z
-                - self.cables.patch_panel_z_below_server
-                + self.cables.patch_panel_half_z,
-            ]
-        )
+    SERVER_ON_CART_Y_OFFSET: float = -0.10
 
     @property
-    def cable_max_len(self) -> float:
-        return self.cables.n_seg * self.cables.seg_len + self.cables.conn_len
+    def server_on_cart_x(self) -> float:
+        return self.cart.center_x
 
-    # ---- Cart placements ----
+    @property
+    def server_on_cart_y(self) -> float:
+        return self.cart.center_y + self.SERVER_ON_CART_Y_OFFSET
 
     @property
     def new_server_initial_world_pos(self) -> Position3:
+        """New server resting on the cart's TOP shelf (Action C source)."""
         return np.array(
             [
-                self.cart.center_x,
-                self.cart.center_y,
+                self.server_on_cart_x,
+                self.server_on_cart_y,
                 self.cart.top_shelf_z + self.server.half[2],
             ]
         )
 
     @property
     def old_server_stow_world_pos(self) -> Position3:
+        """Old server's rest position on the cart's BOTTOM tray (Action B target)."""
         return np.array(
             [
-                self.cart.center_x,
-                self.cart.center_y,
+                self.server_on_cart_x,
+                self.server_on_cart_y,
+                self.cart.bottom_shelf_z + self.server.half[2],
+            ]
+        )
+
+    def handle_world_pos_on_cart_top(self, side: ArmSide) -> Position3:
+        """Handle position when the new server sits on the cart top
+        shelf — Action C grip target."""
+        y_offset = (
+            self.handles.y_offset_abs if side is ArmSide.RIGHT else -self.handles.y_offset_abs
+        )
+        return np.array(
+            [
+                self.server_on_cart_x,
+                self.server_on_cart_y + y_offset,
+                self.cart.top_shelf_z + self.server.half[2],
+            ]
+        )
+
+    def handle_world_pos_on_cart_bottom(self, side: ArmSide) -> Position3:
+        """Handle position when the old server is placed on the bottom
+        tray — Action B release target."""
+        y_offset = (
+            self.handles.y_offset_abs if side is ArmSide.RIGHT else -self.handles.y_offset_abs
+        )
+        return np.array(
+            [
+                self.server_on_cart_x,
+                self.server_on_cart_y + y_offset,
                 self.cart.bottom_shelf_z + self.server.half[2],
             ]
         )
@@ -327,11 +353,11 @@ class DataCenterLayout:
                 f"server slot z={self.server.slot_z} outside rack vertical span "
                 f"[{self.rack.bottom_z:.3f}, {self.rack.top_z:.3f}]"
             )
-        for i, y in enumerate(self.ports.y_offsets):
-            if abs(y) > self.server.half[1]:
-                raise ValueError(
-                    f"port {i} y_offset={y} outside server half-width ±{self.server.half[1]}"
-                )
+        if self.handles.y_offset_abs > self.server.half[1]:
+            raise ValueError(
+                f"bezel handle y_offset={self.handles.y_offset_abs} outside "
+                f"server half-width ±{self.server.half[1]}"
+            )
 
 
 LAYOUT = DataCenterLayout()
@@ -343,5 +369,5 @@ LAYOUT = DataCenterLayout()
 
 HOME_ARM_Q_BY_SIDE: Mapping[ArmSide, JointConfig] = LAYOUT.arm.home_q
 IK_SEED_Q = LAYOUT.arm.ik_seed_q
-
-_PORT_WORLD_POS: Callable[[int], Position3] = LAYOUT.port_world_pos
+BASE_HOME_POSE: tuple[float, float, float] = LAYOUT.base.home_pose
+PHASE_HOMES: Mapping[TaskPhase, _PhasePose] = LAYOUT.phase_homes.by_phase
