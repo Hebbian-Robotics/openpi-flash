@@ -206,6 +206,20 @@ def _advance_one_arm(
         for weld_name in step.attach_deactivate:
             eq_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_EQUALITY, weld_name))
             data.eq_active[eq_id] = 0
+        # Headless mirror of runner.py's `set_geom_rgba` block. The live
+        # runner also pushes the new colour to viser via update_geom_rgba;
+        # for the offline renderer that's not relevant — `model.geom_rgba`
+        # is the only thing MuJoCo's `Renderer.render()` reads, and writing
+        # it here is enough for the indicator flip to land in the rendered
+        # video. Without this the headless render kept showing the alert
+        # red even after the WAIT-phase flip step fired.
+        for geom_name, rgba in step.set_geom_rgba:
+            geom_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name))
+            if geom_id < 0:
+                raise ValueError(
+                    f"step {step.label!r} references unknown geom {geom_name!r} in set_geom_rgba"
+                )
+            model.geom_rgba[geom_id] = rgba
 
     alpha = min(1.0, st.t / max(step.duration, 1e-3))
     alpha_s = 0.5 - 0.5 * math.cos(math.pi * alpha)

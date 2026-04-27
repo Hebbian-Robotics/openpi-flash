@@ -384,6 +384,7 @@ def main() -> None:
     gui_play = server.gui.add_button("▶ play / ⏸ pause")
     gui_reset = server.gui.add_button("↺ reset")
     gui_focus_robot = server.gui.add_button("📷 focus on robot")
+    gui_log_cam = server.gui.add_button("📸 log cam pose")
 
     # Resolve chassis qpos addresses once so the focus button can read the
     # live chassis world position. Empty tuple if the scene has no planar
@@ -451,6 +452,26 @@ def main() -> None:
         target = (chassis_x, chassis_y, 1.0)
         for client in server.get_clients().values():
             client.camera.look_at = target
+
+    @gui_log_cam.on_click
+    def _on_log_cam(event: Any) -> None:
+        """Print the clicking client's orbit-cam pose + sim time to stdout.
+        Format mirrors what `tools/render_pov_videos.py` consumes as a
+        directorial keyframe: `pos` and `lookat` are world-frame xyz tuples,
+        `t` is the current sim-clock second. Pause first to freeze the
+        moment, orbit to the framing you want, click — paste the line into
+        the directorial keyframe list."""
+        client = event.client
+        if client is None:
+            return
+        pos = client.camera.position
+        look = client.camera.look_at
+        print(
+            f"cam_pose t={float(data.time):6.2f}  "
+            f"pos=({float(pos[0]):.3f}, {float(pos[1]):.3f}, {float(pos[2]):.3f})  "
+            f"lookat=({float(look[0]):.3f}, {float(look[1]):.3f}, {float(look[2]):.3f})",
+            flush=True,
+        )
 
     sim_dt = float(model.opt.timestep)
     # Decouple render rate from physics timestep: each frame we step physics
