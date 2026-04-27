@@ -41,7 +41,7 @@ from rerun_stream import RerunStreamer
 from scene_base import PhaseContract, Step, TaskPhase
 from scene_check import AttachmentConstraint, CameraInvariant, check_scene, print_schematic
 from teleop import TeleopController
-from viser_render import build_viser_scene, update_viser
+from viser_render import build_viser_scene, update_geom_rgba, update_viser
 from welds import (
     activate_attachment_weld,
     activate_grasp_weld,
@@ -365,7 +365,14 @@ def main() -> None:
     server = viser.ViserServer(host=args.host, port=args.port)
     # `build_viser_scene` reads `data` to bake initial static-geom poses, so
     # `apply_initial_state` must already have run.
-    handles = build_viser_scene(server, model, data)
+    handles, handle_by_geom_id = build_viser_scene(server, model, data)
+
+    # Snapshot the initial geom RGBA + track which geom_ids `set_geom_rgba`
+    # mutates during the run, so `restart()` can restore them. Without this,
+    # an indicator-light flip persists across scene resets — `model.geom_rgba`
+    # is on the model (not data), so `mj_resetData` doesn't touch it.
+    initial_geom_rgba: np.ndarray = np.asarray(model.geom_rgba, dtype=float).copy()
+    rgba_dirty_geom_ids: set[int] = set()
 
     cameras: tuple[tuple[str, CameraRole], ...] = getattr(scene, "CAMERAS", ())
     frustum_handles = add_frustum_widgets(server, model, data, cameras) if cameras else []
@@ -376,6 +383,16 @@ def main() -> None:
     )
     gui_play = server.gui.add_button("▶ play / ⏸ pause")
     gui_reset = server.gui.add_button("↺ reset")
+    gui_focus_robot = server.gui.add_button("📷 focus on robot")
+
+    # Resolve chassis qpos addresses once so the focus button can read the
+    # live chassis world position. Empty tuple if the scene has no planar
+    # base joints (free-play scenes); the button just no-ops in that case.
+    base_focus_qposadr: list[int] = []
+    for jname in getattr(scene, "IK_LOCKED_JOINT_NAMES", ())[:2]:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        if jid >= 0:
+            base_focus_qposadr.append(int(model.jnt_qposadr[jid]))
 
     per_arm_gui: dict[ArmSide, viser.GuiTextHandle] = {}
     for side in arm_sides:
@@ -419,6 +436,22 @@ def main() -> None:
     def _on_reset(_event: Any) -> None:
         control["reset_requested"] = True
 
+    @gui_focus_robot.on_click
+    def _on_focus_robot(_event: Any) -> None:
+        """Re-anchor every connected client's orbit pivot at the chassis
+        position. viser orbits / zooms around `look_at`, which defaults to
+        the scene origin — when the chassis has driven 5 m down the aisle,
+        zooming in toward (0,0,0) feels like a hard limit because you're
+        not actually approaching the robot. This snaps the pivot to the
+        chassis so subsequent zoom/orbit happens around the action."""
+        if len(base_focus_qposadr) < 2:
+            return
+        chassis_x = float(data.qpos[base_focus_qposadr[0]])
+        chassis_y = float(data.qpos[base_focus_qposadr[1]])
+        target = (chassis_x, chassis_y, 1.0)
+        for client in server.get_clients().values():
+            client.camera.look_at = target
+
     sim_dt = float(model.opt.timestep)
     # Decouple render rate from physics timestep: each frame we step physics
     # `phys_steps_per_frame` times so wall-clock advance = render_dt.
@@ -449,6 +482,24 @@ def main() -> None:
         _apply_initial_state(scene, model, data, arms, cube_body_ids, start_phase=start_phase)
         per_arm = fresh_state()
         phase_monitor.reset()
+        # Restore any geom RGBAs that were mutated by `set_geom_rgba` during
+        # the run. Iterate over a copy because `update_geom_rgba` may end up
+        # mutating the registry; clear the dirty set after.
+        for geom_id in list(rgba_dirty_geom_ids):
+            geom_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+            if not geom_name:
+                continue
+            initial = initial_geom_rgba[geom_id]
+            update_geom_rgba(
+                server,
+                model,
+                data,
+                handles,
+                handle_by_geom_id,
+                geom_name,
+                (float(initial[0]), float(initial[1]), float(initial[2]), float(initial[3])),
+            )
+        rgba_dirty_geom_ids.clear()
 
     def advance_arm(side: ArmSide, dt: float) -> str:
         assert task_plan is not None
@@ -517,6 +568,26 @@ def main() -> None:
                 if eq_id < 0:
                     raise ValueError(f"step '{step.label}': unknown attach weld {weld_name!r}")
                 deactivate_weld(data, eq_id)
+            # Visual-only state changes — flip indicator-light colours and the
+            # like. Writes both `model.geom_rgba` and the viser handle so the
+            # browser actually sees the new colour (viser bakes RGBA at handle
+            # creation, so this is a remove-and-re-add under the hood).
+            # Track touched geoms so `restart()` can restore them — without
+            # this, a flipped indicator stays flipped forever after the first
+            # demo run, since `model.geom_rgba` survives `mj_resetData`.
+            for geom_name, rgba in step.set_geom_rgba:
+                geom_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name))
+                if geom_id >= 0:
+                    rgba_dirty_geom_ids.add(geom_id)
+                update_geom_rgba(
+                    server,
+                    model,
+                    data,
+                    handles,
+                    handle_by_geom_id,
+                    geom_name,
+                    rgba,
+                )
 
         alpha = min(1.0, st.t / max(duration, 1e-3))
         alpha_s = 0.5 - 0.5 * math.cos(math.pi * alpha)

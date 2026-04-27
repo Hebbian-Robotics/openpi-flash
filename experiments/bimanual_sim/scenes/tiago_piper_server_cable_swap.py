@@ -63,10 +63,10 @@ from scene_check import (
     TargetingCameraInvariant,
     WeldAttachment,
 )
-from scenes.data_center_tiago_layout import HOME_ARM_Q, IK_SEED_Q, LAYOUT
+from scenes.tiago_piper_server_cable_swap_layout import HOME_ARM_Q, IK_SEED_Q, LAYOUT
 from welds import activate_attachment_weld
 
-NAME = "data_center_tiago"
+NAME = "tiago_piper_server_cable_swap"
 # `ROBOT_KIND` is read by `runner.py` / `tools/_runtime.py` to pick the
 # right `arm_handles.get_arm_handles` branch + per-tick gripper-write
 # convention. The legacy TIAGo+Piper scene stays on the original
@@ -157,7 +157,7 @@ CAMERA_INVARIANTS: tuple[CameraInvariant, ...] = (
 # Scene dimensions
 # -----------------------------------------------------------------------------
 # Every dimension, offset, and derived anchor lives in `DataCenterLayout`
-# (scenes/data_center_layout.py). `LAYOUT` is the module-level default
+# (scenes/tiago_piper_server_cable_swap_layout.py). `LAYOUT` is the default
 # instance; read positions via `LAYOUT.rack.front_face_x`,
 # `LAYOUT.server_world_pos_in_rack`, `LAYOUT.port_world_pos(i)`,
 # `LAYOUT.cable_anchor_world(i)`, etc. `HOME_ARM_Q` / `IK_SEED_Q` are

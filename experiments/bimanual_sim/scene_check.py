@@ -14,7 +14,7 @@ mode hits this to eyeball scene layout without running physics.
 The module is intentionally scene-agnostic: inputs are a compiled
 `mj_forward`-ready `MjModel` / `MjData` pair plus a few scene-declared
 descriptors (grippable names, allow-listed overlapping geom pairs, the
-attachment-constraint registry). Scene modules (`scenes/data_center.py`)
+attachment-constraint registry). Scene modules (`scenes/<base>_<arms>_<task>.py`)
 expose these via attributes the runner reads with `getattr`.
 """
 

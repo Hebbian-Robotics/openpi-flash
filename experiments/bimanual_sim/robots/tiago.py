@@ -133,7 +133,7 @@ def load_tiago(config: TiagoConfig = TiagoConfig()) -> mjcf.RootElement:
 
     Callers typically treat this as the root and compose more children
     (Pipers, cameras, rack, cart, cables) before compiling — that's
-    what `scenes/data_center.py::build_scene` does.
+    what `scenes/tiago_piper_server_cable_swap.py::build_scene` does.
 
     The returned root has `.model = ""` (no namespace) so TIAGo's body
     names compile unprefixed (`base_link`, `torso_lift_link`); attached
@@ -216,7 +216,7 @@ def torso_world_pos_at_zero() -> tuple[float, float, float]:
     """World pos of `torso_lift_link` at qpos=0, read directly from
     Menagerie's tiago.xml.
 
-    Referenced by `scenes/data_center_layout` so bin heights / IK targets
+    Referenced by `scenes/tiago_piper_server_cable_swap_layout` so bin heights / IK targets
     derive from the one authoritative source — no hardcoded `(0, 0, 0.8885)`
     copy to drift silently if Menagerie updates the torso attach point.
 
