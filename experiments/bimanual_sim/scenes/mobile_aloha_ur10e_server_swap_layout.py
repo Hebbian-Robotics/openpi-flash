@@ -226,7 +226,7 @@ class _PhaseHomes:
 
 @dataclass(frozen=True)
 class DataCenterLayout:
-    """Single source of truth for `scenes/data_center.py` geometry.
+    """Single source of truth for `scenes/mobile_aloha_ur10e_server_swap.py` geometry.
 
     Robot-base geometry lives in `robots/mobile_aloha.py`. World-frame
     derived properties (server slot pose, bezel handle positions,

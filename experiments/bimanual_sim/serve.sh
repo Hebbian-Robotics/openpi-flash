@@ -1,7 +1,7 @@
 #!/bin/bash
 # Lifecycle helper for the runner. Runs wherever the file lives — no hardcoded
 # paths. Usage:
-#   ./serve.sh start [scene]   # scene defaults to data_center
+#   ./serve.sh start [scene]   # scene defaults to mobile_aloha_ur10e_server_swap
 #   ./serve.sh stop
 #   ./serve.sh status
 #   ./serve.sh logs [N]
@@ -16,7 +16,7 @@ PIDFILE="$SCRIPT_DIR/runner.pid"
 
 case "${1:-status}" in
   start)
-    SCENE="${2:-data_center}"
+    SCENE="${2:-mobile_aloha_ur10e_server_swap}"
     if [ -f "$PIDFILE" ] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
       echo "already running (pid $(cat $PIDFILE))"; exit 0
     fi

@@ -1,11 +1,11 @@
-"""Structural assertions over the data_center scene's phase contracts.
+"""Structural assertions over the active scene's phase contracts.
 
 These are pytest cases (not hypothesis) because the input space is fixed: there
 is exactly one `PHASE_CONTRACTS` tuple in the scene, and we want to assert
 properties of *that* tuple. Generated inputs add nothing here.
 
-Skips gracefully when `mujoco_menagerie` isn't installed locally — the
-data_center scene's `paths.py` validates menagerie XMLs at import.
+Skips gracefully when `mujoco_menagerie` isn't installed locally — the live
+scene's transitive `paths.py` access at import touches the UR10e MJCF.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-# Probe the menagerie path before importing `scenes.data_center`. The scene
+# Probe the menagerie path before importing the live scene. The scene
 # accesses lazy paths constants at import (UR10E_XML, ROBOTIQ_2F85_XML,
 # D435I_XML, D405_MESH_STL via robots.ur10e and the direct paths import),
 # any of which would raise FileNotFoundError if menagerie is missing. We
@@ -29,9 +29,9 @@ if not (_MENAGERIE / "universal_robots_ur10e" / "ur10e.xml").is_file():
     pytest.skip(f"menagerie not found at {_MENAGERIE}", allow_module_level=True)
 
 from scene_base import PhaseContract, TaskPhase  # noqa: E402  (path-probe gate above)
-from scenes import data_center  # noqa: E402
+from scenes import mobile_aloha_ur10e_server_swap as live_scene  # noqa: E402
 
-PHASE_CONTRACTS: tuple[PhaseContract, ...] = data_center.PHASE_CONTRACTS
+PHASE_CONTRACTS: tuple[PhaseContract, ...] = live_scene.PHASE_CONTRACTS
 
 
 def test_every_phase_has_at_most_one_contract() -> None:
@@ -104,19 +104,19 @@ def test_active_inactive_attachments_disjoint_at_ends() -> None:
         )
 
 
-def test_predecessor_chain_is_total_for_data_center() -> None:
-    """The data_center scene declares a strict total order: each non-initial
-    phase has exactly one predecessor. This isn't required by the contract
-    type, but it's what the current choreography uses; if the test starts
-    failing it means someone introduced a branch and should update this test
-    to reflect the new graph shape."""
+def test_predecessor_chain_is_total_for_live_scene() -> None:
+    """The live scene declares a strict total order: each non-initial phase
+    has exactly one predecessor. This isn't required by the contract type,
+    but it's what the current choreography uses; if the test starts failing
+    it means someone introduced a branch and should update this test to
+    reflect the new graph shape."""
     for contract in PHASE_CONTRACTS:
         if contract.phase is TaskPhase.SETUP:
             assert contract.legal_predecessors == ()
             continue
         assert len(contract.legal_predecessors) == 1, (
             f"{contract.phase.value} has {len(contract.legal_predecessors)} predecessors; "
-            f"data_center expects exactly one"
+            f"the live scene expects exactly one"
         )
 
 

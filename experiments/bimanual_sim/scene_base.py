@@ -73,6 +73,7 @@ class TaskPhase(StrEnum):
 
     UNPHASED = "unphased"
     SETUP = "setup"
+    # Server-swap (mobile_aloha_ur10e_server_swap) phases:
     REMOVE_OLD_SERVER = "remove_old_server"
     BACKUP_FROM_RACK = "backup_from_rack"
     TRAVERSE_TO_CART = "traverse_to_cart"
@@ -82,6 +83,12 @@ class TaskPhase(StrEnum):
     ADVANCE_INTO_RACK = "advance_into_rack"
     INSTALL_NEW_SERVER = "install_new_server"
     RESET = "reset"
+    # Indicator-check (mobile_aloha_piper_indicator_check) phases:
+    TRAVERSE_INTO_AISLE = "traverse_into_aisle"
+    ALIGN_TO_TARGET = "align_to_target"
+    REACH_TO_SERVER = "reach_to_server"
+    WAIT_AT_SERVER = "wait_at_server"
+    RETRACT = "retract"
 
 
 # Bounded index into a scene's grippable-object list. Construct via
@@ -146,6 +153,14 @@ class Step:
     # names declared via `AUX_ACTUATOR_NAMES`; runner interpolates to these
     # alongside arm joints. StrEnum-as-str: scenes may pass enum members.
     aux_ctrl: Mapping[Any, float] | None = None
+
+    # On entry to this step, set each named geom's RGBA. Pairs are
+    # `(geom_name, (r, g, b, a))`. The runner writes both `model.geom_rgba`
+    # (so any subsequent native MuJoCo render sees the new colour) and the
+    # corresponding viser MeshHandle (remove + re-add). Used for visual-only
+    # state changes that don't fit the weld/grasp model — e.g. an indicator
+    # light flipping from red to green when a service action completes.
+    set_geom_rgba: tuple[tuple[str, tuple[float, float, float, float]], ...] = ()
 
     def __post_init__(self) -> None:
         # arm_q's shape invariant can't be expressed in the type system, so

@@ -1,6 +1,6 @@
 """Declarative geometry for the data-center scene.
 
-Every dimension, offset, and derived anchor used by `scenes/data_center.py`
+Every dimension, offset, and derived anchor used by `scenes/tiago_piper_server_cable_swap.py`
 lives here as a nested frozen dataclass tree. The scene module imports a
 single `LAYOUT = DataCenterLayout()` instance and reads positions via
 `LAYOUT.rack.front_face_x`, `LAYOUT.server_world_pos_in_rack`, etc. — so
@@ -271,7 +271,7 @@ class _LiftTargets:
 
 @dataclass(frozen=True)
 class DataCenterLayout:
-    """Single source of truth for `scenes/data_center.py`'s geometry.
+    """Single source of truth for `scenes/tiago_piper_server_cable_swap.py`'s geometry.
 
     Cross-component derivations (anything that depends on more than one
     sub-component, e.g. a server's world position pulling from both
@@ -435,7 +435,7 @@ LAYOUT = DataCenterLayout()
 # -----------------------------------------------------------------------------
 # Convenience re-exports for scene code that prefers flat names
 # -----------------------------------------------------------------------------
-# These keep `scenes/data_center.py` readable: instead of
+# These keep `scenes/tiago_piper_server_cable_swap.py` readable: instead of
 # `LAYOUT.arm.home_q` spelled out at every call site, the scene module can
 # import these at the top.
 

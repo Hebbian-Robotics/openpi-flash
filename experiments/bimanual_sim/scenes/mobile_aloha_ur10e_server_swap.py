@@ -73,7 +73,7 @@ from scene_check import (
     TargetingCameraInvariant,
     WeldAttachment,
 )
-from scenes.data_center_layout import (
+from scenes.mobile_aloha_ur10e_server_swap_layout import (
     BASE_HOME_POSE,
     HOME_ARM_Q_BY_SIDE,
     IK_SEED_Q,
@@ -82,7 +82,7 @@ from scenes.data_center_layout import (
 )
 from welds import activate_attachment_weld, deactivate_weld
 
-NAME = "data_center"
+NAME = "mobile_aloha_ur10e_server_swap"
 # `ROBOT_KIND` selects the `arm_handles.get_arm_handles` branch.
 ROBOT_KIND = "ur10e"
 # Planar base joints the IK solver must lock (not optimise). Shared across
@@ -161,7 +161,7 @@ CAMERA_INVARIANTS: tuple[CameraInvariant, ...] = (
 )
 
 
-# Dimensions live in `DataCenterLayout` (scenes/data_center_layout.py).
+# Dimensions live in `DataCenterLayout` (scenes/mobile_aloha_ur10e_server_swap_layout.py).
 # World frame: origin at the robot's base centre on the floor, +x toward rack,
 # +y to the robot's right, +z up.
 

@@ -9,7 +9,7 @@ the browser-side render.
 Static-vs-moving classification uses `model.body_weldid`: a body whose weld
 root is the worldbody (id 0) is rigidly welded into the world frame and will
 never change pose, so we skip it in the per-frame update and save the
-websocket write plus the quaternion math. In the `data_center` scene this
+websocket write plus the quaternion math. In the live server-swap scene this
 drops ~⅔ of the per-frame update volume (chassis, rack, tower, pedestal
 walls, bin walls, cable anchors are all static).
 
@@ -82,6 +82,46 @@ def _is_static_geom(model: mujoco.MjModel, geom_id: int) -> bool:
     return int(model.body_weldid[body_id]) == 0
 
 
+def _scene_grid_extents(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    minimum_extent: float,
+) -> tuple[float, float, tuple[float, float, float]]:
+    """Compute (width, height, centre_xyz) for a viser floor grid that covers
+    every non-plane geom in the model with `minimum_extent` as a floor and
+    2 m margin past the outermost geom. Mesh geoms are treated as their
+    `geom_rbound` enclosing sphere (loose but cheap and never wrong)."""
+    min_xy = np.array([np.inf, np.inf], dtype=float)
+    max_xy = np.array([-np.inf, -np.inf], dtype=float)
+    for g in range(model.ngeom):
+        gtype = int(model.geom_type[g])
+        if gtype == mujoco.mjtGeom.mjGEOM_PLANE:
+            continue
+        pos = np.asarray(data.geom_xpos[g], dtype=float)
+        if gtype == mujoco.mjtGeom.mjGEOM_MESH:
+            r = float(model.geom_rbound[g])
+            half_xy = np.array([r, r], dtype=float)
+        else:
+            size = np.asarray(model.geom_size[g], dtype=float)
+            half_xy = np.array([float(np.max(size)), float(np.max(size))], dtype=float)
+        min_xy = np.minimum(min_xy, pos[:2] - half_xy)
+        max_xy = np.maximum(max_xy, pos[:2] + half_xy)
+    if not np.all(np.isfinite(min_xy)):
+        return minimum_extent, minimum_extent, (0.0, 0.0, 0.0)
+    width = max(float(max_xy[0] - min_xy[0]) + 2.0, minimum_extent)
+    height = max(float(max_xy[1] - min_xy[1]) + 2.0, minimum_extent)
+    centre = (float((max_xy[0] + min_xy[0]) * 0.5), float((max_xy[1] + min_xy[1]) * 0.5), 0.0)
+    return width, height, centre
+
+
+def _viser_mesh_path(model: mujoco.MjModel, geom_id: int) -> str:
+    """Stable scene-graph path for a geom's viser handle. Used by both
+    initial publish and the recolour helper so the path matches across
+    remove + re-add."""
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or f"g{geom_id}"
+    return f"/geoms/{geom_id:04d}_{name.replace('/', '_')}"
+
+
 def build_viser_scene(
     server: viser.ViserServer,
     model: mujoco.MjModel,
@@ -89,27 +129,46 @@ def build_viser_scene(
     *,
     ground_width: float = 3.0,
     ground_cell: float = 0.1,
-) -> list[tuple[int, viser.MeshHandle]]:
+) -> tuple[list[tuple[int, viser.MeshHandle]], dict[int, viser.MeshHandle]]:
     """Publish every geom in `model` to the Viser scene.
 
-    Returns handle pairs for the geoms whose world pose can change across
-    frames; static geoms are created with their current world pose baked in
-    and never touched again. The caller must have initialised `data` to the
-    scene's start state (typically via `scene.apply_initial_state`) before
-    calling this — the static geom poses read here are frozen forever.
+    Returns `(moving_handles, handle_by_geom_id)`:
+      * `moving_handles` — `(geom_id, handle)` pairs for the geoms whose
+        world pose can change across frames; consumed by `update_viser`.
+        Static geoms are created with their current world pose baked in
+        and never touched by the per-frame update.
+      * `handle_by_geom_id` — full registry covering *every* geom (moving
+        and static), keyed by geom id. Lets `update_geom_rgba` look up
+        and rebuild a static geom's handle when its colour needs to flip
+        at runtime (the per-frame moving list alone wouldn't know about
+        static-geom handles).
+
+    The caller must have initialised `data` to the scene's start state
+    (typically via `scene.apply_initial_state`) before calling — the
+    static geom poses read here are frozen at handle-creation time.
     """
     server.scene.set_up_direction("+z")
+
+    mujoco.mj_forward(model, data)
+
+    # Auto-fit the floor grid to the scene's geom XY footprint so multi-rack
+    # scenes (e.g. the indicator-check aisle spanning X ≈ 0..6) don't render
+    # with the grid cropped to a 3 x 3 m square at origin. `ground_width` is
+    # now the *minimum* — if the scene's geom XY extent exceeds it we expand,
+    # plus 2 m margin so the grid breathes past the last geom.
+    grid_width, grid_height, grid_centre = _scene_grid_extents(model, data, ground_width)
     server.scene.add_grid(
         "/ground",
-        width=ground_width,
-        height=ground_width,
+        width=grid_width,
+        height=grid_height,
         cell_size=ground_cell,
+        position=grid_centre,
         plane="xy",
     )
 
-    mujoco.mj_forward(model, data)
     quat_buf = np.empty(4, dtype=np.float64)
     moving_handles: list[tuple[int, viser.MeshHandle]] = []
+    handle_by_geom_id: dict[int, viser.MeshHandle] = {}
 
     for g in range(model.ngeom):
         if int(model.geom_type[g]) == mujoco.mjtGeom.mjGEOM_PLANE:
@@ -118,8 +177,6 @@ def build_viser_scene(
         if mesh is None:
             continue
         rgba = model.geom_rgba[g]
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or f"g{g}"
-        safe = name.replace("/", "_")
         color: tuple[float, float, float] = (float(rgba[0]), float(rgba[1]), float(rgba[2]))
 
         pos = data.geom_xpos[g]
@@ -127,7 +184,7 @@ def build_viser_scene(
         mujoco.mju_mat2Quat(quat_buf, data.geom_xmat[g])
 
         h = server.scene.add_mesh_simple(
-            f"/geoms/{g:04d}_{safe}",
+            _viser_mesh_path(model, g),
             vertices=np.asarray(mesh.vertices, dtype=np.float32),
             faces=np.asarray(mesh.faces, dtype=np.int32),
             color=color,
@@ -140,9 +197,65 @@ def build_viser_scene(
                 float(quat_buf[3]),
             ),
         )
+        handle_by_geom_id[g] = h
         if not _is_static_geom(model, g):
             moving_handles.append((g, h))
-    return moving_handles
+    return moving_handles, handle_by_geom_id
+
+
+def update_geom_rgba(
+    server: viser.ViserServer,
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    moving_handles: list[tuple[int, viser.MeshHandle]],
+    handle_by_geom_id: dict[int, viser.MeshHandle],
+    geom_name: str,
+    rgba: tuple[float, float, float, float],
+) -> None:
+    """Recolour one geom at runtime. Writes `model.geom_rgba` and rebuilds
+    the corresponding viser handle (viser bakes colour into the mesh at
+    creation, so we remove the old handle and re-add with the new RGBA).
+
+    No-ops cleanly if the geom doesn't exist or wasn't published — the
+    runtime path will hit a missing-name long before viser would, since
+    the scene's `Step.set_geom_rgba` references geoms declared in its
+    layout module by stable name.
+    """
+    geom_id = int(mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name))
+    if geom_id < 0:
+        return
+    old_handle = handle_by_geom_id.get(geom_id)
+    if old_handle is None:
+        return
+    model.geom_rgba[geom_id] = rgba
+    mesh = _geom_to_trimesh(model, geom_id)
+    if mesh is None:
+        return
+    pos = data.geom_xpos[geom_id]
+    quat_buf = np.empty(4, dtype=np.float64)
+    mujoco.mju_mat2Quat(quat_buf, data.geom_xmat[geom_id])
+    old_handle.remove()
+    new_handle = server.scene.add_mesh_simple(
+        _viser_mesh_path(model, geom_id),
+        vertices=np.asarray(mesh.vertices, dtype=np.float32),
+        faces=np.asarray(mesh.faces, dtype=np.int32),
+        color=(float(rgba[0]), float(rgba[1]), float(rgba[2])),
+        opacity=float(rgba[3]),
+        position=(float(pos[0]), float(pos[1]), float(pos[2])),
+        wxyz=(
+            float(quat_buf[0]),
+            float(quat_buf[1]),
+            float(quat_buf[2]),
+            float(quat_buf[3]),
+        ),
+    )
+    handle_by_geom_id[geom_id] = new_handle
+    # If the geom was also in the moving list, swap it in place so
+    # update_viser keeps pushing pose to the live handle, not the removed one.
+    for i, (gid, _) in enumerate(moving_handles):
+        if gid == geom_id:
+            moving_handles[i] = (geom_id, new_handle)
+            break
 
 
 def update_viser(

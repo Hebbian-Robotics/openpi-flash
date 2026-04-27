@@ -17,7 +17,7 @@ artifacts. Replaces the per-tool scripts:
 Run `... tools/mj.py --help` or `... tools/mj.py <subcommand> --help` for
 the full option list.
 
-All subcommands default to `--scene data_center`. Rendering goes through
+All subcommands default to `--scene mobile_aloha_ur10e_server_swap`. Rendering goes through
 MuJoCo's native `mujoco.Renderer` (EGL backend on headless Linux; the
 GL driver already offloads to the GPU on hosts that expose one, no
 explicit switch needed).
@@ -314,7 +314,7 @@ def snapshot(
             help="sequence-mode prefix; frames named {prefix}{sec:06.2f}.png",
         ),
     ] = None,
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
     t: TOpt = 0.0,
     every: Annotated[
         float,
@@ -510,7 +510,7 @@ def _tile_grid_cols(
 @app.command()
 def grid(
     out: Annotated[Path, typer.Option(help="grid output path (.png)")],
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
     t: TOpt = 0.0,
     cams: Annotated[
         str | None,
@@ -562,7 +562,7 @@ def grid(
 
 @app.command()
 def plan(
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
 ) -> None:
     """Print a scene's task plan as a timeline table."""
     ctx = build_scene_and_advance(scene, Seconds(0.0))
@@ -678,7 +678,7 @@ def contracts(
         Path,
         typer.Option(help="root directory for structured run artifacts"),
     ] = Path("results/runs"),
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
     render: Annotated[
         bool,
         typer.Option("--render/--no-render", help="write a PNG at every checked boundary"),
@@ -797,7 +797,7 @@ def replay_phase(
         Path,
         typer.Option(help="root directory for structured phase replay artifacts"),
     ] = Path("results/runs"),
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
     rerun_rrd: Annotated[
         Path | None,
         typer.Option(
@@ -920,7 +920,7 @@ def phase_graph(
         Path | None,
         typer.Option(help="output .dot file (omit for stdout)"),
     ] = None,
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
 ) -> None:
     """Emit a GraphViz DOT graph of the scene's phase contracts.
 
@@ -1021,7 +1021,7 @@ def _build_ik_seeds(home: np.ndarray) -> list[np.ndarray]:
 
 @app.command()
 def ik(
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
 ) -> None:
     """Probe IK feasibility across a task plan's waypoints.
 
@@ -1155,7 +1155,7 @@ def review(
     out_dir: Annotated[
         Path, typer.Option(help="directory to write review.png + review.mp4 into")
     ] = Path("/tmp"),
-    scene: SceneOpt = "data_center",
+    scene: SceneOpt = "mobile_aloha_ur10e_server_swap",
     video_fps: Annotated[
         float, typer.Option(help="video playback fps (frames sampled every 0.5 s sim-time)")
     ] = 10.0,

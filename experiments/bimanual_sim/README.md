@@ -1,11 +1,15 @@
 # bimanual_sim
 
-MuJoCo + Viser sim experiment. One scene today:
+MuJoCo + Viser sim experiment. Scenes follow `<base>_<arms>_<task>` naming so
+the shared infra can host more than one demo without ambiguity:
 
-- `data_center` — bimanual UR10e arms with Robotiq 2F-85 grippers on a
-  Mobile-ALOHA-style base performing a rack server swap: unplug 3 color-coded
-  cables, pull the old server out, stow it on a service cart, retrieve a
-  replacement server, install it in the rack, and replug the cables.
+- `mobile_aloha_ur10e_server_swap` — bimanual UR10e arms with Robotiq 2F-85
+  grippers on a Mobile-ALOHA-style base performing a rack server swap: pull
+  the old server out, stow it on a service cart, retrieve a replacement
+  server, install it in the rack. Live scene.
+- `tiago_piper_server_cable_swap` — legacy variant on a TIAGo base with
+  Piper arms and 3 cable disconnect/reconnect phases bookending the server
+  swap. Kept as a backup; not actively maintained.
 
 Scene modules live under `scenes/`. The runner in `runner.py` is scene-agnostic
 so additional scenes slot in without touching the shared infra.
@@ -28,9 +32,10 @@ robots/
   mobile_aloha.py            Mobile ALOHA base loader with planar x/y/yaw joints
   ur10e.py                   UR10e + 2F-85 loader with namespaced wrist cameras
 scenes/
-  data_center.py             the scene (MJCF build, IK task plan, weld registry)
-  data_center_layout.py      declarative geometry: every dimension/anchor as a
-                             frozen dataclass with cross-component invariants
+  mobile_aloha_ur10e_server_swap.py        live scene (MJCF build, IK plan, welds)
+  mobile_aloha_ur10e_server_swap_layout.py declarative geometry as frozen
+                                           dataclasses with cross-component invariants
+  tiago_piper_server_cable_swap{,_layout}.py  legacy backup
 tools/
   mj.py                      unified debug CLI (typer): snapshot / video / grid /
                              plan / contracts / phase / diff / ik / review
@@ -45,7 +50,7 @@ serve.sh                     start/stop/status/logs helper
 
 Headless renders + plan inspection for agent-driven debugging. One
 typer CLI; every subcommand defaults to
-`--scene data_center`. Renders go through MuJoCo's native `Renderer`
+`--scene mobile_aloha_ur10e_server_swap`. Renders go through MuJoCo's native `Renderer`
 over EGL (forced before the `mujoco` import so no X display is
 needed); on a GPU host the GL driver offloads rendering automatically
 with no explicit switch. `_runtime.py` owns the "import scene →
@@ -79,7 +84,7 @@ uv run python tools/mj.py contracts --out-root results/runs
 uv run python tools/mj.py phase remove_old_server --out-root results/runs
 
 # Optional: also emit a Rerun recording with phase-boundary TextLog events
-uv run python tools/mj.py contracts --rerun-rrd results/runs/data_center.rrd
+uv run python tools/mj.py contracts --rerun-rrd results/runs/server_swap.rrd
 
 # Pixel-diff heat-map between two equal-size renders; prints max/mean/%changed
 uv run python tools/mj.py diff --a /tmp/before.png --b /tmp/after.png --out /tmp/d.png
@@ -114,14 +119,14 @@ subcommands.
 ```bash
 cd experiments/bimanual_sim
 uv sync                     # first time only
-./serve.sh start            # defaults to scene=data_center
+./serve.sh start            # defaults to scene=mobile_aloha_ur10e_server_swap
 # open http://localhost:8080
 ```
 
 Invoke `runner.py` directly for extra knobs:
 
 ```bash
-uv run python runner.py --scene data_center [--speed 1.0] [--render-hz 60] [--max-rate]
+uv run python runner.py --scene mobile_aloha_ur10e_server_swap [--speed 1.0] [--render-hz 60] [--max-rate]
 ```
 
 - `--speed` — multiplier on Step durations (also live-adjustable from the GUI slider).
@@ -252,6 +257,6 @@ def step_free_play(t, model, data) -> None: ...
 `Step` carries `weld_activate`/`weld_deactivate` (grasp cheats indexed by
 cube id), `attach_activate`/`attach_deactivate` (body↔body welds addressed by
 MJCF name), and `aux_ctrl` (dict of aux actuator name → target). See
-`scenes/data_center.py` for a worked example that uses all of them.
+`scenes/mobile_aloha_ur10e_server_swap.py` for a worked example that uses all of them.
 
 Start the new scene with: `./serve.sh start my_scene`.

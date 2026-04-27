@@ -59,7 +59,7 @@ from scene_base import (
     make_cube_id,
 )
 from scene_check import AttachmentConstraint
-from scenes.data_center_layout import BASE_HOME_POSE, HOME_ARM_Q_BY_SIDE
+from scenes.mobile_aloha_ur10e_server_swap_layout import BASE_HOME_POSE, HOME_ARM_Q_BY_SIDE
 from tools.observability import check_phase_state
 from welds import (
     activate_attachment_weld,
@@ -146,7 +146,7 @@ class _SceneSnapshot:
 class _PhasePoseCapture:
     """Hand-authored per-phase start pose, captured at runtime.
 
-    Mirror of `scenes.data_center_layout._PhasePose` but mutable +
+    Mirror of `scenes.mobile_aloha_ur10e_server_swap_layout._PhasePose` but mutable +
     using raw numpy arrays — this is the in-flight cache, not the
     serialised dataclass. The "Print phase homes for layout" button
     formats this into the immutable `_PhasePose` shape for paste-back
@@ -629,11 +629,25 @@ class TeleopController:
                 base_init_x = float(self.data.qpos[self.base_qposadr[self.base_aux_names[0]]])
                 base_init_y = float(self.data.qpos[self.base_qposadr[self.base_aux_names[1]]])
                 base_init_yaw = float(self.data.qpos[self.base_qposadr[self.base_aux_names[2]]])
+                # Auto-fit slider range so any `--start-phase` seed lands inside
+                # the slider bounds. ±3 m of slack past the initial means the
+                # user can drive the chassis around freely from wherever they
+                # booted, without the runner asserting at GUI build because
+                # the seeded value is outside the slider's hardcoded range.
+                _base_slack = 3.0
                 self._base_x_slider = self.server.gui.add_slider(
-                    "base x", min=-2.0, max=2.0, step=0.01, initial_value=base_init_x
+                    "base x",
+                    min=min(-2.0, base_init_x - _base_slack),
+                    max=max(2.0, base_init_x + _base_slack),
+                    step=0.01,
+                    initial_value=base_init_x,
                 )
                 self._base_y_slider = self.server.gui.add_slider(
-                    "base y", min=-2.0, max=2.0, step=0.01, initial_value=base_init_y
+                    "base y",
+                    min=min(-2.0, base_init_y - _base_slack),
+                    max=max(2.0, base_init_y + _base_slack),
+                    step=0.01,
+                    initial_value=base_init_y,
                 )
                 self._base_yaw_slider = self.server.gui.add_slider(
                     "base yaw (rad)",
@@ -720,7 +734,7 @@ class TeleopController:
                 "Print phase homes for layout",
                 hint=(
                     "emit every captured _PhasePoseCapture as a paste-ready "
-                    "_PhaseHomes.by_phase mapping for scenes/data_center_layout.py"
+                    "_PhaseHomes.by_phase mapping for scenes/mobile_aloha_ur10e_server_swap_layout.py"
                 ),
             )
             print_phase_homes_btn.on_click(lambda _e: self.print_phase_homes())
@@ -1174,7 +1188,7 @@ class TeleopController:
     def print_base_pose(self) -> None:
         """Print the current base x/y/yaw in a copy-pasteable form so
         the user can drop the values into `_Base.home_pose`'s default
-        factory in `scenes/data_center_layout.py`.
+        factory in `scenes/mobile_aloha_ur10e_server_swap_layout.py`.
         """
         base_sliders = self._base_sliders_or_none()
         if base_sliders is None:
@@ -1187,7 +1201,7 @@ class TeleopController:
     def print_home_q(self) -> None:
         """Print the current per-arm joint configurations in a copy-
         pasteable form so the user can drop them into `_Arm.home_q`'s
-        default factory in `scenes/data_center_layout.py`.
+        default factory in `scenes/mobile_aloha_ur10e_server_swap_layout.py`.
         """
         print("# --- paste into _Arm.home_q default_factory ---")
         print("{")
@@ -1227,7 +1241,7 @@ class TeleopController:
 
     def print_phase_homes(self) -> None:
         """Emit every captured `_PhasePoseCapture` as a paste-ready
-        `_PhaseHomes.by_phase` mapping for `data_center_layout.py`.
+        `_PhaseHomes.by_phase` mapping for `mobile_aloha_ur10e_server_swap_layout.py`.
 
         Empty cache → print a placeholder line + no block, so the
         operator notices they haven't actually saved any phase yet
