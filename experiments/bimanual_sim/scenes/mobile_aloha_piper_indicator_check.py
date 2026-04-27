@@ -43,6 +43,7 @@ from scene_base import (
     PhaseContract,
     PhaseState,
     QaccSentinel,
+    QuatWxyz,
     Step,
     TaskPhase,
 )
@@ -75,7 +76,50 @@ class IndicatorAux(StrEnum):
     BASE_YAW = BASE_YAW_JOINT_NAME
 
 
+class RotationAxis(StrEnum):
+    """Finite set of axes accepted by `_axis_angle_quat`."""
+
+    X = "x"
+    Y = "y"
+    Z = "z"
+
+
 AUX_ACTUATOR_NAMES: tuple[str, ...] = tuple(m.value for m in IndicatorAux)
+
+
+def _axis_angle_quat(axis: RotationAxis, angle_rad: float) -> QuatWxyz:
+    """Return a unit quaternion for one axis-angle rotation."""
+    half_angle_rad = angle_rad / 2.0
+    cos_half_angle = math.cos(half_angle_rad)
+    sin_half_angle = math.sin(half_angle_rad)
+    match axis:
+        case RotationAxis.X:
+            values = (cos_half_angle, sin_half_angle, 0.0, 0.0)
+        case RotationAxis.Y:
+            values = (cos_half_angle, 0.0, sin_half_angle, 0.0)
+        case RotationAxis.Z:
+            values = (cos_half_angle, 0.0, 0.0, sin_half_angle)
+    return np.asarray(values, dtype=float)
+
+
+def _compose_quat(left: QuatWxyz, right: QuatWxyz) -> QuatWxyz:
+    """Hamilton product `left * right` for MuJoCo `(w, x, y, z)` quats."""
+    left_w, left_x, left_y, left_z = np.asarray(left, dtype=float)
+    right_w, right_x, right_y, right_z = np.asarray(right, dtype=float)
+    return np.asarray(
+        (
+            left_w * right_w - left_x * right_x - left_y * right_y - left_z * right_z,
+            left_w * right_x + left_x * right_w + left_y * right_z - left_z * right_y,
+            left_w * right_y - left_x * right_z + left_y * right_w + left_z * right_x,
+            left_w * right_z + left_x * right_y - left_y * right_x + left_z * right_w,
+        ),
+        dtype=float,
+    )
+
+
+def _mjcf_quat(quat: QuatWxyz) -> list[float]:
+    """Convert a typed numpy quat into the plain list dm_control.mjcf expects."""
+    return [float(value) for value in quat]
 
 
 def base_aux_targets(*, x: float, y: float, yaw: float) -> tuple[tuple[str, float], ...]:
@@ -112,6 +156,80 @@ CAMERA_INVARIANTS: tuple[CameraInvariant, ...] = (
 # No cross-body overlaps are expected — the chassis stays clear of rack
 # panels at every phase boundary by construction (see layout invariants).
 ALLOWED_STATIC_OVERLAPS: tuple[tuple[str, str], ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Camera + visual tunables
+# ---------------------------------------------------------------------------
+# Lifted out of `build_spec` so changes here don't drift away from the
+# prose in surrounding comments. Each constant documents *what* it
+# represents; the value can change without invalidating the docstring.
+
+# Forward (top) D435i camera, mounted on base_link.
+_TOP_CAM_HEIGHT_M = 1.40
+"""Height of the top-cam mount in chassis-body z. The shared
+`load_mobile_aloha` chassis was authored for z=1.6; lowering to 1.4
+brings the workspace + arms inside the frame at the click pose."""
+
+_TOP_CAM_X_M = 0.076
+"""Forward offset (chassis +x) of the top cam mount, matching the camera
+pole position on the Mobile-ALOHA chassis."""
+
+_TOP_CAM_TILT_DOWN_DEG = 25.0
+"""Downward pitch of the top cam, in degrees. Combined with the lower
+mount and a 42° vertical FOV (real D435i), this centres the workspace
+at the click pose — the look axis hits world (5.10, ~1.06, 1.0) within
+1 cm of the alert."""
+
+_TOP_CAM_FOVY_DEG = 42.0
+"""Real Intel D435i color-stream vertical FOV. Horizontal is 69° but
+MuJoCo's `<camera fovy>` takes the vertical."""
+
+# Camera-stand override: load_mobile_aloha's pole is built for z=1.6, so
+# we resize the existing `top_cam_stand` cylinder to end at the new
+# height. The base z (1.0) sits on the chassis top.
+_CAM_STAND_BASE_Z = 1.0
+
+# Wrist D405 cameras, one per Piper, mounted on link6 (the wrist roll
+# body). Offsets are in link6's local frame:
+#   +z is the gripper / tool axis (fingers attach at z=+0.135).
+#   -x is the dorsal "top" of the wrist at home pose, where a real
+#       D405 mounts on ALOHA-style Piper rigs.
+# Verified by interactive sweep at sim t=22 (gripper touching alert).
+_WRIST_MESH_OFFSET_X_M = -0.05
+"""Perpendicular offset of the visible D405 mesh body (link6 -x)."""
+
+_WRIST_MESH_OFFSET_Z_M = 0.04
+"""Forward offset of the mesh along the gripper axis. Sits ahead of
+link6 origin so the mesh visually reads as "mounted on top of the
+wrist" rather than inside it."""
+
+_WRIST_CAM_OFFSET_X_M = -0.14
+"""Perpendicular offset of the wrist camera (link6 -x). Pulled well
+clear of the wrist housing so the framing isn't dominated by link6's
+own geometry; chosen via interactive sweep at sim t=22."""
+
+_WRIST_CAM_OFFSET_Z_M = -0.03
+"""Backward offset of the cam along the gripper axis. Negative pulls
+the cam behind link6 origin so the bezel doesn't fill the frame at
+the touch moment."""
+
+_WRIST_CAM_TILT_TOWARD_GRIPPER_DEG = -20.0
+"""Tilt about the cam's local +x axis. Negative tips the look vector
+toward +x_link6 (toward the gripper tip) — compensates for pulling
+the cam outward in -x. Sign verified empirically: positive tilts away."""
+
+_WRIST_CAM_FOVY_DEG = 58.0
+"""Real Intel D405 color-stream vertical FOV. Horizontal is 87°."""
+
+_WRIST_MESH_RGBA: tuple[float, float, float, float] = (0.12, 0.12, 0.14, 1.0)
+"""Dark grey for the d405 visual mesh (matches a real RealSense body)."""
+
+_FINGER_RGBA: tuple[float, float, float, float] = (0.6, 0.6, 0.6, 1.0)
+"""Opaque grey override on link7 / link8 visual meshes. Replaces the
+menagerie's gray_mat material whose specular component exposed
+duplicate-shell artefacts on opposite-diagonal corners under headless
+EGL render."""
 
 
 # ---------------------------------------------------------------------------
@@ -326,19 +444,31 @@ def _add_data_center(root: mjcf.RootElement) -> None:
     # axis along world +Y so each light pokes out of the bezel face.
     light_quat = [0.7071067811865476, 0.7071067811865476, 0.0, 0.0]
 
+    # Alternate two shades per slot so adjacent servers read as distinct
+    # in the headless render. MuJoCo's GL fills two co-planar same-rgba
+    # boxes as a single continuous surface (no edge highlighting), so
+    # 21 stacked dark-grey boxes would blend into one undifferentiated
+    # column. Striping odd slots a few percent lighter creates a visible
+    # horizontal break per U without changing geometry. Viser's WebGL
+    # shader did this implicitly; the offline renderer doesn't.
+    rgba_chassis_dark = list(server_cfg.rgba_chassis)
+    rgba_chassis_light = [min(1.0, c + 0.06) for c in server_cfg.rgba_chassis[:3]] + [
+        server_cfg.rgba_chassis[3]
+    ]
     for row in ("left", "right"):
         for rack_index in range(len(aisle_cfg.rack_x_centres)):
             for slot_index in range(servers_cfg.n_per_rack):
                 server_x = LAYOUT.rack_centre_x(rack_index)
                 server_y = LAYOUT.server_centre_y(row)
                 server_z = LAYOUT.server_centre_z(slot_index)
+                rgba_chassis = rgba_chassis_dark if slot_index % 2 == 0 else rgba_chassis_light
                 dc.add(
                     "geom",
                     dclass="visual",
                     type="box",
                     pos=[server_x, server_y, server_z],
                     size=list(server_cfg.half),
-                    rgba=list(server_cfg.rgba_chassis),
+                    rgba=rgba_chassis,
                     name=f"server_{row}_r{rack_index}_s{slot_index:02d}",
                 )
                 light_pos = LAYOUT.light_world_pos(row, rack_index, slot_index)
@@ -378,6 +508,16 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
     visual_global = getattr(root.visual, "global")
     visual_global.offwidth = 1920
     visual_global.offheight = 1080
+    # Slight bump to the camera near-clip plane (default ~0.005 m).
+    # Combined with pulling the wrist cam outward on -x, this trims
+    # the partial-clipping artifact on the gripper plate corners
+    # without entering link6's interior cavity.
+    root.visual.map.znear = 0.010
+    # 8x MSAA on the offscreen framebuffer (default is 4). Sharpens
+    # rack panels, gripper plates, and per-server boundaries in the
+    # headless render at the cost of a bit more GPU work per frame.
+    # Lives on `<visual><quality offsamples=…/>`, NOT on `<global>`.
+    root.visual.quality.offsamples = 8
 
     visual = root.default.add("default", dclass="visual")
     visual.geom.contype = 0
@@ -386,9 +526,15 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
 
     wb = root.worldbody
 
-    # Lighting — same setup as the live server-swap scene.
-    root.visual.headlight.diffuse = [0.6, 0.6, 0.6]
-    root.visual.headlight.ambient = [0.4, 0.4, 0.4]
+    # Lighting — toned down vs. the live server-swap scene. With ambient
+    # 0.4 + headlight 0.6 + key 0.5 + fill 0.3 stacking on a 0.78-grey
+    # floor, every additive contribution clipped to white when the cam
+    # framed the aisle floor head-on (e.g. forward_cam at chassis home).
+    # Cutting ambient to 0.25, headlight to 0.4, dropping the fill, and
+    # darkening the floor rgba keeps the same lit feel without burning
+    # out the highlights at headless render time.
+    root.visual.headlight.diffuse = [0.4, 0.4, 0.4]
+    root.visual.headlight.ambient = [0.25, 0.25, 0.25]
     root.visual.headlight.specular = [0.0, 0.0, 0.0]
     wb.add(
         "light",
@@ -396,17 +542,8 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
         pos=[3.0, 0.0, 4.0],
         dir=[0.0, 0.0, -1.0],
         directional="true",
-        diffuse=[0.5, 0.5, 0.5],
-        specular=[0.1, 0.1, 0.1],
-    )
-    wb.add(
-        "light",
-        name="aisle_fill",
-        pos=[3.0, 0.0, 2.5],
-        dir=[0.0, 0.0, -1.0],
-        diffuse=[0.30, 0.30, 0.32],
+        diffuse=[0.4, 0.4, 0.4],
         specular=[0.05, 0.05, 0.05],
-        castshadow="false",
     )
 
     wb.add(
@@ -414,7 +551,7 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
         type="plane",
         size=[8.0, 4.0, 0.1],
         pos=[3.0, 0.0, 0.0],
-        rgba=[0.78, 0.78, 0.80, 1.0],
+        rgba=[0.45, 0.45, 0.48, 1.0],
     )
 
     # Racks + servers + indicator lights.
@@ -434,31 +571,61 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
         ArmSide.LEFT: LEFT_ARM_MOUNT_SITE,
         ArmSide.RIGHT: RIGHT_ARM_MOUNT_SITE,
     }
-    # Wrist-cam mount offset, expressed in link6's local frame:
-    #   link6 +z is the gripper axis (fingers attach at z = +0.135).
-    #   link6 -x is the dorsal "top" of the wrist at home pose, where
-    #     a D405 typically mounts on ALOHA-style Piper rigs. Verified
-    #     by trial: -y_link6 reads as "right side", +x_link6 reads as
-    #     "bottom", so -x_link6 is the perpendicular "top" axis.
-    # Offsetting perpendicular (rather than along z) keeps the cam body
-    # OUT of the finger volume; the small +z component lifts it past
-    # the wrist motor housing so the lens isn't occluded by link6 mesh.
-    # link6 itself rotates with joint6, so the cam follows the wrist
-    # roll automatically — whichever side the cam starts on stays its
+    # See "Camera + visual tunables" at module top for all the values
+    # below. link6 itself rotates with joint6, so both mesh and cam
+    # follow the wrist roll — whichever side they start on stays their
     # side after every rotation.
-    wrist_cam_pos = [-0.05, 0.0, 0.04]
-    # Camera quat = (+90° about z_link6) ∘ (180° about x_link6), pre-
-    # composed: the 180°-x flip points -z_cam onto +z_link6 (look
-    # direction = down the gripper), and the +90° z roll rotates the
-    # camera "up" axis onto +x_link6 so the rendered frame is upright
-    # when the cam sits on the dorsal -y side of the wrist.
-    _SQRT_HALF = 0.5**0.5
-    wrist_cam_quat = [0.0, _SQRT_HALF, _SQRT_HALF, 0.0]
+    wrist_mesh_pos = [_WRIST_MESH_OFFSET_X_M, 0.0, _WRIST_MESH_OFFSET_Z_M]
+    wrist_cam_pos = [_WRIST_CAM_OFFSET_X_M, 0.0, _WRIST_CAM_OFFSET_Z_M]
+    # Wrist-cam orientation: a base layout (-90° about z_link6) ∘
+    # (180° about x_link6) that maps -z_cam onto +z_link6 (look down
+    # the gripper axis) and reads upright at link6's home rotation,
+    # composed with a downward tilt about cam-local +x to tip the look
+    # vector toward the gripper tip.
+    sqrt_half = 0.5**0.5
+    wrist_base_quat: QuatWxyz = np.asarray((0.0, sqrt_half, -sqrt_half, 0.0), dtype=float)
+    wrist_cam_quat = _mjcf_quat(
+        _compose_quat(
+            wrist_base_quat,
+            _axis_angle_quat(RotationAxis.X, math.radians(_WRIST_CAM_TILT_TOWARD_GRIPPER_DEG)),
+        )
+    )
     for side in ARM_PREFIXES:
         piper = load_piper(side)
         link6 = piper.find("body", "link6")
         if link6 is None:
             raise RuntimeError(f"piper {side!r} missing 'link6' after load")
+        # Hide the gripper-finger collision boxes from the offline
+        # render. The menagerie Piper ships each finger (link7, link8)
+        # with two `class="collision"` boxes carrying `rgba="1 0 0 .2"`
+        # / `rgba="0 0 1 .2"` — translucent helpers for contact pads
+        # that read as "see-through chunks of the gripper" in the
+        # rendered video. Our scene disables contacts entirely
+        # (`flag.contact = "disable"`), so these geoms exist purely as
+        # visual clutter. Move them to geom group 3, which the render
+        # script's default `MjvOption.geomgroup = [1,1,1,0,0,0]` skips,
+        # while leaving viser's live view untouched (viser_render
+        # ignores geomgroup).
+        for geom in piper.find_all("geom"):
+            if geom.dclass is not None and geom.dclass.dclass == "collision":
+                geom.group = 3
+        # Force opaque rgba (alpha=1) on the finger visual meshes,
+        # overriding the default `material="gray_mat"` reference. The
+        # menagerie material has `rgba="0.59 0.59 0.59 1"` (already
+        # alpha 1), but its reflectance/specular components combined
+        # with the headless EGL renderer expose duplicate-shell
+        # artefacts in `link7.stl` / `link8.stl` — opposite-diagonal
+        # corner panels render with apparent transparency. Replacing
+        # the material with a flat rgba on these specific geoms gives
+        # uniform shading and hides the artefact.
+        for finger_body_name in ("link7", "link8"):
+            finger_body = piper.find("body", finger_body_name)
+            if finger_body is None:
+                continue
+            for geom in finger_body.find_all("geom"):
+                if geom.dclass is not None and geom.dclass.dclass == "visual":
+                    geom.material = None
+                    geom.rgba = list(_FINGER_RGBA)
         # TCP site at 14 cm forward of link6 along the gripper axis. IK /
         # weld code addresses this by `f"{side}tcp"` — inside the namescope
         # the local name is `tcp`.
@@ -468,18 +635,19 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
             pos=[0.0, 0.0, 0.14],
             size=[0.006, 0.006, 0.006],
         )
-        # D405 visual mesh — co-located with the camera so the body
-        # reads as a real D405 sitting on top of the wrist. Mesh quat
-        # matches the cam quat so the mesh's lens face aligns with the
-        # cam's optical axis.
+        # D405 visual mesh — sits forward of the cam so the body reads
+        # as a real D405 mounted at the wrist top. Mesh quat matches
+        # the cam quat (no extra roll: with q_reach[…][5] = 0 the wrist
+        # stays level when reaching, so the cam doesn't need the 180°
+        # roll-compensation that the earlier asymmetric pose required).
         link6.add(
             "geom",
             dclass="visual",
             type="mesh",
             mesh=d405_mesh,
-            pos=wrist_cam_pos,
+            pos=wrist_mesh_pos,
             quat=wrist_cam_quat,
-            rgba=[0.12, 0.12, 0.14, 1.0],
+            rgba=list(_WRIST_MESH_RGBA),
         )
         link6.add(
             "camera",
@@ -487,7 +655,7 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
             pos=wrist_cam_pos,
             quat=wrist_cam_quat,
             mode="fixed",
-            fovy=87.0,
+            fovy=_WRIST_CAM_FOVY_DEG,
         )
         mount_site_name = arm_mount_sites[side]
         mount_site = root.find("site", mount_site_name)
@@ -506,35 +674,64 @@ def build_spec() -> tuple[mujoco.MjModel, mujoco.MjData]:
     base_link_body = root.find("body", "base_link")
     if base_link_body is None:
         raise RuntimeError("Mobile ALOHA chassis body 'base_link' not found")
-    # Site quat = composition of (+90° about x) · (-90° about z), pre-
-    # composed once: this yaws the d435i mesh -90° about its post-rotation
-    # vertical axis after laying it horizontal. Empirically this lines the
-    # lens up with chassis +x — the prior orientation read as "facing
-    # left" because the bare +90°-x rotation pointed the lens along
-    # chassis +y.
+    # Shorten the load_mobile_aloha camera stand to end at this scene's
+    # `_TOP_CAM_HEIGHT_M`, so the d435i body sits flush on the post.
+    cam_stand = root.find("geom", "top_cam_stand")
+    if cam_stand is not None:
+        stand_half_height = (_TOP_CAM_HEIGHT_M - _CAM_STAND_BASE_Z) / 2.0
+        stand_centre_z = (_TOP_CAM_HEIGHT_M + _CAM_STAND_BASE_Z) / 2.0
+        cam_stand.size = [0.020, stand_half_height]
+        cam_stand.pos = [_TOP_CAM_X_M, 0.0, stand_centre_z]
+    # Top-cam orientation. See the `_TOP_CAM_*` constants for tunables.
+    _tilt_rad = math.radians(_TOP_CAM_TILT_DOWN_DEG)
+    _cos_tilt, _sin_tilt = math.cos(_tilt_rad), math.sin(_tilt_rad)
+    # Site quat composes (in order):
+    #   q_yaw180   - 180° about base_link z, flips the d435i mesh body so
+    #                its lens face points forward (+x_body) instead of
+    #                backward like the bare attach orientation does
+    #   q_y_neg25  - tilts the body -25° about base_link y to match the
+    #                actual camera pitch (so visual + view direction agree)
+    #   q_base     - the (+90° x) ∘ (-90° z) layout that puts the d435i
+    #                body horizontal with its long axis along world -y
+    # Pre-composed once offline (Hamilton product, unit-checked) so MJCF
+    # only sees the final 4-vector. The camera itself is a separate
+    # `<camera>` element with explicit xyaxes — flipping the mesh here
+    # doesn't affect what the camera renders.
+    top_cam_base_quat: QuatWxyz = np.asarray((0.5, 0.5, -0.5, -0.5), dtype=float)
+    top_cam_mount_quat = _mjcf_quat(
+        _compose_quat(
+            _axis_angle_quat(RotationAxis.Z, math.pi),
+            _compose_quat(
+                _axis_angle_quat(RotationAxis.Y, -_tilt_rad),
+                top_cam_base_quat,
+            ),
+        )
+    )
     indicator_top_cam_mount = base_link_body.add(
         "site",
         name="indicator_top_cam_mount",
-        pos=[0.076, 0.0, 1.600],
-        quat=[0.5, 0.5, -0.5, -0.5],
+        pos=[_TOP_CAM_X_M, 0.0, _TOP_CAM_HEIGHT_M],
+        quat=top_cam_mount_quat,
         size=[0.001, 0.001, 0.001],
     )
     top_d435i = mjcf.from_path(str(D435I_XML))
     top_d435i.model = "top"
     indicator_top_cam_mount.attach(top_d435i)
 
-    # `forward_cam` uses xyaxes (rather than a quat) so the orientation is
-    # spelled out in the parent (base_link) frame: cam +x = -y_body
-    # (camera right), cam +y = +z_body (camera up), and -z_cam = +x_body
-    # (look direction). This produces a horizontal forward-facing view
-    # that yaws with the chassis.
+    # `forward_cam` uses xyaxes so the tilt is spelled out in base_link's
+    # frame: cam +x = -y_body (camera right, perpendicular to look + up),
+    # cam +y = (+sin(tilt), 0, +cos(tilt)) (camera up, tilted forward by
+    # `_TOP_CAM_TILT_DOWN_DEG`), -z_cam = (cos(tilt), 0, -sin(tilt))
+    # (look direction = forward + tilt downward). The camera yaws with
+    # the chassis, so the framing stays the same regardless of base
+    # orientation.
     base_link_body.add(
         "camera",
         name="forward_cam",
-        pos=[0.076, 0.0, 1.6],
-        xyaxes=[0.0, -1.0, 0.0, 0.0, 0.0, 1.0],
+        pos=[_TOP_CAM_X_M, 0.0, _TOP_CAM_HEIGHT_M],
+        xyaxes=[0.0, -1.0, 0.0, _sin_tilt, 0.0, _cos_tilt],
         mode="fixed",
-        fovy=69.0,
+        fovy=_TOP_CAM_FOVY_DEG,
     )
 
     # Planar-base actuators — same pattern as the live scene.
@@ -746,8 +943,13 @@ def make_task_plan(
     # spacing, server depth, indicator inset, etc.) — the IK helpers are
     # gone, so the click pose is whatever is pasted here.
     q_reach: dict[ArmSide, np.ndarray] = {
-        ArmSide.LEFT: np.array([-0.15, 2.8, -1.95, 0.05, -0.55, -1.35]),
-        ArmSide.RIGHT: np.array([0.25, 2.9, -2.1, 0.6, -0.65, -1.5]),
+        # joint6 (wrist roll) zeroed vs the captured pose so the gripper
+        # plates stay level when reaching — TCP position is unchanged
+        # since joint6 only rolls about the gripper axis. With both
+        # wrists level the wrist cams stay upright by default and the
+        # render frames don't need a 180° flip.
+        ArmSide.LEFT: np.array([-0.15, 2.8, -1.95, 0.05, -0.55, 0.0]),
+        ArmSide.RIGHT: np.array([0.25, 2.9, -2.1, 0.6, -0.65, 0.0]),
     }
     push_arms(
         "reach to server",
