@@ -25,9 +25,21 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.122.0",
+    "pytest>=8.3.0",
     "ruff>=0.15.12", #
     "ty>=0.0.32",
 ]
+
+[tool.pytest.ini_options]
+# `tests/` is the only test root; explicit `testpaths` keeps pytest from
+# scanning scenes/ etc. for false-positive collections. `pythonpath = ["."]`
+# adds the project root to sys.path so tests can `import scene_base` etc.
+# the same way the runner does (bimanual_sim modules live at the top level,
+# not in a src/ layout).
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
 
 [tool.ruff]
 line-length = 100

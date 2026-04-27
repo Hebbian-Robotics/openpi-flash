@@ -47,7 +47,6 @@ def activate_grasp_weld(
     data.qvel[qvel_start : qvel_start + 6] = 0.0
     mujoco.mj_forward(model, data)
 
-    # Relative pose of the cube in the hand (link6) frame.
     hand_pos = data.xpos[hand_body_id].copy()
     hand_mat = data.xmat[hand_body_id].reshape(3, 3).copy()
     hand_rot = vtf.SO3.from_matrix(hand_mat)
@@ -57,8 +56,7 @@ def activate_grasp_weld(
     rel_pos = hand_mat.T @ (cube_pos - hand_pos)
     rel_rot = hand_rot.inverse() @ cube_rot
 
-    # mjEQ_WELD data layout: anchor(3), relpose pos(3), relpose quat(4), torquescale(1).
-    # `eq_data` lives on model (static layout); poking it at runtime is legal.
+    # mjEQ_WELD eq_data layout: anchor(3), relpose pos(3), relpose quat(4), torquescale(1).
     model.eq_data[eq_id, 0:3] = 0.0
     model.eq_data[eq_id, 3:6] = rel_pos
     model.eq_data[eq_id, 6:10] = rel_rot.wxyz

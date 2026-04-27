@@ -1,22 +1,11 @@
 """Runtime enforcement of `PhaseContract`s declared by scenes.
 
-`tools/mj.py contracts` already evaluates phase boundaries in batch
-mode. The guard here is the *online* counterpart: it watches a live
-runner's task-plan execution, fires `check_phase_state` at every
-phase transition, and samples per-tick invariants in between. In
-`--strict` mode the first failure raises; in non-strict mode failures
-are collected so the user can keep watching the demo and inspect the
-report after.
-
-Wired in by `runner.py`:
-  guard = PhaseRuntimeGuard(scene.PHASE_CONTRACTS, strict=args.strict)
-  ...
-  for each step:
-      guard.on_step_started(step, model, data)
-  for each physics tick:
-      guard.on_tick(model, data)
-  on plan completion:
-      guard.on_plan_finished(model, data)
+`tools/mj.py contracts` evaluates phase boundaries in batch mode. The guard
+here is the *online* counterpart: it watches a live runner's task-plan
+execution, fires `check_phase_state` at each phase transition, and samples
+per-tick invariants in between. `--strict` raises on the first failure;
+otherwise failures are collected so the user can keep watching and inspect
+the report after.
 """
 
 from __future__ import annotations
@@ -38,10 +27,9 @@ from tools.observability import (
     _InvariantBaseline as InvariantBaseline,
 )
 
-# Number of physics ticks between invariant samples. 1 (every tick) is
-# the most paranoid; 10 is plenty for catching QACC blow-ups (a typical
-# divergence inflates the warning counter within a few ticks). Higher
-# values reduce overhead in tight runtime loops.
+# Physics ticks between invariant samples. 10 is plenty for catching QACC
+# blow-ups (a typical divergence inflates the warning counter within a few
+# ticks); 5 keeps headroom without measurable overhead.
 DEFAULT_INVARIANT_SAMPLE_EVERY: int = 5
 
 
@@ -49,10 +37,8 @@ DEFAULT_INVARIANT_SAMPLE_EVERY: int = 5
 class GuardEvent:
     """One contract-evaluation event recorded by the guard.
 
-    These are appended to the guard's internal log so callers can read
-    a full audit trail after the run. The fields mirror what
-    `RunArtifactWriter.write_event` accepts so the runner can stream
-    events to disk directly when an artifact directory is configured.
+    Field shape mirrors `RunArtifactWriter.write_event` so the runner can
+    stream events to disk directly when an artifact directory is configured.
     """
 
     kind: str  # "phase_start" | "phase_end" | "invariant_sample"
@@ -61,21 +47,11 @@ class GuardEvent:
     report: ContractCheckReport
 
 
-class PhaseRuntimeGuard:
+class PhaseRuntimeMonitor:
     """Tracks the active task phase and evaluates contracts in-line.
 
-    The runner calls into the guard at three event types:
-
-    * `on_step_started(step, model, data)` — every time a new
-      `Step` becomes the active waypoint. Detects phase transitions
-      and triggers boundary checks.
-    * `on_tick(model, data)` — every physics tick. Samples invariants
-      according to `invariant_sample_every`.
-    * `on_plan_finished(model, data)` — once the full plan completes
-      so the *end* boundary of the final phase is evaluated.
-
-    The guard is intentionally cheap when no contracts are declared —
-    constructing with an empty tuple short-circuits every method.
+    Constructing with an empty `contracts` tuple short-circuits every method,
+    so scenes with no contracts pay zero per-tick cost.
     """
 
     def __init__(
@@ -118,12 +94,8 @@ class PhaseRuntimeGuard:
     ) -> None:
         """Called by the runner when a new `Step` becomes active.
 
-        Phase transitions detected here trigger the *end* check of
-        the outgoing phase and the *start* check of the incoming
-        phase, plus an invariant baseline capture for the new phase.
-        Steps tagged `TaskPhase.UNPHASED` are treated as continuing
-        whatever phase was last active — the contracts only assert
-        what scenes have actually declared.
+        `TaskPhase.UNPHASED` steps continue whatever phase was last active —
+        contracts only assert what scenes have actually declared.
         """
         if not self.enabled:
             return
@@ -132,13 +104,43 @@ class PhaseRuntimeGuard:
         new_phase = step.phase
         if new_phase == self._current_phase:
             return
-        # Outgoing phase: evaluate the end contract + final invariant pass.
+        self._check_predecessor(new_phase, data)
         if self._current_phase is not None:
             self._evaluate_end(self._current_phase, model, data)
-        # Incoming phase: evaluate start contract, capture baseline.
         self._evaluate_start(new_phase, model, data)
         self._current_phase = new_phase
         self._tick_counter = 0
+
+    def _check_predecessor(self, new_phase: TaskPhase, data: mujoco.MjData) -> None:
+        """Fail-fast check that `_current_phase → new_phase` is a transition the
+        scene's contract declares. No constraint is recorded if the incoming
+        phase has `legal_predecessors=()`, so legacy scenes are unaffected."""
+        contract = self._contracts_by_phase.get(new_phase)
+        if contract is None or not contract.legal_predecessors:
+            return
+        actual = self._current_phase
+        if actual is not None and actual in contract.legal_predecessors:
+            return
+        actual_label = actual.value if actual is not None else "(initial)"
+        expected_label = ", ".join(p.value for p in contract.legal_predecessors)
+        failure = ContractFailure(
+            kind="phase_predecessor",
+            name=f"{actual_label}→{new_phase.value}",
+            expected=expected_label,
+            observed=actual_label,
+            message=(
+                f"phase {new_phase.value!r} entered from {actual_label!r}; "
+                f"declared legal predecessors: [{expected_label}]"
+            ),
+        )
+        self._record(
+            GuardEvent(
+                kind="phase_predecessor",
+                phase=new_phase,
+                sim_time_s=float(data.time),
+                report=ContractCheckReport(ok=False, failures=(failure,)),
+            )
+        )
 
     def on_tick(
         self,
@@ -179,13 +181,12 @@ class PhaseRuntimeGuard:
         self._invariant_baseline = None
 
     def reset(self) -> None:
-        """Forget all tracking state — call when the user hits Reset."""
+        """Forget tracking state. Keep `events` / `failures` so post-run
+        inspection has the full history — the caller clears them manually
+        if a fresh log is wanted."""
         self._current_phase = None
         self._invariant_baseline = None
         self._tick_counter = 0
-        # Keep self.events / self.failures so post-run inspection has
-        # the full history; the caller can clear them manually if a
-        # fresh log is wanted.
 
     def _evaluate_start(
         self,
@@ -257,4 +258,4 @@ class PhaseRuntimeGuard:
 
 
 class PhaseContractViolation(RuntimeError):
-    """Raised by `PhaseRuntimeGuard` in strict mode when a contract fails."""
+    """Raised by `PhaseRuntimeMonitor` in strict mode when a contract fails."""

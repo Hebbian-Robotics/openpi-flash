@@ -62,6 +62,7 @@ from tools._runtime import (
     advance_timeline_with_state,
     build_free_cam,
     build_scene_and_advance,
+    load_scene,
     make_timeline_state,
     parse_video_format,
     parse_world_point,
@@ -908,6 +909,52 @@ def replay_phase(
     typer.echo(f"artifacts → {run_dir}")
     if not all_ok and fail_on_error:
         raise typer.Exit(code=1)
+
+
+# ---- phase-graph -------------------------------------------------------------
+
+
+@app.command("phase-graph")
+def phase_graph(
+    out: Annotated[
+        Path | None,
+        typer.Option(help="output .dot file (omit for stdout)"),
+    ] = None,
+    scene: SceneOpt = "data_center",
+) -> None:
+    """Emit a GraphViz DOT graph of the scene's phase contracts.
+
+    Renders the transition graph declared by `legal_predecessors` on each
+    `PhaseContract`. Initial phases (no predecessors) are highlighted in blue,
+    making the entry point obvious. Render with: `dot -Tpng phases.dot -o phases.png`.
+    """
+    scene_module = load_scene(scene)
+    contracts: tuple[PhaseContract, ...] = tuple(getattr(scene_module, "PHASE_CONTRACTS", ()))
+    if not contracts:
+        raise typer.BadParameter(f"scene {scene!r} has no PHASE_CONTRACTS")
+    lines = [
+        "digraph phases {",
+        '  rankdir="LR";',
+        '  node [shape=box, style=rounded, fontname="Helvetica"];',
+        '  edge [fontname="Helvetica", fontsize=10];',
+    ]
+    for contract in contracts:
+        label = contract.phase.name
+        attrs = [f'label="{label}"']
+        if not contract.legal_predecessors:
+            attrs.append('style="rounded,filled"')
+            attrs.append('fillcolor="#dbeafe"')
+        lines.append(f"  {contract.phase.name} [{', '.join(attrs)}];")
+    for contract in contracts:
+        for prev in contract.legal_predecessors:
+            lines.append(f"  {prev.name} -> {contract.phase.name};")
+    lines.append("}")
+    text = "\n".join(lines) + "\n"
+    if out is None:
+        typer.echo(text, nl=False)
+    else:
+        out.write_text(text, encoding="utf-8")
+        typer.echo(f"wrote {out}")
 
 
 # ---- diff --------------------------------------------------------------------

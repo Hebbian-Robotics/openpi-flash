@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -59,6 +59,7 @@ from scene_base import (
     make_cube_id,
 )
 from scene_check import AttachmentConstraint
+from scenes.data_center_layout import BASE_HOME_POSE, HOME_ARM_Q_BY_SIDE
 from tools.observability import check_phase_state
 from welds import (
     activate_attachment_weld,
@@ -142,6 +143,21 @@ class _SceneSnapshot:
 
 
 @dataclass
+class _PhasePoseCapture:
+    """Hand-authored per-phase start pose, captured at runtime.
+
+    Mirror of `scenes.data_center_layout._PhasePose` but mutable +
+    using raw numpy arrays — this is the in-flight cache, not the
+    serialised dataclass. The "Print phase homes for layout" button
+    formats this into the immutable `_PhasePose` shape for paste-back
+    into the layout module.
+    """
+
+    arm_q: dict[ArmSide, np.ndarray]
+    base_pose: tuple[float, float, float]
+
+
+@dataclass
 class _CapturedKeyframe:
     """One snapshot of an arm's state ready for serialisation.
 
@@ -189,6 +205,9 @@ class TeleopController:
     grippable_names: tuple[str, ...]
     cube_body_ids: tuple[int, ...]
     base_qposadr: dict[str, int]
+    # Parallel to `base_qposadr` — cached at attach time so `tick()`
+    # can zero qvel without re-resolving joint ids every frame.
+    base_dofadr: dict[str, int]
     base_aux_names: tuple[str, str, str]  # (x, y, yaw)
     _scene_name: str = "unknown"
     _save_root: Path = field(default_factory=lambda: Path("/tmp/teleop_recordings"))
@@ -234,6 +253,13 @@ class TeleopController:
     # contract" so the user can rewind to that moment.
     _scene_start_snapshot: _SceneSnapshot | None = None
     _phase_start_snapshots: dict[TaskPhase, _SceneSnapshot] = field(default_factory=dict)
+    # Per-phase start poses captured by the "Save current as start of
+    # [phase]" button. Distinct from `_phase_start_snapshots` (which
+    # stores the full sim state for the rewind button) — this only
+    # carries arm joint config + base pose, the subset needed by
+    # `_PhasePose`. Survives across teleop sessions only as long as
+    # the controller does (i.e. until the runner restarts).
+    _phase_pose_captures: dict[TaskPhase, _PhasePoseCapture] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Construction
@@ -263,9 +289,11 @@ class TeleopController:
         indices from `model` and writes qpos directly to drive the
         base from the dragged handle.
         """
-        # Resolve base joint qpos addresses (so we can puppet the
-        # chassis from the handle).
+        # Resolve base joint qpos + dof addresses (so we can puppet the
+        # chassis from the handle and zero qvel without re-looking-up
+        # joint ids every tick).
         base_qposadr: dict[str, int] = {}
+        base_dofadr: dict[str, int] = {}
         for joint_name in base_aux_names:
             jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
             if jid < 0:
@@ -277,6 +305,7 @@ class TeleopController:
                     )
                 jid = int(model.actuator_trnid[aid][0])
             base_qposadr[joint_name] = int(model.jnt_qposadr[jid])
+            base_dofadr[joint_name] = int(model.jnt_dofadr[jid])
 
         controller = cls(
             server=server,
@@ -289,6 +318,7 @@ class TeleopController:
             grippable_names=grippable_names,
             cube_body_ids=cube_body_ids,
             base_qposadr=base_qposadr,
+            base_dofadr=base_dofadr,
             base_aux_names=base_aux_names,
             _scene_name=scene_name,
             _save_root=save_root or Path("/tmp/teleop_recordings"),
@@ -356,6 +386,38 @@ class TeleopController:
         step_str = f"{step:.10f}".rstrip("0").rstrip(".")
         decimals = len(step_str.split(".")[-1]) if "." in step_str else 0
         return round(round(value / step) * step, decimals)
+
+    # ------------------------------------------------------------------
+    # GUI write helpers — collapse the "is the widget built yet?" guard
+    # and the "snap-then-assign" idiom into one place each. The status
+    # widget is None until `_build_gui` runs; until then, callers (e.g.
+    # snapshot restore from a future button click) shouldn't crash —
+    # they just no-op silently.
+    # ------------------------------------------------------------------
+
+    def _set_status(self, text: str) -> None:
+        """Write `text` to the contract-status widget if it exists."""
+        if self._phase_status_text is not None:
+            self._phase_status_text.value = text
+
+    def _set_slider(self, slider: viser.GuiSliderHandle, value: float) -> None:
+        """Snap `value` to `slider.step` then assign — programmatic writes
+        only (user drags already snap client-side)."""
+        slider.value = self._snap_to_step(float(value), slider.step)
+
+    def _base_sliders_or_none(
+        self,
+    ) -> tuple[viser.GuiSliderHandle, viser.GuiSliderHandle, viser.GuiSliderHandle] | None:
+        """Return the (x, y, yaw) base-slider triple if all three are
+        constructed, else `None`. Lets callers early-return on a single
+        check rather than a 3-clause `if any is None`."""
+        if (
+            self._base_x_slider is None
+            or self._base_y_slider is None
+            or self._base_yaw_slider is None
+        ):
+            return None
+        return (self._base_x_slider, self._base_y_slider, self._base_yaw_slider)
 
     @staticmethod
     def _body_to_world(
@@ -485,6 +547,19 @@ class TeleopController:
                             ),
                         )
                         joint_sliders_list.append(js)
+                        # Per-joint reset button — snaps just this slider
+                        # to the layout's home value for this joint. Lets
+                        # the user fine-tune one joint without losing
+                        # progress on the other five.
+                        reset_one_btn = self.server.gui.add_button(
+                            f"  ↺ {joint_label}",
+                            hint=f"reset {joint_label} to layout home (scene-wide, not phase-specific)",
+                        )
+                        reset_one_btn.on_click(
+                            lambda _e, target_side=side, target_idx=joint_idx: (
+                                self._reset_one_joint_to_home(target_side, target_idx)
+                            )
+                        )
 
                     # Construct the full per-arm state ONCE with both
                     # marker + sliders in scope. No mutation, no
@@ -567,6 +642,19 @@ class TeleopController:
                     step=0.05,
                     initial_value=base_init_yaw,
                 )
+                # Base-only resets — independent of the per-arm joint
+                # reset buttons so the user can re-position the chassis
+                # without disturbing arm poses (or vice versa).
+                reset_base_btn = self.server.gui.add_button(
+                    "reset base to home",
+                    hint="snap base x/y/yaw to layout's BASE_HOME_POSE",
+                )
+                reset_base_btn.on_click(lambda _e: self._reset_base_to_home())
+                print_base_btn = self.server.gui.add_button(
+                    "Print base pose for layout",
+                    hint="emit current base x/y/yaw as a copy-pasteable layout default",
+                )
+                print_base_btn.on_click(lambda _e: self.print_base_pose())
 
             # Attachment-weld checkboxes (active state at end of next capture).
             if self.attachments:
@@ -614,6 +702,29 @@ class TeleopController:
             print_home_btn = self.server.gui.add_button("Print home_q for layout")
             print_home_btn.on_click(lambda _e: self.print_home_q())
 
+            # Per-phase start-pose capture: lets the user mark a hand-
+            # authored start state for any TaskPhase, then dump every
+            # captured phase as a copy-pasteable `_PhaseHomes.by_phase`
+            # block. The runner's --start-phase flag boots from these
+            # so iterating on a single phase doesn't require replaying
+            # the full pickup/carry sequence.
+            save_phase_pose_btn = self.server.gui.add_button(
+                "Save current as start of [phase]",
+                hint=(
+                    "snapshot current arm joints + base pose as the start state "
+                    "for the phase selected in the dropdown above"
+                ),
+            )
+            save_phase_pose_btn.on_click(lambda _e: self.save_phase_pose())
+            print_phase_homes_btn = self.server.gui.add_button(
+                "Print phase homes for layout",
+                hint=(
+                    "emit every captured _PhasePoseCapture as a paste-ready "
+                    "_PhaseHomes.by_phase mapping for scenes/data_center_layout.py"
+                ),
+            )
+            print_phase_homes_btn.on_click(lambda _e: self.print_phase_homes())
+
             self._ik_pos_err_text = self.server.gui.add_text(
                 "ik err (mm)", initial_value="—", disabled=True
             )
@@ -636,28 +747,14 @@ class TeleopController:
         del dt  # IK runs at the render rate the runner already controls
         self._tick_count += 1
 
-        # 1. Drive base from its three sliders.
-        if (
-            self._base_x_slider is not None
-            and self._base_y_slider is not None
-            and self._base_yaw_slider is not None
-        ):
-            self.data.qpos[self.base_qposadr[self.base_aux_names[0]]] = float(
-                self._base_x_slider.value
-            )
-            self.data.qpos[self.base_qposadr[self.base_aux_names[1]]] = float(
-                self._base_y_slider.value
-            )
-            self.data.qpos[self.base_qposadr[self.base_aux_names[2]]] = float(
-                self._base_yaw_slider.value
-            )
-            for name in self.base_aux_names:
-                # Zero the base joints' velocity each tick so the
-                # integrator doesn't carry over residual motion from
-                # the previous frame's qpos jump.
-                jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
-                if jid >= 0:
-                    self.data.qvel[int(self.model.jnt_dofadr[jid])] = 0.0
+        # 1. Drive base from its three sliders, zeroing qvel each tick
+        #    so the integrator doesn't carry residual motion from the
+        #    previous frame's qpos jump.
+        base_sliders = self._base_sliders_or_none()
+        if base_sliders is not None:
+            for slider, name in zip(base_sliders, self.base_aux_names, strict=True):
+                self.data.qpos[self.base_qposadr[name]] = float(slider.value)
+                self.data.qvel[self.base_dofadr[name]] = 0.0
 
         # 2. Drive each arm directly from its joint sliders. The
         #    target sliders only fire IK on click; in normal teleop
@@ -740,16 +837,19 @@ class TeleopController:
             deactivate_weld(self.data, eq_id)
 
     def _apply_grasp_change(self, side: ArmSide, new_target: str | None) -> None:
-        """Apply a per-arm grasp transition (None ↔ grippable name)."""
+        """Apply a per-arm grasp transition (None ↔ grippable name).
+
+        `prev` is sourced from `last_captured_grasp`, which is only ever
+        set to `None` or to a name that already came out of the grasp
+        dropdown (whose options are `self.grippable_names`), so the
+        `index` lookups can't raise `ValueError`.
+        """
         arm = self.arms[side]
         # Drop existing grasp first — only one grasp weld per arm.
         prev = self._arm_states[side].last_captured_grasp
         if prev is not None:
-            try:
-                prev_idx = self.grippable_names.index(prev)
-                deactivate_grasp_weld(self.data, int(arm.weld_ids[prev_idx]))
-            except ValueError:
-                pass
+            prev_idx = self.grippable_names.index(prev)
+            deactivate_grasp_weld(self.data, int(arm.weld_ids[prev_idx]))
         if new_target is not None:
             new_idx = self.grippable_names.index(new_target)
             activate_grasp_weld(
@@ -767,9 +867,11 @@ class TeleopController:
 
     def capture_step(self) -> None:
         """Snapshot both arms' current state as a parallel keyframe pair."""
-        if self._label_input is None or self._phase_dropdown is None:
-            return
-        if self._duration_slider is None:
+        if (
+            self._label_input is None
+            or self._phase_dropdown is None
+            or self._duration_slider is None
+        ):
             return
         label = self._label_input.value or "(unlabelled)"
         phase = TaskPhase(self._phase_dropdown.value)
@@ -789,15 +891,7 @@ class TeleopController:
 
         # Snapshot base aux for replay.
         aux_ctrl = {
-            self.base_aux_names[0]: float(
-                self.data.qpos[self.base_qposadr[self.base_aux_names[0]]]
-            ),
-            self.base_aux_names[1]: float(
-                self.data.qpos[self.base_qposadr[self.base_aux_names[1]]]
-            ),
-            self.base_aux_names[2]: float(
-                self.data.qpos[self.base_qposadr[self.base_aux_names[2]]]
-            ),
+            name: float(self.data.qpos[self.base_qposadr[name]]) for name in self.base_aux_names
         }
 
         for side, state in self._arm_states.items():
@@ -871,18 +965,18 @@ class TeleopController:
         phase = TaskPhase(self._phase_dropdown.value)
         contract = next((c for c in self.phase_contracts if c.phase == phase), None)
         if contract is None:
-            self._phase_status_text.value = f"no contract declared for {phase.value}"
+            self._set_status(f"no contract declared for {phase.value}")
             return
         target_state = contract.starts if boundary == "starts" else contract.ends
         report = check_phase_state(self.model, self.data, target_state)
         if report.ok:
-            self._phase_status_text.value = f"{phase.value} {boundary}: OK"
+            self._set_status(f"{phase.value} {boundary}: OK")
             if boundary == "starts":
                 self._phase_start_snapshots[phase] = self._capture_snapshot()
         else:
             first = report.failures[0]
             extra = f" (+{len(report.failures) - 1} more)" if len(report.failures) > 1 else ""
-            self._phase_status_text.value = f"{phase.value} {boundary} FAIL: {first.message}{extra}"
+            self._set_status(f"{phase.value} {boundary} FAIL: {first.message}{extra}")
 
     # ------------------------------------------------------------------
     # Snapshot / restore (scene-start + phase-start rewinds)
@@ -913,30 +1007,15 @@ class TeleopController:
             state.target_body_xyz = body_xyz.copy()
             # Push slider values back so the user sees the rewind.
             for axis_idx, slider in enumerate(state.target_sliders):
-                slider.value = self._snap_to_step(float(body_xyz[axis_idx]), slider.step)
+                self._set_slider(slider, float(body_xyz[axis_idx]))
             arm = self.arms[side]
             for joint_idx, slider in enumerate(state.joint_sliders):
-                slider.value = self._snap_to_step(
-                    float(snapshot.qpos[arm.arm_qpos_idx[joint_idx]]), slider.step
-                )
+                self._set_slider(slider, float(snapshot.qpos[arm.arm_qpos_idx[joint_idx]]))
         # Refresh the base sliders too — chassis qpos was just rewritten.
-        if (
-            self._base_x_slider is not None
-            and self._base_y_slider is not None
-            and self._base_yaw_slider is not None
-        ):
-            self._base_x_slider.value = self._snap_to_step(
-                float(self.data.qpos[self.base_qposadr[self.base_aux_names[0]]]),
-                self._base_x_slider.step,
-            )
-            self._base_y_slider.value = self._snap_to_step(
-                float(self.data.qpos[self.base_qposadr[self.base_aux_names[1]]]),
-                self._base_y_slider.step,
-            )
-            self._base_yaw_slider.value = self._snap_to_step(
-                float(self.data.qpos[self.base_qposadr[self.base_aux_names[2]]]),
-                self._base_yaw_slider.step,
-            )
+        base_sliders = self._base_sliders_or_none()
+        if base_sliders is not None:
+            for slider, jname in zip(base_sliders, self.base_aux_names, strict=True):
+                self._set_slider(slider, float(self.data.qpos[self.base_qposadr[jname]]))
         mujoco.mj_forward(self.model, self.data)
 
     def reset_to_scene_start(self) -> None:
@@ -944,8 +1023,7 @@ class TeleopController:
         if self._scene_start_snapshot is None:
             return
         self._restore_snapshot(self._scene_start_snapshot)
-        if self._phase_status_text is not None:
-            self._phase_status_text.value = "reset → scene start"
+        self._set_status("reset → scene start")
 
     def reset_to_phase_start(self) -> None:
         """Restore the snapshot taken when the user last clicked
@@ -960,14 +1038,10 @@ class TeleopController:
         snapshot = self._phase_start_snapshots.get(phase)
         if snapshot is None:
             self.reset_to_scene_start()
-            if self._phase_status_text is not None:
-                self._phase_status_text.value = (
-                    f"no '{phase.value}' START snapshot yet — reset to scene start"
-                )
+            self._set_status(f"no '{phase.value}' START snapshot yet — reset to scene start")
             return
         self._restore_snapshot(snapshot)
-        if self._phase_status_text is not None:
-            self._phase_status_text.value = f"reset → {phase.value} START"
+        self._set_status(f"reset → {phase.value} START")
 
     # ------------------------------------------------------------------
     # IK + per-joint helpers
@@ -998,7 +1072,7 @@ class TeleopController:
         tcp_body = self._world_to_body(tcp_world, bx, by, byaw)
         state.target_body_xyz = tcp_body
         for axis_idx, slider in enumerate(state.target_sliders):
-            slider.value = self._snap_to_step(float(tcp_body[axis_idx]), slider.step)
+            self._set_slider(slider, float(tcp_body[axis_idx]))
         state.target_marker.position = (
             float(tcp_world[0]),
             float(tcp_world[1]),
@@ -1033,13 +1107,32 @@ class TeleopController:
                 max_iters=200,
             )
         except RuntimeError:
-            if self._phase_status_text is not None:
-                self._phase_status_text.value = f"{side} IK: solver error"
+            self._set_status(f"{side} IK: solver error")
             return
         for slider, value in zip(state.joint_sliders, solved_q, strict=True):
-            slider.value = self._snap_to_step(float(value), slider.step)
-        if self._phase_status_text is not None:
-            self._phase_status_text.value = f"{side} IK: err={err_m * 1000:.1f} mm"
+            self._set_slider(slider, float(value))
+        self._set_status(f"{side} IK: err={err_m * 1000:.1f} mm")
+
+    def _apply_home_q(self, side: ArmSide, joint_indices: Iterable[int]) -> bool:
+        """Snap the listed joint sliders to their `HOME_ARM_Q_BY_SIDE`
+        values. Returns True if anything was written, False if the home
+        config doesn't match the slider count (defensive — would only
+        fire on a robot swap that drifted DoF without updating the
+        layout home).
+
+        Both `_reset_arm_to_home` (all six joints) and
+        `_reset_one_joint_to_home` (single joint) share this primitive
+        so the bounds check + slider snap live in one place.
+        """
+        home_q = HOME_ARM_Q_BY_SIDE[side]
+        state = self._arm_states[side]
+        if len(home_q) != len(state.joint_sliders):
+            return False
+        for joint_idx in joint_indices:
+            if joint_idx < 0 or joint_idx >= len(state.joint_sliders):
+                continue
+            self._set_slider(state.joint_sliders[joint_idx], float(home_q[joint_idx]))
+        return True
 
     def _reset_arm_to_home(self, side: ArmSide) -> None:
         """Snap one arm's joint sliders back to the scene's per-side home pose.
@@ -1048,18 +1141,48 @@ class TeleopController:
         rest configuration — so left and right arms restore to their
         own mirrored stow poses rather than a shared vector.
         """
-        # Lazy import to avoid a circular dependency at module load
-        # (teleop is imported by runner; runner imports scenes).
-        from scenes.data_center_layout import HOME_ARM_Q_BY_SIDE
-
-        home_q = HOME_ARM_Q_BY_SIDE[side]
-        state = self._arm_states[side]
-        if len(home_q) != len(state.joint_sliders):
+        if not self._apply_home_q(side, range(len(self._arm_states[side].joint_sliders))):
             return
-        for slider, value in zip(state.joint_sliders, home_q, strict=True):
-            slider.value = self._snap_to_step(float(value), slider.step)
-        if self._phase_status_text is not None:
-            self._phase_status_text.value = f"{side} → home_q"
+        self._set_status(f"{side} → home_q")
+
+    def _reset_one_joint_to_home(self, side: ArmSide, joint_idx: int) -> None:
+        """Snap a single joint slider to its layout-home value.
+
+        Used by the per-joint ↺ buttons. Only touches the one slider —
+        the other five stay where the user put them, so this is the
+        "I bumped this joint, undo just that" affordance.
+        """
+        if not self._apply_home_q(side, (joint_idx,)):
+            return
+        self._set_status(f"{side} joint {joint_idx} → home")
+
+    def _reset_base_to_home(self) -> None:
+        """Snap base x/y/yaw sliders to the layout's `BASE_HOME_POSE`.
+
+        Independent of arm joints — the user can reset just the chassis
+        position without losing the arm pose they hand-authored. The
+        target is scene-wide (NOT phase-specific): same as other reset
+        buttons that read layout defaults.
+        """
+        base_sliders = self._base_sliders_or_none()
+        if base_sliders is None:
+            return
+        for slider, value in zip(base_sliders, BASE_HOME_POSE, strict=True):
+            self._set_slider(slider, float(value))
+        self._set_status("base → home")
+
+    def print_base_pose(self) -> None:
+        """Print the current base x/y/yaw in a copy-pasteable form so
+        the user can drop the values into `_Base.home_pose`'s default
+        factory in `scenes/data_center_layout.py`.
+        """
+        base_sliders = self._base_sliders_or_none()
+        if base_sliders is None:
+            return
+        x, y, yaw = (round(float(s.value), 4) for s in base_sliders)
+        print("# --- paste into _Base.home_pose default ---")
+        print(f"home_pose: tuple[float, float, float] = ({x!r}, {y!r}, {yaw!r})")
+        self._set_status("base pose printed to runner stdout")
 
     def print_home_q(self) -> None:
         """Print the current per-arm joint configurations in a copy-
@@ -1070,11 +1193,64 @@ class TeleopController:
         print("{")
         for side, state in self._arm_states.items():
             joints = [round(float(s.value), 4) for s in state.joint_sliders]
-            side_name = "LEFT" if side is ArmSide.LEFT else "RIGHT"
-            print(f"    ArmSide.{side_name}: np.array({joints!r}),")
+            print(f"    ArmSide.{side.name}: np.array({joints!r}),")
         print("}")
-        if self._phase_status_text is not None:
-            self._phase_status_text.value = "home_q values printed to runner stdout"
+        self._set_status("home_q values printed to runner stdout")
+
+    def save_phase_pose(self) -> None:
+        """Snapshot current arm joints + base pose as the start state
+        for the phase currently selected in the dropdown.
+
+        Overwrites any prior capture for that phase — the user can
+        re-do a phase pose just by re-clicking. The capture is in-
+        memory only; the user runs "Print phase homes for layout" to
+        flush every capture to runner stdout once they're satisfied
+        with the set.
+        """
+        if self._phase_dropdown is None:
+            return
+        base_sliders = self._base_sliders_or_none()
+        if base_sliders is None:
+            return
+        phase = TaskPhase(self._phase_dropdown.value)
+        arm_q = {
+            side: np.array([float(s.value) for s in state.joint_sliders], dtype=float)
+            for side, state in self._arm_states.items()
+        }
+        base_pose = (
+            float(base_sliders[0].value),
+            float(base_sliders[1].value),
+            float(base_sliders[2].value),
+        )
+        self._phase_pose_captures[phase] = _PhasePoseCapture(arm_q=arm_q, base_pose=base_pose)
+        self._set_status(f"saved as start of {phase.value}")
+
+    def print_phase_homes(self) -> None:
+        """Emit every captured `_PhasePoseCapture` as a paste-ready
+        `_PhaseHomes.by_phase` mapping for `data_center_layout.py`.
+
+        Empty cache → print a placeholder line + no block, so the
+        operator notices they haven't actually saved any phase yet
+        rather than pasting an empty `{}` over a populated layout.
+        """
+        if not self._phase_pose_captures:
+            print("# (no phase poses captured yet)")
+            self._set_status("no phase poses captured yet")
+            return
+        print("# --- paste into _PhaseHomes.by_phase default_factory ---")
+        print("{")
+        for phase, capture in self._phase_pose_captures.items():
+            print(f"    TaskPhase.{phase.name}: _PhasePose(")
+            print("        arm_q={")
+            for side, qvec in capture.arm_q.items():
+                rounded = [round(float(q), 4) for q in qvec]
+                print(f"            ArmSide.{side.name}: np.array({rounded!r}),")
+            print("        },")
+            x, y, yaw = capture.base_pose
+            print(f"        base_pose=({round(x, 4)!r}, {round(y, 4)!r}, {round(yaw, 4)!r}),")
+            print("    ),")
+        print("}")
+        self._set_status(f"printed {len(self._phase_pose_captures)} phase homes to runner stdout")
 
     # ------------------------------------------------------------------
     # Save

@@ -1,16 +1,9 @@
 """Shared helpers for the `tools/` debug CLIs.
 
-Every debug tool needs some subset of: "import a scene module by name",
-"build + compile the spec", "advance the runner's task-plan timeline to
-time t", "render from a camera or free-cam". This module owns that
-plumbing so each tool stays a thin CLI wrapper focused on its own job
-(render one frame, stitch video, grid-compose cameras, diff two PNGs,
-sweep IK feasibility, print the task-plan timeline).
-
-Importing from `tools._runtime` inside other tools keeps a single source
-of truth for step interpretation: whatever the real runner does at a
-step boundary (weld activate, attach deactivate, ctrl interpolation) is
-replicated here once.
+Owns the "import scene module, compile, advance to t, render" plumbing so
+each tool stays a thin CLI wrapper. Step-boundary semantics (weld activate,
+attach deactivate, ctrl interpolation) are replicated here once and mirror
+`runner.advance_arm`.
 """
 
 from __future__ import annotations
@@ -54,15 +47,13 @@ WorldPoint = tuple[float, float, float]
 
 
 def load_scene(name: SceneName | str) -> ModuleType:
-    """Import `scenes.<name>` — matches runner.py's convention so a
-    --scene argument behaves identically between runner and tools."""
+    """Import `scenes.<name>` — matches runner.py's convention."""
     return importlib.import_module(f"scenes.{name}")
 
 
 def parse_world_point(raw: str, *, field_name: str) -> WorldPoint:
-    """Parse `'x,y,z'` into a 3-tuple; raise with a useful message on
-    anything else. CLI boundary parsing — downstream code gets a refined
-    tuple and never re-validates."""
+    """Parse `'x,y,z'` into a 3-tuple; raise on anything else.
+    Parse-don't-validate at the CLI boundary."""
     parts = [p.strip() for p in raw.split(",")]
     if len(parts) != 3:
         raise ValueError(
@@ -112,14 +103,11 @@ def render_frame(
     width: int = 640,
     height: int = 480,
 ) -> np.ndarray:
-    """Render a single frame. Returns an (H, W, 3) uint8 array.
+    """Render a single (H, W, 3) uint8 frame.
 
-    We deliberately don't call `renderer.close()` — MuJoCo 3.7's
-    Renderer.__del__ calls close() at GC, and an explicit close()
-    followed by __del__'s call raises `_mjr_context` AttributeError on
-    the second pass. Letting GC handle cleanup avoids the noise without
-    leaking resources (Python drops the reference when the function
-    returns).
+    No explicit `renderer.close()`: MuJoCo 3.7's `Renderer.__del__` already
+    calls close() at GC, and a manual close() + __del__'s call raises
+    `_mjr_context` AttributeError on the second pass.
     """
     renderer = mujoco.Renderer(model, height=height, width=width)
     if isinstance(camera, str):
@@ -151,11 +139,8 @@ TimelineState = dict[ArmSide, _ArmTimelineState]
 
 
 def make_timeline_state(data: mujoco.MjData, arms: dict[ArmSide, ArmHandles]) -> TimelineState:
-    """Capture the current per-arm interpolation state before replay.
-
-    Callers that advance in chunks must keep and reuse this object; otherwise
-    every chunk would restart at script step zero.
-    """
+    """Capture per-arm interpolation state before replay. Callers advancing
+    in chunks must reuse this object; otherwise every chunk restarts at step 0."""
     return {
         side: _ArmTimelineState(
             step=0,
@@ -177,9 +162,7 @@ def _advance_one_arm(
     sim_dt: float,
     aux_name_to_id: dict[str, int],
 ) -> None:
-    """Mirror of `runner.advance_arm` but stripped to headless
-    replay — no speed slider, no GUI updates, just step ctrl and fire
-    the weld/attach side effects at step boundaries."""
+    """Headless mirror of `runner.advance_arm`."""
     if st.step >= len(script):
         return
     step = script[st.step]
@@ -236,13 +219,11 @@ def _advance_one_arm(
     target_gripper = arm.gripper_open if step.gripper == "open" else arm.gripper_closed
     curr_g = (1.0 - alpha_s) * st.start_g + alpha_s * target_gripper
     if arm.robot_kind == "piper":
-        # Piper finger slides at qpos_idx[6/7]; tendon-coupled mirrors.
         data.qpos[arm.qpos_idx[6]] = curr_g
         data.qpos[arm.qpos_idx[7]] = -curr_g
         data.qvel[arm.dof_idx[6]] = 0.0
         data.qvel[arm.dof_idx[7]] = 0.0
-    # UR10e + 2F-85: actuator-only path. The 4-bar finger linkage's
-    # tendon equality settles under the actuator's force.
+    # UR10e + 2F-85: actuator drives the tendon equality; finger joints settle.
     data.ctrl[arm.act_gripper_id] = curr_g
 
     if step.aux_ctrl:
@@ -277,9 +258,8 @@ def advance_timeline(
     sim_dt: float,
     until_s: Seconds,
 ) -> TimelineState:
-    """Replay the task plan's per-arm step loop until sim time reaches
-    `until_s`. Every `sim_dt` runs one interpolation pass per arm then
-    one `mj_step`. Mutates `data` in place."""
+    """Replay the per-arm step loop to `until_s` (one `mj_step` per `sim_dt`).
+    Mutates `data` in place."""
     state = make_timeline_state(data, arms)
     return advance_timeline_with_state(
         model,
@@ -314,9 +294,8 @@ def advance_timeline_with_state(
 
 @dataclass
 class SceneContext:
-    """Handle returned by `build_scene_and_advance` so every tool
-    reaches the same (model, data, arms, task_plan) quadruple without
-    copy-pasting scene-initialisation code across six CLIs."""
+    """`(model, data, arms, task_plan)` quadruple returned by
+    `build_scene_and_advance`."""
 
     model: mujoco.MjModel
     data: mujoco.MjData
@@ -326,11 +305,9 @@ class SceneContext:
 
 
 def build_scene_and_advance(scene_name: SceneName | str, t: Seconds | float = 0.0) -> SceneContext:
-    """Load + compile the scene, apply initial state, advance task plan
-    to `t`. Every tool calls this instead of reimplementing the six-step
-    init dance. Passing `t=0` skips task-plan construction entirely, so
-    tools that only care about the home-pose spec (e.g. `tree.py`) don't
-    pay the IK cost."""
+    """Load + compile the scene, apply initial state, advance task plan to `t`.
+    `t=0` skips task-plan construction (avoids the IK cost for tools that
+    only need the home pose)."""
     scene = load_scene(scene_name)
     model, data = scene.build_spec()
 
@@ -352,10 +329,8 @@ def build_scene_and_advance(scene_name: SceneName | str, t: Seconds | float = 0.
 
     task_plan: dict[ArmSide, list[Step]] | None = None
     if hasattr(scene, "make_task_plan"):
-        # Build the plan unconditionally (the IK solve is cheap relative
-        # to waiting for callers to ask for it and then rebuilding from
-        # scratch). Re-apply initial state after the plan's `snap` calls
-        # so t=0 renders show the home pose, not the IK seeding state.
+        # Re-apply initial state after `snap` so t=0 renders show home pose,
+        # not whatever IK seeding state the planner left behind.
         task_plan = scene.make_task_plan(model, data, arms, cube_body_ids)
         scene.apply_initial_state(model, data, arms, cube_body_ids)
     if task_plan is not None and float(t) > 0:
@@ -368,9 +343,8 @@ def build_scene_and_advance(scene_name: SceneName | str, t: Seconds | float = 0.
     return SceneContext(model=model, data=data, arms=arms, task_plan=task_plan, scene_module=scene)
 
 
-# Video encoder discrimination — the one place we translate a CLI
-# filename suffix into the parsed output format. Downstream video-
-# writing code takes `VideoFormat` and doesn't re-inspect the path.
+# Single boundary for filename-suffix → format. Downstream video code takes
+# `VideoFormat` and doesn't re-inspect the path.
 VideoFormat = Literal["mp4", "gif"]
 
 

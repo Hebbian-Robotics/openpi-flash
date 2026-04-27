@@ -55,19 +55,12 @@ from typing import Any, Literal, NewType
 import numpy as np
 from jaxtyping import Float
 
-# ---------------------------------------------------------------------------
-# Array shape aliases (jaxtyping).
-# These are purely annotation aliases — jaxtyping carries no runtime cost
-# unless combined with a checker. They exist so IK, welds, and scene helpers
-# can encode the expected shape (`(3,)`, `(4,)`, `(6,)`) in the signature
-# instead of passing bare `np.ndarray`.
-# ---------------------------------------------------------------------------
+# jaxtyping aliases carry no runtime cost without a checker; they encode the
+# expected shape in signatures instead of passing bare `np.ndarray`.
 Position3 = Float[np.ndarray, "3"]
 QuatWxyz = Float[np.ndarray, "4"]
-JointConfig = Float[np.ndarray, "6"]  # Piper 6-DoF arm qpos
+JointConfig = Float[np.ndarray, "6"]
 
-# The set of gripper command states is finite and project-wide; using a Literal
-# lets ty/mypy catch a typo at the call site instead of blowing up at runtime.
 GripperState = Literal["open", "closed"]
 
 
@@ -80,12 +73,14 @@ class TaskPhase(StrEnum):
 
     UNPHASED = "unphased"
     SETUP = "setup"
-    DISCONNECT_CABLES = "disconnect_cables"
     REMOVE_OLD_SERVER = "remove_old_server"
+    BACKUP_FROM_RACK = "backup_from_rack"
+    TRAVERSE_TO_CART = "traverse_to_cart"
     STOW_OLD_SERVER = "stow_old_server"
     RETRIEVE_NEW_SERVER = "retrieve_new_server"
+    TRAVERSE_TO_RACK = "traverse_to_rack"
+    ADVANCE_INTO_RACK = "advance_into_rack"
     INSTALL_NEW_SERVER = "install_new_server"
-    RECONNECT_CABLES = "reconnect_cables"
     RESET = "reset"
 
 
@@ -107,39 +102,34 @@ class Step:
     """A single waypoint in a per-arm timeline."""
 
     label: str
-    arm_q: JointConfig  # shape (6,) — target joint configuration for the arm
+    arm_q: JointConfig
     gripper: GripperState
-    duration: float  # seconds at seep 1.0
+    duration: float  # seconds at speed 1.0
     phase: TaskPhase = TaskPhase.UNPHASED
 
-    # Grasp welds (arm.link6 ↔ cube). Addressed by a CubeID (bounds-checked int
-    # index into cube_body_ids). `weld_activate` teleports the cube to the TCP;
-    # used for the "free cube in sink" case. `weld_deactivate` just clears the
-    # flag.
+    # Grasp welds (arm.link6 ↔ cube), addressed by `CubeID` index into
+    # `cube_body_ids`. `weld_activate` teleports the cube to the TCP — the
+    # "free cube in sink" case. `weld_deactivate` just clears the flag.
     weld_activate: CubeID | None = None
     weld_deactivate: CubeID | None = None
 
-    # Generic attachment welds (body ↔ body), addressed by the weld's MJCF
-    # name. Used when the two bodies are already in their desired relative
-    # pose (cable connector seated in a port, server slotted in a rack, arm
-    # closing on an already-positioned connector). `attach_activate` freezes
-    # the current relative pose; `attach_deactivate` clears the flag.
+    # Generic body↔body attachment welds, addressed by MJCF name. Used when
+    # the two bodies are already in their desired relative pose (server in
+    # rack, connector seated in port). `attach_activate` freezes the current
+    # relative pose.
     #
-    # Scenes with a closed set of attachment welds should define a scene-local
-    # `StrEnum` (e.g. `class AttachmentWeldName(StrEnum): ...`) and pass its
-    # members here — `StrEnum` values are `str` subclasses, so the tuple type
-    # below accepts them while downstream code still benefits from enum-level
-    # typo protection at the call site.
+    # Scenes with a closed weld set should define a scene-local `StrEnum`
+    # (`class AttachmentWeldName(StrEnum): ...`) and pass its members here.
+    # StrEnum values are `str` subclasses, so the tuple type accepts them
+    # while keeping enum-level typo protection at the call site.
     attach_activate: tuple[str, ...] = ()
     attach_deactivate: tuple[str, ...] = ()
 
-    # Same as `attach_activate` but each entry pairs a weld name with an
-    # explicit target world pose `((x, y, z), (qw, qx, qy, qz))`. The
-    # weld activates such that body_b lands at exactly that pose,
-    # *regardless of where it currently is* — used for deterministic
-    # placements (server-on-shelf, new-server-in-rack) where capturing
-    # the runtime position would propagate arm-tracking offsets into
-    # the final object pose.
+    # Like `attach_activate` but each entry pairs a weld name with an explicit
+    # target world pose `((x, y, z), (qw, qx, qy, qz))`. body_b lands exactly
+    # at that pose regardless of its current position — used for deterministic
+    # placements (server-on-shelf, new-server-in-rack) where capturing the
+    # runtime pose would propagate arm-tracking offsets into the final object.
     attach_activate_at: (
         tuple[
             tuple[
@@ -152,18 +142,15 @@ class Step:
         | None
     ) = None
 
-    # Scene-owned actuator targets (e.g. a lift prismatic joint). Keys are
-    # actuator names the scene declares via AUX_ACTUATOR_NAMES; values are
-    # target ctrl values. Runner interpolates to these alongside arm joints.
-    # Same StrEnum-as-str convention as attach_activate: scenes may pass
-    # enum members and still satisfy the `str` key type.
+    # Scene-owned actuator targets (e.g. a lift prismatic). Keys are actuator
+    # names declared via `AUX_ACTUATOR_NAMES`; runner interpolates to these
+    # alongside arm joints. StrEnum-as-str: scenes may pass enum members.
     aux_ctrl: Mapping[Any, float] | None = None
 
     def __post_init__(self) -> None:
-        # arm_q is the one field the type system can't fully express (shape
-        # invariant at runtime), so we keep this check. `gripper` is handled
-        # by Literal at type-check time; `weld_*` is bounds-checked by
-        # `make_cube_id`.
+        # arm_q's shape invariant can't be expressed in the type system, so
+        # check it at construction. Other fields are guarded by Literal /
+        # `make_cube_id` already.
         self.arm_q = np.asarray(self.arm_q, dtype=float)
         if self.arm_q.shape != (6,):
             raise ValueError(f"arm_q must be length 6, got shape {self.arm_q.shape}")
@@ -232,7 +219,82 @@ class WeldHoldInvariant:
     must_be_active: bool
 
 
-PhaseInvariant = QaccSentinel | WeldHoldInvariant
+@dataclass(frozen=True)
+class JointSetStatic:
+    """Phase invariant: a named set of joints must not move within the phase.
+
+    Per tick the checker compares qpos against the previous tick; if any
+    joint in `joint_names` moved by more than `qpos_epsilon`, the invariant
+    fails. `label` shows up in failure messages — pass `"arms"` /
+    `"base"` so reports are legible when multiple `JointSetStatic`
+    invariants run in the same phase.
+    """
+
+    joint_names: tuple[str, ...]
+    label: str = "joint_set"
+    qpos_epsilon: float = 1e-4
+
+
+@dataclass(frozen=True)
+class GripperStateHold:
+    """Phase invariant: gripper actuator(s) must stay at a fixed ctrl value.
+
+    Catches authoring bugs that toggle the gripper mid-carry — in a real
+    robot, opening the gripper while still welded to the load would drop
+    the held object. `actuator_names` lets one invariant cover both arms.
+    """
+
+    actuator_names: tuple[str, ...]
+    expected_ctrl_value: float
+    label: str = "gripper"
+    tolerance: float = 1.0
+
+
+@dataclass(frozen=True)
+class BimanualHandleSeparation:
+    """Phase invariant: TCP-to-TCP world distance must stay near `target_distance_m`.
+
+    When both arm grasp welds onto the same rigid body are active, the two
+    arms over-constrain the body's pose — if their TCPs drift apart in
+    world frame, MuJoCo's solver thrashes (typically blowing up QACC).
+    `requires_active_welds` gates the check: if any listed weld is
+    inactive, the invariant trivially passes. Pass the per-side grasp
+    weld names so the invariant only fires while the bimanual hold is
+    actually engaged.
+    """
+
+    left_tcp_site: str
+    right_tcp_site: str
+    target_distance_m: float
+    requires_active_welds: tuple[str, ...] = ()
+    tolerance_m: float = 0.02
+
+
+@dataclass(frozen=True)
+class HeldObjectLevelness:
+    """Phase invariant: a body's pitch/roll must stay within tolerance.
+
+    Encodes the "server stays horizontal during the carry" requirement
+    from `NEW_LAYOUT.md`. `requires_active_welds` gates the check the
+    same way as `BimanualHandleSeparation` — if the body isn't being
+    carried right now (no grasp welds active), the levelness check
+    doesn't apply.
+    """
+
+    body_name: str
+    max_pitch_rad: float
+    max_roll_rad: float
+    requires_active_welds: tuple[str, ...] = ()
+
+
+PhaseInvariant = (
+    QaccSentinel
+    | WeldHoldInvariant
+    | JointSetStatic
+    | GripperStateHold
+    | BimanualHandleSeparation
+    | HeldObjectLevelness
+)
 
 
 @dataclass(frozen=True)
@@ -242,9 +304,15 @@ class PhaseContract:
     `starts` / `ends` are evaluated at phase boundaries (cheap).
     `invariants` are sampled every tick the phase is active — keep them
     cheap to evaluate. The runner enforces both when run with --strict.
+
+    `legal_predecessors` declares which phases may transition INTO this one;
+    empty tuple = no constraint (unrestricted). Catches choreography reorder
+    bugs at the boundary instead of as opaque physics divergences later.
+    Legacy scenes that don't populate the field keep their old behaviour.
     """
 
     phase: TaskPhase
     starts: PhaseState
     ends: PhaseState
     invariants: tuple[PhaseInvariant, ...] = ()
+    legal_predecessors: tuple[TaskPhase, ...] = ()

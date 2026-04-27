@@ -1,24 +1,23 @@
-"""Differential IK over a Piper arm's 6-DOF chain, driven by mink.
+"""Differential IK over a 6-DOF arm chain, driven by mink.
 
 `mink.solve_ik` is a QP (ProxQP-backed by default, switchable via `solver=...`)
 over joint velocities, with joint limits and optional tasks. We iterate it to
-convergence on a target frame — the `{prefix}tcp` site declared by the scene.
+convergence on the `{prefix}tcp` site declared by the scene.
 
 ProxQP (via `proxsuite`) is typically 2-5x faster than DAQP on small 6-DoF QPs
 and pays back the planning-phase wait (~100 QPs per waypoint x ~13 waypoints
 x 2 arms at scene startup). Override with `solver="daqp"` to fall back.
 
-Three orientation modes encoded as a discriminated union so the three
-combinations are mutually exclusive at the type level:
+Orientation modes are a discriminated union so the combinations are mutually
+exclusive at the type level:
 
-  * `PositionOnly()` — position-only; gripper orientation is free.
-  * `AlignGripperDown()` — keep TCP +z pointing world -z; rotation about
-    that axis is free.
-  * `FullPose(target_quat_wxyz)` — full pose tracking.
+  * `PositionOnly()` — position only; gripper orientation is free.
+  * `AlignGripperDown()` — TCP +z → world -z; in-axis rotation free.
+  * `FullPose(target_quat_wxyz)` — full pose.
 
-Compared to the old hand-rolled DLS loop, joint limits are enforced as hard
-QP constraints instead of post-step clamping — which is what used to park
-the solver at Piper's ±70° j5 limit on top-down targets.
+Joint limits are enforced as hard QP constraints, not post-step clamping —
+post-step clamping used to park the solver at Piper's ±70° j5 limit on
+top-down targets.
 """
 
 from __future__ import annotations
@@ -113,11 +112,6 @@ def _velocity_limit(
     return mink.VelocityLimit(model, limits)
 
 
-# Keep the old name working for sink_bimanual (no locked joints needed there).
-def _velocity_limit_for_all_hinges(model: mujoco.MjModel) -> mink.VelocityLimit:
-    return _velocity_limit(model, locked_joint_names=())
-
-
 def solve_ik(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -160,10 +154,10 @@ def solve_ik(
         _velocity_limit(model, locked_joint_names),
     ]
 
-    # Track "best" using the same weighting as the task cost — otherwise a
-    # PositionOnly solve would score the seed as best (its rot_err is small
-    # while the solved config's rot_err has drifted to ~pi), and the function
-    # would return the unchanged seed even though the arm reached the target.
+    # Score "best" using the same weighting as the task cost. Otherwise a
+    # PositionOnly solve scores the seed as best (its rot_err is small while
+    # the solved config's rot_err has drifted to ~pi) and the function returns
+    # the unchanged seed even though the arm did reach the target.
     def scored_err(pos: float, rot: float) -> float:
         return position_cost * pos + orientation_cost * rot
 
@@ -197,12 +191,10 @@ def solve_ik(
         )
         configuration.integrate_inplace(velocity, rate_dt)
 
-    # Commit best arm config back to the caller's data.
     for i, idx in enumerate(arm.arm_qpos_idx):
         data.qpos[idx] = best_q[i]
     mujoco.mj_kinematics(model, data)
-    # Report the position error explicitly — callers care about "did the TCP
-    # reach the target", not the scored combination.
+    # Callers want "did the TCP reach the target", not the scored combination.
     reported = (
         best_pos_err if orientation_cost == 0.0 else float(np.hypot(best_pos_err, best_rot_err))
     )

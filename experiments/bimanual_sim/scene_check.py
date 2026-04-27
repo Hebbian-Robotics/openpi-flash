@@ -62,17 +62,12 @@ class SceneCheckError(RuntimeError):
 
 
 # -----------------------------------------------------------------------------
-# Attachment-constraint descriptors (scene-agnostic, discriminated union)
+# Attachment-constraint descriptors (discriminated union)
 # -----------------------------------------------------------------------------
-# `AttachmentConstraint` is the union of `WeldAttachment` and
-# `ConnectAttachment`; scenes declare a tuple of these as the single source
-# of truth, consumed by `build_spec` (creates the equality), the scene's
-# `apply_initial_state` (resets to default), and `check_scene` (validates
-# the compiled fact matches the declared kind). Splitting into two variants
-# instead of a `kind: Literal["weld","connect"]` field puts the
-# "anchor required for connect, absent for weld" rule into the type system —
-# `WeldAttachment` simply doesn't carry an anchor, so a misuse is impossible
-# to construct.
+# Scenes declare a tuple of `AttachmentConstraint` as the single source of
+# truth, consumed by `build_spec`, `apply_initial_state`, and `check_scene`.
+# Splitting into two variants instead of a `kind` field puts the
+# "anchor required for connect, absent for weld" rule into the type system.
 
 
 @dataclass(frozen=True)
@@ -104,19 +99,13 @@ AttachmentConstraint = WeldAttachment | ConnectAttachment
 
 
 # -----------------------------------------------------------------------------
-# Camera invariants (scene-agnostic, discriminated union)
+# Camera invariants (discriminated union)
 # -----------------------------------------------------------------------------
-# Scenes pin every declared camera's *intent* — which mode it runs in, what
-# body it's attached to, and (for TARGETBODY mode) what it's pointed at — so a
-# subsequent edit that flips a camera mode or moves it to the wrong parent
-# fails at compile-time-startup rather than as "the wrist view looks weird"
-# at viser-time.
-#
-# Two variants encode the targetbody-required-for-tracking-modes rule at the
-# type level: `FixedCameraInvariant` carries no targetbody; the targeting /
-# tracking modes are `TargetingCameraInvariant` and require one. Mapping to
-# MuJoCo's `mjtCamLight` int constants happens inside `_check_camera_invariants`
-# at the boundary so scene declarations don't import mujoco.
+# Pin every declared camera's intent (mode, parent body, targetbody if any) so
+# a subsequent edit that flips mode or moves it to the wrong parent fails at
+# startup rather than showing up as "the wrist view looks weird" at viser-time.
+# `mjtCamLight` int mapping lives in `_check_camera_invariants` so scene
+# declarations don't import mujoco.
 
 TargetingCameraMode = Literal["targetbody", "targetbodycom", "track", "trackcom"]
 
@@ -182,11 +171,9 @@ def _geom_world_aabb(model: mujoco.MjModel, data: mujoco.MjData, geom_id: int) -
         r = float(model.geom_rbound[geom_id])
         half_world = np.array([r, r, r])
     else:
-        # For primitives, half-extents along local axes; for capsule/cylinder
-        # the full half-length is size[1] along local z (extended from base
-        # radius size[0]). size already carries the right per-axis half for
-        # box/ellipsoid; for sphere/cylinder/capsule we use max(size) as a
-        # cheap conservative bound in any orientation.
+        # `geom_size` carries per-axis half-extents for box/ellipsoid; capsule
+        # and cylinder pack (radius, half_length) and need the radius added to
+        # the local-z extent.
         if gtype == mujoco.mjtGeom.mjGEOM_BOX or gtype == mujoco.mjtGeom.mjGEOM_ELLIPSOID:
             local_half = size.copy()
         elif gtype == mujoco.mjtGeom.mjGEOM_SPHERE:
@@ -196,10 +183,10 @@ def _geom_world_aabb(model: mujoco.MjModel, data: mujoco.MjData, geom_id: int) -
             r = float(size[0])
             half_len = float(size[1])
             local_half = np.array([r, r, half_len + r])
-        else:  # PLANE or other — treat as a point (harmless in overlap checks)
+        else:  # PLANE or other — treat as a point (harmless for overlap)
             local_half = np.zeros(3)
-        # Project the local half-extents onto world axes via |xmat| · local_half.
-        # This gives the axis-aligned world bound of the (rotated) local box.
+        # |xmat| · local_half gives the axis-aligned world bound of the
+        # rotated local box.
         half_world = np.abs(xmat) @ local_half
 
     name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or f"g{geom_id}"
@@ -287,14 +274,11 @@ def _body_local_aabb(model: mujoco.MjModel, body_id: int) -> tuple[np.ndarray, n
 # Reach-envelope pre-filter
 # -----------------------------------------------------------------------------
 
-_PIPER_REACH_RADIUS_M = 0.75
-"""Loose reach pre-filter. A Piper's strict reach envelope is ~0.55-0.65 m to
-the gripper centre, but grippable bodies are measured to their body *centre*
-while the arm actually reaches for a handle offset from that centre — so a
-grippable with centre at 0.67 m might still be reachable via a handle at
-0.60 m. The real unreachable-target guard is `_snap_factory`'s 2 cm IK-
-residual abort; this radius just catches obviously-misplaced bodies (rack
-sitting 2 m away) before we bother with IK at all."""
+_REACH_PREFILTER_RADIUS_M = 1.5
+"""Loose reach pre-filter. Piper's envelope is ~0.55-0.65 m and UR10e's is
+~1.3 m to the gripper centre; the prefilter catches obviously-misplaced
+bodies (rack sitting 2 m+ away) before IK runs. The strict guard is
+`_snap_factory`'s 2 cm IK-residual abort."""
 
 
 def _arm_base_world_pos(
@@ -435,14 +419,14 @@ def _check_grippables_reachable(
             continue
         gpos = np.asarray(data.xpos[bid], dtype=float)
         dists = [(side, float(np.linalg.norm(gpos - bp))) for side, bp in arm_bases]
-        if all(d > _PIPER_REACH_RADIUS_M for _, d in dists):
+        if all(d > _REACH_PREFILTER_RADIUS_M for _, d in dists):
             reach_str = ", ".join(f"{s} {d:.2f} m" for s, d in dists)
             out.append(
                 SceneCheckViolation(
                     kind="unreachable",
                     detail=(
                         f"grippable {name!r} at ({gpos[0]:.3f}, {gpos[1]:.3f}, "
-                        f"{gpos[2]:.3f}) is farther than {_PIPER_REACH_RADIUS_M} m "
+                        f"{gpos[2]:.3f}) is farther than {_REACH_PREFILTER_RADIUS_M} m "
                         f"from every arm base ({reach_str})"
                     ),
                 )
@@ -474,7 +458,6 @@ def _check_camera_invariants(
                 )
             )
             continue
-        # Parent body — the body the camera is rigidly attached to.
         parent_body_id = int(model.cam_bodyid[cam_id])
         actual_parent = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, parent_body_id)
         if actual_parent != inv.parent_body:
@@ -487,9 +470,8 @@ def _check_camera_invariants(
                     ),
                 )
             )
-        # Mode + targetbody — branch on the variant. The variant itself
-        # encodes the "fixed has no target / targeting must have one" rule,
-        # so there's no need to re-validate that here.
+        # The variant itself encodes the "fixed has no target / targeting
+        # must have one" rule, so no need to re-validate that here.
         actual_mode = int(model.cam_mode[cam_id])
         if isinstance(inv, FixedCameraInvariant):
             expected_mode = _FIXED_CAMERA_MODE_MJ
@@ -555,7 +537,6 @@ def _check_attachment_constraints(
                     detail=f"attachment {c.name!r} body_b={c.body_b!r} not found",
                 )
             )
-        # Verify compiled equality type matches the declared variant.
         compiled_type = int(model.eq_type[eq_id])
         if isinstance(c, WeldAttachment):
             expected = int(mujoco.mjtEq.mjEQ_WELD)

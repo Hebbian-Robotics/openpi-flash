@@ -1,35 +1,17 @@
-"""Viser camera frustum widgets (and a place for future EGL image capture).
+"""Viser camera frustum widgets.
 
-A scene that wants cameras declares::
-
-    CAMERAS: tuple[tuple[str, CameraRole], ...] = (
-        ("top_cam", CameraRole.TOP),
-        ("left_wrist", CameraRole.WRIST),
-        ("right_wrist", CameraRole.WRIST),
-    )
-
-Each entry pairs the MuJoCo camera name with the role that picks its
-intrinsics (FOV / aspect / widget scale). Role is an explicit `StrEnum`
-rather than a substring inferred from the camera name — the earlier
-substring logic would happily match `CameraRole.TOP` against a camera
-named `topology_cam`, and the iteration order decided ties silently.
+Scenes declare cameras as `(mujoco_name, CameraRole)` pairs; role picks
+intrinsics (FOV / aspect / widget scale). `CameraRole` is a `StrEnum`
+rather than a name-substring heuristic — substring matching silently
+mishandled e.g. `topology_cam` matching `CameraRole.TOP`.
 
 The runner calls `add_frustum_widgets(...)` once at startup and
-`update_frustum_widgets(...)` each frame so the frustum tracks the
-camera's world pose (important for cameras attached to moving bodies
-like the lift carriage or wrist links).
+`update_frustum_widgets(...)` each frame so the frustum tracks cameras
+attached to moving bodies (lift carriage, wrist links).
 
-Per-frame updates take the same fast path as `viser_render.update_viser`:
-matrix→quaternion via `mujoco.mju_mat2Quat` (not `vtf.SO3.from_matrix`),
-direct `buffer.push(...)` instead of the property setter, and one
-`server.atomic()` block around the loop. Camera frustums are few (a
-handful per scene) so the absolute CPU savings are modest, but they kept
-the old hot-path shapes alive in the profile — this closes that gap.
-
-Future extension: `CameraRenderer` (sketched at the bottom, not implemented)
-will use `mujoco.Renderer` with EGL to produce actual images and push them
-as Viser image widgets. Keeping that concern here means the scene modules
-don't need to change — they just declare camera names.
+Per-frame updates use the same fast path as `viser_render.update_viser`:
+`mujoco.mju_mat2Quat` (not `vtf.SO3.from_matrix`), direct `buffer.push(...)`
+instead of the property setter, and one `server.atomic()` around the loop.
 """
 
 from __future__ import annotations
@@ -73,19 +55,16 @@ class _FrustumHandle:
 
 _MJ_TO_VISER_FLIP_QUAT = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)
 """180° rotation about x. MuJoCo cameras look down -z with +y up (OpenGL);
-Viser's `add_camera_frustum` opens the frustum along +z with -y up. Applying
-this rotation to the MuJoCo camera's world-frame quaternion (right-multiply)
-flips the -z/+y axes to +z/-y so the frustum points the way the camera looks.
-Without it, every frustum appears 180° about the camera's side axis — which
-is the symptom the user saw ("cameras facing the wrong way")."""
+viser's `add_camera_frustum` opens along +z with -y up. Right-multiplying
+the MuJoCo camera quat by this flip aligns frustum direction with view
+direction — without it, every frustum points 180° away from the lens."""
 
 
 def _camera_quat(data: mujoco.MjData, camera_id: int, out: np.ndarray) -> None:
-    """Fill `out` (shape (4,), float64) with the wxyz quaternion of the named
-    MuJoCo camera's world-frame orientation, converted to the viser frustum
-    convention. Uses `mujoco.mju_mat2Quat` + `mujoco.mju_mulQuat` (C kernels)
-    rather than `vtf.SO3.from_matrix`, which runs multiple `np.allclose` scans
-    to pick among four quaternion branches."""
+    """Fill `out` with the wxyz quaternion of the camera's world orientation,
+    in viser frustum convention. Uses C kernels rather than
+    `vtf.SO3.from_matrix` (whose `np.allclose` branch scans dominate the
+    profile when called per camera per frame)."""
     mj_quat = np.empty(4, dtype=np.float64)
     mujoco.mju_mat2Quat(mj_quat, data.cam_xmat[camera_id])
     mujoco.mju_mulQuat(out, mj_quat, _MJ_TO_VISER_FLIP_QUAT)
@@ -167,22 +146,3 @@ def update_frustum_widgets(
             name = impl.name
             buffer_push(set_pos_msg(name, pos_tuple))
             buffer_push(set_ori_msg(name, wxyz_tuple))
-
-
-# ---------------------------------------------------------------------------
-# Future: EGL image capture.
-#
-# class CameraRenderer:
-#     def __init__(self, model: mujoco.MjModel, camera_name: str,
-#                  width: int = 320, height: int = 240) -> None:
-#         self.renderer = mujoco.Renderer(model, height=height, width=width)
-#         self.camera_id = mujoco.mj_name2id(
-#             model, mujoco.mjtObj.mjOBJ_CAMERA, camera_name)
-#
-#     def render(self, data: mujoco.MjData) -> Float[np.ndarray, "h w 3"]:
-#         self.renderer.update_scene(data, camera=self.camera_id)
-#         return self.renderer.render()  # HxWx3 uint8
-#
-# The runner would build one per camera in CAMERAS, throttle to ~10 Hz, and
-# push via `server.gui.add_image(...)` or an equivalent viser widget. Adding
-# this requires no scene changes — only cameras.py + runner.py wiring.
