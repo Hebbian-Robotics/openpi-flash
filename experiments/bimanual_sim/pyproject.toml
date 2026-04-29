@@ -1,0 +1,76 @@
+[project]
+name = "sim"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "dm-control>=1.0.40",
+    "imageio[ffmpeg]>=2.37.3",
+    "jaxtyping>=0.3.9",
+    "matplotlib>=3.10.9",
+    "mink>=1.1.0",
+    "mujoco>=3.8.0",
+    "numpy>=2.4.4",
+    # 0.7.2 ships cp312/cp313 wheels; the 0.7.2.post1 tag is cp310-only, so
+    # pinning to or above the post1 bound would wedge any non-3.10 environment.
+    "proxsuite>=0.7.2,!=0.7.2.post1",
+    # `rerun-sdk` is the rerun.io visualization tool (3D + scalars +
+    # text logs + camera frames). The bare `rerun` package on PyPI is
+    # an unrelated file-change-detector library — do NOT swap them.
+    # Both expose the `rerun` import namespace; pinning rerun-sdk
+    # specifically avoids the namespace collision warning.
+    "rerun-sdk>=0.31.3",
+    "typer>=0.24.2",
+    "viser>=1.0.26",
+]
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.122.0",
+    "pytest>=8.3.0",
+    "ruff>=0.15.12", #
+    "ty>=0.0.32",
+]
+
+[tool.pytest.ini_options]
+# `tests/` is the only test root; explicit `testpaths` keeps pytest from
+# scanning scenes/ etc. for false-positive collections. `pythonpath = ["."]`
+# adds the project root to sys.path so tests can `import scene_base` etc.
+# the same way the runner does (bimanual_sim modules live at the top level,
+# not in a src/ layout).
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers --strict-config"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "ANN",
+    "PTH",
+    "RET",
+    "SIM",
+    "TID",
+    "RUF",
+]
+ignore = ["E501", "B008", "C901", "RET504", "ANN401"]
+
+[tool.ty.rules]
+# mujoco ships as C extensions without .pyi stubs, so every mujoco.* access
+# looks "unresolved" to ty. The rule would otherwise be useful for our own
+# code, but it's drowned by ~70 false positives from mujoco alone. Accept
+# the tradeoff: runtime will surface real typos in dataclass field access
+# quickly during dev.
+unresolved-attribute = "ignore"
+division-by-zero = "error"
+deprecated = "error"
+unused-ignore-comment = "error"
+possibly-unresolved-reference = "error"
