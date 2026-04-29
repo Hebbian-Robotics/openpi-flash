@@ -538,10 +538,6 @@ def main() -> None:
         st.t += dt
 
         if first_tick:
-            # Phase guard fires before weld toggles so phase-end checks reflect
-            # the previous step's leftover state, and phase-start baselines
-            # capture before the incoming step mutates anything.
-            phase_monitor.on_step_started(step, model, data)
             if step.weld_activate is not None:
                 activate_grasp_weld(
                     model,
@@ -663,6 +659,28 @@ def main() -> None:
             return False
         return all(per_arm[side].step >= len(task_plan[side]) for side in arm_sides)
 
+    def observed_scene_phase() -> TaskPhase | None:
+        """Return the scene-wide phase only when every active arm agrees.
+
+        Per-arm teleop recordings can be staggered. A phase contract is a
+        global scene assertion, so do not evaluate a phase boundary while one
+        arm is still finishing the previous phase.
+        """
+        if task_plan is None:
+            return None
+        active_phases: set[TaskPhase] = set()
+        for side in arm_sides:
+            script = task_plan[side]
+            step_index = per_arm[side].step
+            if step_index >= len(script):
+                continue
+            phase = script[step_index].phase
+            if phase is not TaskPhase.UNPHASED:
+                active_phases.add(phase)
+        if len(active_phases) != 1:
+            return None
+        return next(iter(active_phases))
+
     print(f"Viser on {args.host}:{args.port} ({len(handles)} geoms)")
     print(
         f"If remote: `ssh -L {args.port}:localhost:{args.port} user@host` "
@@ -692,6 +710,7 @@ def main() -> None:
                 gui_state.value = "teleop"
             elif control["playing"]:
                 if task_plan is not None:
+                    phase_monitor.on_phase_observed(observed_scene_phase(), model, data)
                     for side in arm_sides:
                         per_arm_gui[side].value = advance_arm(side, render_dt)
                     if all_done():

@@ -161,6 +161,7 @@ def _advance_one_arm(
     st: _ArmTimelineState,
     sim_dt: float,
     aux_name_to_id: dict[str, int],
+    cube_body_ids: list[int],
 ) -> None:
     """Headless mirror of `runner.advance_arm`."""
     if st.step >= len(script):
@@ -176,7 +177,7 @@ def _advance_one_arm(
                 data,
                 int(arm.weld_ids[step.weld_activate]),
                 arm.link6_id,
-                arm.link6_id,
+                cube_body_ids[step.weld_activate],
                 arm.tcp_site_id,
             )
         if step.weld_deactivate is not None:
@@ -269,6 +270,7 @@ def advance_timeline(
     arms: dict[ArmSide, ArmHandles],
     task_plan: dict[ArmSide, list[Step]],
     aux_name_to_id: dict[str, int],
+    cube_body_ids: list[int],
     sim_dt: float,
     until_s: Seconds,
 ) -> TimelineState:
@@ -282,6 +284,7 @@ def advance_timeline(
         task_plan,
         state,
         aux_name_to_id,
+        cube_body_ids,
         sim_dt,
         until_s,
     )
@@ -294,6 +297,7 @@ def advance_timeline_with_state(
     task_plan: dict[ArmSide, list[Step]],
     state: TimelineState,
     aux_name_to_id: dict[str, int],
+    cube_body_ids: list[int],
     sim_dt: float,
     until_s: Seconds,
 ) -> TimelineState:
@@ -301,7 +305,16 @@ def advance_timeline_with_state(
     n_steps = int(float(until_s) / sim_dt)
     for _ in range(n_steps):
         for side, arm in arms.items():
-            _advance_one_arm(model, data, arm, task_plan[side], state[side], sim_dt, aux_name_to_id)
+            _advance_one_arm(
+                model,
+                data,
+                arm,
+                task_plan[side],
+                state[side],
+                sim_dt,
+                aux_name_to_id,
+                cube_body_ids,
+            )
         mujoco.mj_step(model, data)
     return state
 
@@ -314,6 +327,7 @@ class SceneContext:
     model: mujoco.MjModel
     data: mujoco.MjData
     arms: dict[ArmSide, ArmHandles]
+    cube_body_ids: list[int]
     task_plan: dict[ArmSide, list[Step]] | None
     scene_module: ModuleType
 
@@ -349,12 +363,28 @@ def build_scene_and_advance(scene_name: SceneName | str, t: Seconds | float = 0.
         scene.apply_initial_state(model, data, arms, cube_body_ids)
     if task_plan is not None and float(t) > 0:
         sim_dt = float(model.opt.timestep)
-        advance_timeline(model, data, arms, task_plan, aux_name_to_id, sim_dt, Seconds(float(t)))
+        advance_timeline(
+            model,
+            data,
+            arms,
+            task_plan,
+            aux_name_to_id,
+            cube_body_ids,
+            sim_dt,
+            Seconds(float(t)),
+        )
     elif float(t) > 0:
         raise RuntimeError(f"scene {scene_name!r} has no make_task_plan, can't advance past t=0")
 
     mujoco.mj_forward(model, data)
-    return SceneContext(model=model, data=data, arms=arms, task_plan=task_plan, scene_module=scene)
+    return SceneContext(
+        model=model,
+        data=data,
+        arms=arms,
+        cube_body_ids=cube_body_ids,
+        task_plan=task_plan,
+        scene_module=scene,
+    )
 
 
 # Single boundary for filename-suffix → format. Downstream video code takes

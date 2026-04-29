@@ -318,6 +318,7 @@ def main(
                     ctx.task_plan,
                     state,
                     aux_name_to_id,
+                    ctx.cube_body_ids,
                     sim_dt,
                     Seconds(delta_steps * sim_dt),
                 )
