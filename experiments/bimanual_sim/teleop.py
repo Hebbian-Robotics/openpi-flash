@@ -42,7 +42,7 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import mujoco
 import numpy as np
@@ -1325,6 +1325,13 @@ def load_recording(path: Path) -> Mapping[ArmSide, list[Step]]:
     grippable_names: list[str] = list(payload.get("grippable_names") or [])
     n_cubes = len(grippable_names)
 
+    def _parse_gripper_state(value: object) -> GripperState:
+        if value == "open":
+            return "open"
+        if value == "closed":
+            return "closed"
+        raise ValueError(f"recording {path}: gripper must be 'open' or 'closed', got {value!r}")
+
     def _maybe_cube_id(value: object) -> CubeID | None:
         # JSON-loaded indices arrive as `object` from json.load. We
         # parse-not-validate at the boundary: any non-None value is
@@ -1342,7 +1349,7 @@ def load_recording(path: Path) -> Mapping[ArmSide, list[Step]]:
             Step(
                 label=str(kf["label"]),
                 arm_q=np.asarray(kf["arm_q"], dtype=float),
-                gripper=cast(GripperState, kf["gripper"]),
+                gripper=_parse_gripper_state(kf["gripper"]),
                 duration=float(kf["duration_s"]),
                 phase=TaskPhase(kf["phase"]),
                 aux_ctrl=dict(kf.get("aux_ctrl") or {}) or None,

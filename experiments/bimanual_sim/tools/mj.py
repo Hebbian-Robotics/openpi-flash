@@ -242,6 +242,7 @@ def _advance_context(
         ctx.task_plan,
         actual_timeline_state,
         _aux_name_to_id(ctx),
+        ctx.cube_body_ids,
         float(ctx.model.opt.timestep),
         Seconds(duration_s),
     )
@@ -373,6 +374,7 @@ def snapshot(
                 ctx.task_plan,
                 timeline_state,
                 aux_name_to_id,
+                ctx.cube_body_ids,
                 sim_dt,
                 Seconds(dt),
             )
@@ -1201,6 +1203,7 @@ def review(
                 ctx.task_plan,
                 timeline_state,
                 aux_name_to_id,
+                ctx.cube_body_ids,
                 sim_dt,
                 Seconds(dt),
             )
@@ -1249,6 +1252,7 @@ def review(
                 video_task_plan,
                 timeline_state,
                 aux_name_to_id,
+                ctx.cube_body_ids,
                 sim_dt,
                 Seconds(dt),
             )

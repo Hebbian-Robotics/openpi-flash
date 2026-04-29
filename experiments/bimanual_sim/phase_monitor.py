@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import mujoco
 
-from scene_base import PhaseContract, Step, TaskPhase
+from scene_base import PhaseContract, TaskPhase
 from tools.observability import (
     ContractCheckReport,
     ContractFailure,
@@ -86,22 +86,24 @@ class PhaseRuntimeMonitor:
     def current_phase(self) -> TaskPhase | None:
         return self._current_phase
 
-    def on_step_started(
+    def on_phase_observed(
         self,
-        step: Step,
+        phase: TaskPhase | None,
         model: mujoco.MjModel,
         data: mujoco.MjData,
     ) -> None:
-        """Called by the runner when a new `Step` becomes active.
+        """Called by the runner when the scene has a single active phase.
 
-        `TaskPhase.UNPHASED` steps continue whatever phase was last active —
-        contracts only assert what scenes have actually declared.
+        `None` and `TaskPhase.UNPHASED` continue whatever phase was last
+        active. The runner derives this from the full bimanual timeline so a
+        fast arm cannot advance the scene-wide contract boundary before the
+        slower arm has crossed into the same phase.
         """
         if not self.enabled:
             return
-        if step.phase is TaskPhase.UNPHASED:
+        if phase is None or phase is TaskPhase.UNPHASED:
             return
-        new_phase = step.phase
+        new_phase = phase
         if new_phase == self._current_phase:
             return
         self._check_predecessor(new_phase, data)
