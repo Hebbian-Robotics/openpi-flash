@@ -258,15 +258,19 @@ takes care of automatically:
 To compose all four into a single 1080p 2×2 grid (lighter to play than
 4K, with 1-second keyframes for jump-resilient seeking):
 
+Layout: top-left = `directorial` (CCTV pull-back), top-right =
+`forward.mp4` (chassis-mounted top), bottom-left + bottom-right = the
+two wrist cams. Labels are burned into each pane.
+
 ```bash
 ffmpeg -y \
   -i /tmp/pov/directorial.mp4 -i /tmp/pov/forward.mp4 \
   -i /tmp/pov/left_wrist.mp4 -i /tmp/pov/right_wrist.mp4 \
   -filter_complex "
-    [0:v]scale=960:540,drawtext=text='directorial':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v0];
-    [1:v]scale=960:540,drawtext=text='forward (top)':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v1];
-    [2:v]scale=960:540,drawtext=text='left wrist':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v2];
-    [3:v]scale=960:540,drawtext=text='right wrist':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v3];
+    [0:v]scale=960:540,drawtext=text='CCTV':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v0];
+    [1:v]scale=960:540,drawtext=text='Top Camera':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v1];
+    [2:v]scale=960:540,drawtext=text='Left Wrist Camera':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v2];
+    [3:v]scale=960:540,drawtext=text='Right Wrist Camera':x=15:y=15:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5:boxborderw=6[v3];
     [v0][v1]hstack[top];[v2][v3]hstack[bot];[top][bot]vstack" \
   -c:v libx264 -preset slower -crf 18 -pix_fmt yuv420p -g 30 -keyint_min 30 \
   /tmp/pov/grid.mp4
