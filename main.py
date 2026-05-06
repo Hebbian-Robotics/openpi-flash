@@ -43,6 +43,16 @@ def prepare_checkpoint(
         bool,
         typer.Option(help="Re-download upstream files and rebuild the prepared checkpoint."),
     ] = False,
+    required_asset_id: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Asset id whose norm_stats.json must exist in the prepared "
+                "checkpoint's assets/ directory. Defaults to 'trossen' (ALOHA). "
+                "Use 'droid' for pi05_droid or 'physical-intelligence/libero' for pi05_libero."
+            ),
+        ),
+    ] = "trossen",
 ) -> None:
     """Prepare a local OpenPI-compatible checkpoint from upstream sources."""
     from hosting.prepare_checkpoint import prepare_openpi_compatible_checkpoint
@@ -52,6 +62,7 @@ def prepare_checkpoint(
         openpi_assets_uri=openpi_assets_uri,
         output_dir=output_dir,
         force_download=force_download,
+        required_asset_id=required_asset_id,
     )
 
 
@@ -113,11 +124,17 @@ def serve(
 
 
 InferenceModeChoice = Literal["default", "action_only", "subtask_only"]
+EmbodimentChoice = Literal["aloha", "droid", "libero"]
 
 _MODE_OPTION_HELP = (
     "Inference mode sent in the observation. Lets benchmarks target one phase "
     "of a combined-mode server: 'action_only' skips the planner, 'subtask_only' "
     "skips the action policy. Omit for the server default."
+)
+_EMBODIMENT_OPTION_HELP = (
+    "Observation shape to send. Must match the embodiment the server's action "
+    "checkpoint was trained on (aloha for pi05_aloha, droid for pi05_droid, "
+    "libero for pi05_libero)."
 )
 
 
@@ -125,11 +142,12 @@ _MODE_OPTION_HELP = (
 def test_websocket(
     url: Annotated[str, typer.Argument(help="WebSocket URL (ws://host:port or wss://host).")],
     mode: Annotated[InferenceModeChoice | None, typer.Option(help=_MODE_OPTION_HELP)] = None,
+    embodiment: Annotated[EmbodimentChoice, typer.Option(help=_EMBODIMENT_OPTION_HELP)] = "aloha",
 ) -> None:
     """Smoke test against a WebSocket server (EC2, Docker, or Modal ASGI)."""
     from tests.test_ws import run
 
-    run(url, mode=mode)
+    run(url, mode=mode, embodiment=embodiment)
 
 
 @test_app.command(name="quic")
@@ -140,11 +158,12 @@ def test_quic(
         int, typer.Option(help="Server WebSocket/TCP port (for health check).")
     ] = 8000,
     mode: Annotated[InferenceModeChoice | None, typer.Option(help=_MODE_OPTION_HELP)] = None,
+    embodiment: Annotated[EmbodimentChoice, typer.Option(help=_EMBODIMENT_OPTION_HELP)] = "aloha",
 ) -> None:
     """Smoke test against a direct QUIC server (EC2 or Docker)."""
     from tests.test_quic import run
 
-    run(host, quic_port=quic_port, ws_port=ws_port, mode=mode)
+    run(host, quic_port=quic_port, ws_port=ws_port, mode=mode, embodiment=embodiment)
 
 
 @test_app.command(name="modal-tunnel")

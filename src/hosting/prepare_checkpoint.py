@@ -29,13 +29,15 @@ def get_default_output_dir() -> Path:
     return openpi_download.get_cache_dir() / "pi05_base_openpi"
 
 
-def _assert_prepared_checkpoint_directory_is_complete(output_dir: Path) -> None:
+def _assert_prepared_checkpoint_directory_is_complete(
+    output_dir: Path, required_asset_id: str
+) -> None:
     missing_paths = [
         str(output_dir / checkpoint_filename)
         for checkpoint_filename in _REQUIRED_CHECKPOINT_FILENAMES
         if not (output_dir / checkpoint_filename).exists()
     ]
-    required_norm_stats_path = output_dir / "assets" / DEFAULT_REQUIRED_ASSET_ID / "norm_stats.json"
+    required_norm_stats_path = output_dir / "assets" / required_asset_id / "norm_stats.json"
     if not required_norm_stats_path.exists():
         missing_paths.append(str(required_norm_stats_path))
 
@@ -53,10 +55,11 @@ def prepare_openpi_compatible_checkpoint(
     openpi_assets_uri: str = DEFAULT_OPENPI_ASSETS_URI,
     output_dir: Path | None = None,
     force_download: bool = False,
+    required_asset_id: str = DEFAULT_REQUIRED_ASSET_ID,
 ) -> Path:
     resolved_output_dir = (output_dir or get_default_output_dir()).resolve()
     if resolved_output_dir.exists() and not force_download:
-        _assert_prepared_checkpoint_directory_is_complete(resolved_output_dir)
+        _assert_prepared_checkpoint_directory_is_complete(resolved_output_dir, required_asset_id)
         print(f"Prepared checkpoint already exists at {resolved_output_dir}")
         return resolved_output_dir
 
@@ -98,7 +101,7 @@ def prepare_openpi_compatible_checkpoint(
         encoding="utf-8",
     )
 
-    _assert_prepared_checkpoint_directory_is_complete(temporary_output_dir)
+    _assert_prepared_checkpoint_directory_is_complete(temporary_output_dir, required_asset_id)
 
     if resolved_output_dir.exists():
         shutil.rmtree(resolved_output_dir)

@@ -9,10 +9,14 @@ from typing import cast
 from openpi_client import websocket_client_policy as _websocket_client_policy
 
 from hosting.benchmark import InferablePolicy, run_benchmark
-from tests.helpers import random_observation_aloha, wait_for_server
+from tests.helpers import EmbodimentChoice, random_observation, wait_for_server
 
 
-def run(url: str, mode: str | None = None) -> None:
+def run(
+    url: str,
+    mode: str | None = None,
+    embodiment: EmbodimentChoice = "aloha",
+) -> None:
     parsed_server_url = urllib.parse.urlparse(url)
     if parsed_server_url.scheme not in {"ws", "wss"} or parsed_server_url.hostname is None:
         raise ValueError("Expected a WebSocket URL like ws://host[:port] or wss://host[:port].")
@@ -35,6 +39,6 @@ def run(url: str, mode: str | None = None) -> None:
 
     result = run_benchmark(
         cast(InferablePolicy, policy),
-        lambda: random_observation_aloha(mode=mode),
+        lambda: random_observation(embodiment, mode=mode),
     )
     result.print_summary()

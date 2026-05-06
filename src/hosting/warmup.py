@@ -41,7 +41,16 @@ class DroidWarmupObservationSpec:
     prompt: str = "warmup"
 
 
-WarmupObservationSpec = AlohaWarmupObservationSpec | DroidWarmupObservationSpec
+@dataclass(frozen=True)
+class LiberoWarmupObservationSpec:
+    """Warmup input spec for LIBERO-style embodiments."""
+
+    prompt: str = "warmup"
+
+
+WarmupObservationSpec = (
+    AlohaWarmupObservationSpec | DroidWarmupObservationSpec | LiberoWarmupObservationSpec
+)
 
 
 def make_aloha_observation(prompt: str) -> dict[str, Any]:
@@ -77,6 +86,24 @@ def make_droid_observation(prompt: str) -> dict[str, Any]:
     }
 
 
+def make_libero_observation(prompt: str) -> dict[str, Any]:
+    """Create a dummy LIBERO observation matching the expected model input shape."""
+    return {
+        "observation/state": np.random.rand(8),
+        "observation/image": np.random.randint(
+            256,
+            size=(224, 224, 3),
+            dtype=np.uint8,
+        ),
+        "observation/wrist_image": np.random.randint(
+            256,
+            size=(224, 224, 3),
+            dtype=np.uint8,
+        ),
+        "prompt": prompt,
+    }
+
+
 def get_warmup_observation_spec(train_config: Any) -> WarmupObservationSpec:
     """Derive the correct warmup input spec from the parsed OpenPI train config."""
     data_config = getattr(train_config, "data", None)
@@ -86,6 +113,8 @@ def get_warmup_observation_spec(train_config: Any) -> WarmupObservationSpec:
 
     if data_config_type_name == "LeRobotAlohaDataConfig":
         return AlohaWarmupObservationSpec()
+    if data_config_type_name == "LeRobotLiberoDataConfig":
+        return LiberoWarmupObservationSpec()
     if data_config_type_name == "SimpleDataConfig" and asset_id == "droid":
         return DroidWarmupObservationSpec()
 
@@ -93,6 +122,8 @@ def get_warmup_observation_spec(train_config: Any) -> WarmupObservationSpec:
         return AlohaWarmupObservationSpec()
     if asset_id == "droid":
         return DroidWarmupObservationSpec()
+    if asset_id == "physical-intelligence/libero":
+        return LiberoWarmupObservationSpec()
 
     raise ValueError(
         "No warmup observation generator is registered for "
@@ -109,6 +140,8 @@ def make_warmup_observation(train_config: Any) -> dict[str, Any]:
             return make_aloha_observation(prompt=prompt)
         case DroidWarmupObservationSpec(prompt=prompt):
             return make_droid_observation(prompt=prompt)
+        case LiberoWarmupObservationSpec(prompt=prompt):
+            return make_libero_observation(prompt=prompt)
 
 
 # Image specs the server advertises in metadata so the client transport
@@ -130,6 +163,18 @@ _DROID_IMAGE_SPECS: list[ImageSpec] = [
         dtype="uint8",
     ),
 ]
+_LIBERO_IMAGE_SPECS: list[ImageSpec] = [
+    ImageSpec(
+        path=["observation/image"],
+        target_shape=[224, 224, 3],
+        dtype="uint8",
+    ),
+    ImageSpec(
+        path=["observation/wrist_image"],
+        target_shape=[224, 224, 3],
+        dtype="uint8",
+    ),
+]
 
 
 def make_image_specs(train_config: Any) -> list[ImageSpec]:
@@ -143,6 +188,8 @@ def make_image_specs(train_config: Any) -> list[ImageSpec]:
             return _ALOHA_IMAGE_SPECS
         case DroidWarmupObservationSpec():
             return _DROID_IMAGE_SPECS
+        case LiberoWarmupObservationSpec():
+            return _LIBERO_IMAGE_SPECS
 
 
 def get_action_horizon(train_config: Any) -> int | None:
