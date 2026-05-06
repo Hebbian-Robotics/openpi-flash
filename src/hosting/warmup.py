@@ -118,13 +118,6 @@ def get_warmup_observation_spec(train_config: Any) -> WarmupObservationSpec:
     if data_config_type_name == "SimpleDataConfig" and asset_id == "droid":
         return DroidWarmupObservationSpec()
 
-    if asset_id == "trossen":
-        return AlohaWarmupObservationSpec()
-    if asset_id == "droid":
-        return DroidWarmupObservationSpec()
-    if asset_id == "physical-intelligence/libero":
-        return LiberoWarmupObservationSpec()
-
     raise ValueError(
         "No warmup observation generator is registered for "
         f"config={config_name!r} data_config_type={data_config_type_name!r} asset_id={asset_id!r}."

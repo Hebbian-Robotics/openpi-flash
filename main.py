@@ -16,6 +16,8 @@ from typing import Annotated, Literal
 
 import typer
 
+from tests.helpers import EmbodimentChoice
+
 app = typer.Typer(
     name="openpi-flash",
     help="Real-time inference engine for openpi. Serves policy models over QUIC and WebSocket.",
@@ -124,7 +126,6 @@ def serve(
 
 
 InferenceModeChoice = Literal["default", "action_only", "subtask_only"]
-EmbodimentChoice = Literal["aloha", "droid", "libero"]
 
 _MODE_OPTION_HELP = (
     "Inference mode sent in the observation. Lets benchmarks target one phase "

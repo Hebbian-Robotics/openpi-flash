@@ -29,31 +29,18 @@ def random_observation_aloha(mode: str | None = None) -> dict:
     return observation
 
 
-def random_observation_droid(mode: str | None = None) -> dict:
-    """Generate a random DROID observation for smoke testing."""
-    observation = make_droid_observation(prompt="do something")
-    if mode is not None:
-        observation["mode"] = mode
-    return observation
-
-
-def random_observation_libero(mode: str | None = None) -> dict:
-    """Generate a random LIBERO observation for smoke testing."""
-    observation = make_libero_observation(prompt="do something")
-    if mode is not None:
-        observation["mode"] = mode
-    return observation
-
-
 def random_observation(embodiment: EmbodimentChoice, mode: str | None = None) -> dict:
-    """Dispatch by embodiment to the matching observation factory."""
+    """Generate a random observation for smoke testing the given embodiment."""
     match embodiment:
         case "aloha":
-            return random_observation_aloha(mode=mode)
+            observation = make_aloha_observation(prompt="do something")
         case "droid":
-            return random_observation_droid(mode=mode)
+            observation = make_droid_observation(prompt="do something")
         case "libero":
-            return random_observation_libero(mode=mode)
+            observation = make_libero_observation(prompt="do something")
+    if mode is not None:
+        observation["mode"] = mode
+    return observation
 
 
 def wait_for_server(
