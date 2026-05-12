@@ -1,0 +1,51 @@
+[project]
+name = "openpi-flash-client"
+version = "0.1.0"
+description = "Client policy adapter for openpi-flash transport servers."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "openpi-client",
+    "openpi-flash-transport",
+]
+
+[tool.uv]
+# Supply-chain hardening: refuse PyPI releases younger than 7 days.
+# See: https://docs.astral.sh/uv/concepts/resolution/#exclude-newer
+exclude-newer = "7 days"
+
+[tool.uv.sources]
+openpi-client = { path = "../../../openpi/packages/openpi-client", editable = true }
+openpi-flash-transport = { path = "../openpi-flash-transport", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openpi_flash_client"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "ANN",
+    "PTH",
+    "RET",
+    "SIM",
+    "TID",
+    "RUF",
+]
+ignore = ["E501", "B008", "C901", "RET504", "ANN401"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

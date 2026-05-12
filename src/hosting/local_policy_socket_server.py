@@ -16,10 +16,9 @@ from typing import Any
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
-
-from hosting.flash_transport_binary import BINARY_NAME
-from hosting.local_frame import pack_local_frame, unpack_local_frame
-from hosting.local_transport_protocol import (
+from openpi_flash_transport.flash_transport_binary import BINARY_NAME
+from openpi_flash_transport.local_frame import pack_local_frame, unpack_local_frame
+from openpi_flash_transport.local_transport_protocol import (
     TransportRequestType,
     TransportResponseType,
     recv_framed_message,
