@@ -1,4 +1,4 @@
-"""Compatibility exports for the split openpi-flash client package."""
+"""Client policy adapters for openpi-flash."""
 
 from openpi_flash_client.flash_transport_policy import FlashTransportPolicy
 

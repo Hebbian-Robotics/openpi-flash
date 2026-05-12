@@ -230,6 +230,7 @@ resource "aws_instance" "inference" {
       checkpoint_prep_model_id          = var.checkpoint_prep_model_id
       checkpoint_prep_openpi_assets_uri = var.checkpoint_prep_openpi_assets_uri
       checkpoint_prep_output_dir        = var.checkpoint_prep_output_dir
+      checkpoint_prep_required_asset_id = var.checkpoint_prep_required_asset_id
       container_name                    = var.container_name
       ecr_region                        = var.ecr_region
       ecr_registry_host                 = local.ecr_registry_host

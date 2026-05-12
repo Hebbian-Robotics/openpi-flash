@@ -22,10 +22,14 @@ dependencies = [
     "typer>=0.24.1",
     "google-genai>=1.55.0",
     "openai>=1.50.0",
+    "openpi-flash-transport",
     "tenacity>=9.1.4",
 ]
 
 [tool.uv]
+# Supply-chain hardening: refuse PyPI releases younger than 7 days.
+# See: https://docs.astral.sh/uv/concepts/resolution/#exclude-newer
+exclude-newer = "7 days"
 override-dependencies = [
     "jax[cuda12]==0.5.3; sys_platform == 'linux'",
     "jax==0.5.3; sys_platform != 'linux'",
@@ -34,6 +38,8 @@ override-dependencies = [
 [tool.uv.sources]
 openpi = { path = "../openpi", editable = true }
 openpi-client = { path = "../openpi/packages/openpi-client", editable = true }
+openpi-flash-client = { path = "packages/openpi-flash-client", editable = true }
+openpi-flash-transport = { path = "packages/openpi-flash-transport", editable = true }
 quic-portal = { git = "https://github.com/Hebbian-Robotics/quic-portal.git" }
 
 [build-system]
@@ -42,6 +48,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "openpi-flash-client",
     "ruff>=0.15.11", #
     "ty>=0.0.32",
     "pytest>=9.0.3",

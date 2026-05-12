@@ -38,6 +38,7 @@ module "regional_inference_instance" {
   checkpoint_prep_model_id          = var.checkpoint_prep_model_id
   checkpoint_prep_openpi_assets_uri = var.checkpoint_prep_openpi_assets_uri
   checkpoint_prep_output_dir        = var.checkpoint_prep_output_dir
+  checkpoint_prep_required_asset_id = var.checkpoint_prep_required_asset_id
   container_name                    = var.container_name
   deployment_name                   = var.deployment_name
   docker_image_tag                  = var.docker_image_tag

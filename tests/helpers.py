@@ -1,14 +1,20 @@
 """Shared utilities for smoke test scripts."""
 
 import time
-from typing import Final
+from typing import Final, Literal
 
 import httpx
 
-from hosting.warmup import make_aloha_observation
+from hosting.warmup import (
+    make_aloha_observation,
+    make_droid_observation,
+    make_libero_observation,
+)
 
 SERVER_READINESS_TIMEOUT_SECONDS: Final[float] = 300.0
 SERVER_READINESS_POLL_INTERVAL_SECONDS: Final[float] = 5.0
+
+EmbodimentChoice = Literal["aloha", "droid", "libero"]
 
 
 def random_observation_aloha(mode: str | None = None) -> dict:
@@ -18,6 +24,20 @@ def random_observation_aloha(mode: str | None = None) -> dict:
     ``obs["mode"]`` so combined-mode servers can skip the planner phase.
     """
     observation = make_aloha_observation(prompt="do something")
+    if mode is not None:
+        observation["mode"] = mode
+    return observation
+
+
+def random_observation(embodiment: EmbodimentChoice, mode: str | None = None) -> dict:
+    """Generate a random observation for smoke testing the given embodiment."""
+    match embodiment:
+        case "aloha":
+            observation = make_aloha_observation(prompt="do something")
+        case "droid":
+            observation = make_droid_observation(prompt="do something")
+        case "libero":
+            observation = make_libero_observation(prompt="do something")
     if mode is not None:
         observation["mode"] = mode
     return observation

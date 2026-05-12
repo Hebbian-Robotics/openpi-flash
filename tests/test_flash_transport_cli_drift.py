@@ -3,7 +3,7 @@ argument structs.
 
 Spawns the ``openpi-flash-transport`` binary with ``<subcommand> --help``,
 parses the ``--flag-name`` tokens out of the help text, and asserts the
-Python dataclasses in ``hosting.flash_transport_binary`` have matching
+Python dataclasses in ``openpi_flash_transport.flash_transport_binary`` have matching
 field names.
 
 Skipped when the binary isn't built (e.g. fresh checkout without cargo).
@@ -18,8 +18,7 @@ from dataclasses import fields
 from typing import Any
 
 import pytest
-
-from hosting.flash_transport_binary import (
+from openpi_flash_transport.flash_transport_binary import (
     ClientArgs,
     ServerArgs,
     _iter_binary_candidates,

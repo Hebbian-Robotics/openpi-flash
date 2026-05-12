@@ -178,6 +178,12 @@ variable "checkpoint_prep_output_dir" {
   default     = "/cache/models/pi05_base_openpi"
 }
 
+variable "checkpoint_prep_required_asset_id" {
+  description = "Asset id whose norm_stats.json the Docker checkpoint preparation step must produce. Use 'trossen' for ALOHA, 'droid' for pi05_droid, 'physical-intelligence/libero' for pi05_libero."
+  type        = string
+  default     = "trossen"
+}
+
 # -- Planner checkpoint prep (planner slot) -----------------------------------
 #
 # Optional one-shot step that downloads + extracts a JAX subtask planner tar

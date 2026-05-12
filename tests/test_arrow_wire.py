@@ -19,8 +19,7 @@ from typing import Any
 
 import numpy as np
 import pytest
-
-from hosting.local_frame import pack_local_frame, unpack_local_frame
+from openpi_flash_transport.local_frame import pack_local_frame, unpack_local_frame
 
 
 def _hosting_repo_root() -> pathlib.Path:

@@ -183,6 +183,12 @@ variable "checkpoint_prep_output_dir" {
   default     = "/cache/models/pi05_base_openpi"
 }
 
+variable "checkpoint_prep_required_asset_id" {
+  description = "Asset id whose norm_stats.json the Docker checkpoint preparation step must produce. Use 'trossen' for ALOHA, 'droid' for pi05_droid, 'physical-intelligence/libero' for pi05_libero."
+  type        = string
+  default     = "trossen"
+}
+
 variable "openpi_pytorch_compile_mode" {
   description = "Value for OPENPI_PYTORCH_COMPILE_MODE inside the inference container"
   type        = string

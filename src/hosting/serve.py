@@ -42,6 +42,12 @@ from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 from openpi.shared import download as _download
 from openpi.training import config as _config
 from openpi_client import base_policy as _base_policy
+from openpi_flash_transport.flash_transport_binary import (
+    BINARY_NAME,
+    ENV_OVERRIDE,
+    ServerArgs,
+    resolve_binary_path,
+)
 
 from hosting.admin_server import RuntimeConfig, start_admin_server
 from hosting.compile_mode import get_serving_pytorch_compile_mode
@@ -51,12 +57,6 @@ from hosting.config import (
     ServiceConfig,
     SlotTransportConfig,
     load_config,
-)
-from hosting.flash_transport_binary import (
-    BINARY_NAME,
-    ENV_OVERRIDE,
-    ServerArgs,
-    resolve_binary_path,
 )
 from hosting.local_policy_socket_server import LocalPolicySocketServer
 from hosting.warmup import get_action_horizon, make_image_specs, make_warmup_observation

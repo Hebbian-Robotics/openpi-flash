@@ -3,9 +3,10 @@
 Connects directly to a QUIC server and runs benchmark inferences.
 """
 
+from openpi_flash_client import FlashTransportPolicy
+
 from hosting.benchmark import run_benchmark
-from hosting.flash_transport_policy import FlashTransportPolicy
-from tests.helpers import random_observation_aloha, wait_for_server
+from tests.helpers import EmbodimentChoice, random_observation, wait_for_server
 
 DEFAULT_QUIC_PORT = 5555
 DEFAULT_WS_PORT = 8000
@@ -16,6 +17,7 @@ def run(
     quic_port: int = DEFAULT_QUIC_PORT,
     ws_port: int = DEFAULT_WS_PORT,
     mode: str | None = None,
+    embodiment: EmbodimentChoice = "aloha",
 ) -> None:
     health_url = f"http://{host}:{ws_port}/healthz"
     wait_for_server(health_url)
@@ -24,7 +26,7 @@ def run(
     policy = FlashTransportPolicy(host=host, port=quic_port)
     print(f"Server metadata: {policy.get_server_metadata()}")
 
-    result = run_benchmark(policy, lambda: random_observation_aloha(mode=mode))
+    result = run_benchmark(policy, lambda: random_observation(embodiment, mode=mode))
     result.print_summary()
 
     policy.close()

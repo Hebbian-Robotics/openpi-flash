@@ -71,7 +71,8 @@ write_files:
         python main.py prepare-checkpoint \
         --model-id ${checkpoint_prep_model_id} \
         --openpi-assets-uri ${checkpoint_prep_openpi_assets_uri} \
-        --output-dir ${checkpoint_prep_output_dir}
+        --output-dir ${checkpoint_prep_output_dir} \
+        --required-asset-id ${checkpoint_prep_required_asset_id}
 %{ endif ~}
 %{ if prepare_planner_checkpoint ~}
 
