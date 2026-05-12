@@ -53,6 +53,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=openpi/src,target=/build/openpi/src \
     --mount=type=bind,source=openpi/packages/openpi-client/pyproject.toml,target=/build/openpi/packages/openpi-client/pyproject.toml \
     --mount=type=bind,source=openpi/packages/openpi-client/src,target=/build/openpi/packages/openpi-client/src \
+    --mount=type=bind,source=hosting/packages/openpi-flash-transport/pyproject.toml,target=/build/hosting/packages/openpi-flash-transport/pyproject.toml \
+    --mount=type=bind,source=hosting/packages/openpi-flash-transport/src,target=/build/hosting/packages/openpi-flash-transport/src \
+    --mount=type=bind,source=hosting/packages/openpi-flash-client/pyproject.toml,target=/build/hosting/packages/openpi-flash-client/pyproject.toml \
+    --mount=type=bind,source=hosting/packages/openpi-flash-client/src,target=/build/hosting/packages/openpi-flash-client/src \
     GIT_LFS_SKIP_SMUDGE=1 uv sync --project /build/hosting --frozen --no-install-project --no-dev
 
 # Copy transformers_replace files (required for PyTorch models).
@@ -63,9 +67,11 @@ RUN /.venv/bin/python -c "import transformers; print(transformers.__file__)" | x
 # Copy application code.
 COPY openpi/src /app/openpi-src
 COPY openpi/packages/openpi-client/src /app/openpi-client-src
+COPY hosting/packages/openpi-flash-transport/src /app/openpi-flash-transport-src
+COPY hosting/packages/openpi-flash-client/src /app/openpi-flash-client-src
 COPY hosting/src /app/hosting-src
 COPY hosting/main.py /app/main.py
-ENV PYTHONPATH="/app/openpi-src:/app/openpi-client-src:/app/hosting-src"
+ENV PYTHONPATH="/app/openpi-src:/app/openpi-client-src:/app/openpi-flash-transport-src:/app/openpi-flash-client-src:/app/hosting-src"
 
 # PyTorch inductor cache — persists within container lifetime (use a volume
 # mount at /cache for persistence across restarts).
