@@ -14,8 +14,8 @@ Both robots are served by a single client: `galaxea_client.py --robot r1-pro` or
 ## Prerequisites
 
 - A Galaxea R1 robot with ROS 2 Humble workspace set up
-  - [R1 Pro Software Guide](https://docs.galaxea-dynamics.com/Guide/R1Pro/software_introduction/R1Pro_Software_Guide_ROS2/)
-  - [R1 Lite Software Guide](https://docs.galaxea-dynamics.com/Guide/R1Lite/software_introduction/ros2/R1Lite_Software_Introduction_ros2/)
+  - [R1 Pro SDK Setup Guide](https://docs.galaxea-dynamics.com/R1Pro/docs/2026/development/r1pro_get_sdk)
+  - [R1 Lite SDK Setup Guide](https://docs.galaxea-dynamics.com/R1Lite/docs/2026/development/r1lite_get_sdk)
 - An OpenPI inference server running (see [`docs/aws-manual-setup.md`](../../docs/aws-manual-setup.md) or use Modal)
 - Network connectivity between the robot and the server (UDP port 5555)
 
