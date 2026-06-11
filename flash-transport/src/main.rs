@@ -1029,6 +1029,11 @@ fn is_expected_peer_disconnect_error(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Upper bound on a single framed message, far above any legitimate
+/// observation/action payload. Guards against a hostile or corrupted length
+/// prefix triggering a multi-gigabyte allocation.
+const MAX_FRAMED_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
+
 async fn read_length_prefixed_message<StreamType>(
     stream: &mut StreamType,
 ) -> Result<Option<Vec<u8>>>
@@ -1043,6 +1048,11 @@ where
     }
 
     let payload_length = u32::from_be_bytes(raw_length_prefix) as usize;
+    if payload_length > MAX_FRAMED_MESSAGE_BYTES {
+        bail!(
+            "Framed message length {payload_length} exceeds maximum {MAX_FRAMED_MESSAGE_BYTES} bytes"
+        );
+    }
     let mut payload = vec![0_u8; payload_length];
     if payload_length > 0 {
         stream

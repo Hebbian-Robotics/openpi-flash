@@ -21,7 +21,6 @@ build/
 dist/
 *.egg-info/
 target/
-Cargo.lock
 *.log
 *.out
 *.err
