@@ -9,19 +9,19 @@ dependencies = [
     "openpi",
     "openpi-client",
     "huggingface-hub>=0.36.2,<1.0",
-    "pydantic>=2.13.3",
-    "pydantic-settings>=2.14.0",
-    "fastapi>=0.136.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.1",
+    "fastapi>=0.136.3",
     "httpx>=0.28.1",
-    "modal>=1.4.2",
-    "starlette>=1.0.0",
-    "uvicorn>=0.45.0",
-    "gsutil>=5.36",
+    "modal>=1.4.3",
+    "starlette>=1.2.1",
+    "uvicorn>=0.49.0",
+    "gsutil>=5.37",
     "quic-portal>=0.1.13",
     "python-dotenv>=1.2.2",
-    "typer>=0.24.1",
+    "typer>=0.26.7",
     "google-genai>=1.55.0",
-    "openai>=1.50.0",
+    "openai>=2.41.0",
     "openpi-flash-transport",
     "tenacity>=9.1.4",
 ]
@@ -49,8 +49,8 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "openpi-flash-client",
-    "ruff>=0.15.11", #
-    "ty>=0.0.32",
+    "ruff>=0.15.15",       #
+    "ty>=0.0.43",
     "pytest>=9.0.3",
 ]
 

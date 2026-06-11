@@ -10,15 +10,25 @@ from hosting.warmup import (
 )
 
 
-def _make_train_config(asset_id: str, config_name: str = "test-config") -> SimpleNamespace:
-    return SimpleNamespace(
-        name=config_name,
-        data=SimpleNamespace(assets=SimpleNamespace(asset_id=asset_id)),
-    )
+def _make_train_config(
+    asset_id: str,
+    config_name: str = "test-config",
+    data_config_type_name: str = "SimpleDataConfig",
+) -> SimpleNamespace:
+    data_config = type(
+        data_config_type_name,
+        (),
+        {"assets": SimpleNamespace(asset_id=asset_id)},
+    )()
+    return SimpleNamespace(name=config_name, data=data_config)
 
 
 def test_make_warmup_observation_uses_aloha_shape_for_trossen_configs() -> None:
-    train_config = _make_train_config("trossen", config_name="pi05_aloha")
+    train_config = _make_train_config(
+        "trossen",
+        config_name="pi05_aloha",
+        data_config_type_name="LeRobotAlohaDataConfig",
+    )
 
     warmup_observation_spec = get_warmup_observation_spec(train_config)
     warmup_observation = make_warmup_observation(train_config)
