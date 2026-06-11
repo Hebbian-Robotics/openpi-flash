@@ -36,12 +36,13 @@ _DEFAULT_QUIC_PORT = 5555
 _DEFAULT_LOCAL_CLIENT_PORT = 5556
 
 
-def _hosting_repo_root() -> pathlib.Path:
+def _hosting_repo_root() -> pathlib.Path | None:
+    """Locate the repo checkout root, or ``None`` when installed as a wheel."""
     module_path = pathlib.Path(__file__).resolve()
     for parent_path in module_path.parents:
         if (parent_path / "flash-transport").is_dir():
             return parent_path
-    return module_path.parents[4]
+    return None
 
 
 def _iter_binary_candidates() -> list[pathlib.Path]:
@@ -50,8 +51,9 @@ def _iter_binary_candidates() -> list[pathlib.Path]:
         candidates.append(pathlib.Path(configured))
     candidates.append(DEFAULT_BINARY_PATH)
     repo_root = _hosting_repo_root()
-    candidates.append(repo_root / "flash-transport" / "target" / "debug" / BINARY_NAME)
-    candidates.append(repo_root / "flash-transport" / "target" / "release" / BINARY_NAME)
+    if repo_root is not None:
+        candidates.append(repo_root / "flash-transport" / "target" / "debug" / BINARY_NAME)
+        candidates.append(repo_root / "flash-transport" / "target" / "release" / BINARY_NAME)
     return candidates
 
 

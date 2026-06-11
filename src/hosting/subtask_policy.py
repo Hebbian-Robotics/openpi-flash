@@ -15,22 +15,26 @@ field. Clients tell them apart by which port they connect to.
 
 from __future__ import annotations
 
-import logging
 import time
-from typing import Literal
+import traceback
+from typing import Literal, TypedDict
 
 import numpy as np
 from openpi_client import base_policy as _base_policy
 
+from hosting.config import DEFAULT_ACTION_PROMPT_TEMPLATE
 from hosting.subtask_generator import SubtaskGenerator
-
-logger = logging.getLogger(__name__)
 
 # Finite set of inference modes sent by clients in the observation dict.
 # Parsed from raw string at the infer() boundary.
 InferenceMode = Literal["default", "subtask_only", "action_only"]
 
-DEFAULT_ACTION_PROMPT_TEMPLATE = "{task}. Subtask: {subtask}"
+
+class SubtaskPayload(TypedDict):
+    """The ``subtask`` block attached to responses on both planner-backed endpoints."""
+
+    text: str
+    ms: float
 
 
 def _parse_inference_mode(raw: str) -> InferenceMode:
@@ -43,8 +47,35 @@ def _parse_inference_mode(raw: str) -> InferenceMode:
     if raw == "action_only":
         return "action_only"
     if raw and raw != "default":
-        logger.warning("Unknown inference mode '%s', falling back to default", raw)
+        print(f"[subtask] Unknown inference mode '{raw}', falling back to default", flush=True)
     return "default"
+
+
+def _generate_subtask_payload(
+    subtask_generator: SubtaskGenerator,
+    task_prompt: str,
+    obs: dict,
+    log_context: str,
+) -> SubtaskPayload:
+    """Run subtask generation with timing, shared by both endpoint wrappers.
+
+    Owning the try/timing/response shape in one place keeps the failure
+    semantics identical on the action and planner endpoints: empty text on
+    failure, ``ms`` always the elapsed wall time (including failed attempts).
+    """
+    subtask_text = ""
+    subtask_start = time.monotonic()
+    try:
+        client_images = _extract_images(obs)
+        subtask_text = subtask_generator.generate(task_prompt, client_images)
+    except Exception:
+        print(
+            f"[{log_context}] Subtask generation failed, returning empty subtask:\n"
+            f"{traceback.format_exc()}",
+            flush=True,
+        )
+    subtask_generation_time_ms = (time.monotonic() - subtask_start) * 1000
+    return SubtaskPayload(text=subtask_text, ms=subtask_generation_time_ms)
 
 
 class SubtaskAugmentedPolicy(_base_policy.BasePolicy):
@@ -78,38 +109,24 @@ class SubtaskAugmentedPolicy(_base_policy.BasePolicy):
             return self._inner_policy.infer(obs)
 
         # Generate subtask (for both default and subtask_only modes)
-        subtask_text = ""
-        subtask_generation_time_ms = 0.0
-        try:
-            subtask_start = time.monotonic()
-            client_images = _extract_images(obs)
-            subtask_text = self._subtask_generator.generate(original_prompt, client_images)
-            subtask_generation_time_ms = (time.monotonic() - subtask_start) * 1000
-        except Exception:
-            logger.exception("[subtask] Generation failed, falling back to original prompt")
+        subtask_payload = _generate_subtask_payload(
+            self._subtask_generator, original_prompt, obs, log_context="subtask"
+        )
 
         if mode == "subtask_only":
-            return {
-                "subtask": {
-                    "text": subtask_text,
-                    "ms": subtask_generation_time_ms,
-                },
-            }
+            return {"subtask": subtask_payload}
 
-        # Default mode: augment prompt and run action generation
-        if subtask_text:
+        # Default mode: augment prompt and run action generation. On
+        # generation failure the subtask text is empty and the original
+        # prompt passes through unchanged (graceful degradation).
+        if subtask_payload["text"]:
             augmented_prompt = self._prompt_template.format(
-                task=original_prompt, subtask=subtask_text
+                task=original_prompt, subtask=subtask_payload["text"]
             )
             obs = {**obs, "prompt": augmented_prompt}
 
         result = self._inner_policy.infer(obs)
-
-        result["subtask"] = {
-            "text": subtask_text,
-            "ms": subtask_generation_time_ms,
-        }
-
+        result["subtask"] = subtask_payload
         return result
 
     def reset(self) -> None:
@@ -130,20 +147,10 @@ class PlannerPolicy(_base_policy.BasePolicy):
 
     def infer(self, obs: dict) -> dict:
         task_prompt = obs.get("prompt", "")
-        subtask_text = ""
-        subtask_start = time.monotonic()
-        try:
-            client_images = _extract_images(obs)
-            subtask_text = self._subtask_generator.generate(task_prompt, client_images)
-        except Exception:
-            logger.exception("[planner] Generation failed")
-        subtask_generation_time_ms = (time.monotonic() - subtask_start) * 1000
-        return {
-            "subtask": {
-                "text": subtask_text,
-                "ms": subtask_generation_time_ms,
-            },
-        }
+        subtask_payload = _generate_subtask_payload(
+            self._subtask_generator, task_prompt, obs, log_context="planner"
+        )
+        return {"subtask": subtask_payload}
 
     def reset(self) -> None:
         return

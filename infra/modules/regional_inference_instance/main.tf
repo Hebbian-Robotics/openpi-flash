@@ -61,7 +61,7 @@ locals {
     },
   )
 
-  # Derived mode flags — mirror the Python server's _resolve_mode().
+  # Derived mode flags — mirror the Python server's _resolve_slots().
   action_enabled  = var.action != null
   planner_enabled = var.planner != null
 

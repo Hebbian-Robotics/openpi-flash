@@ -49,7 +49,7 @@ from openpi_flash_transport.flash_transport_binary import (
     resolve_binary_path,
 )
 
-from hosting.admin_server import RuntimeConfig, start_admin_server
+from hosting.admin_server import DEFAULT_ADMIN_PORT, RuntimeConfig, start_admin_server
 from hosting.compile_mode import get_serving_pytorch_compile_mode
 from hosting.config import (
     ActionConfig,
@@ -65,6 +65,33 @@ from hosting.warmup import get_action_horizon, make_image_specs, make_warmup_obs
 # A Literal (not a bare ``str``) lets the type checker catch typos and keeps
 # the three-way switch exhaustive.
 ServerMode = Literal["action_only", "planner_only", "combined"]
+
+
+@dataclass(frozen=True)
+class ActionOnlySlots:
+    """Only the action slot is configured."""
+
+    action: ActionConfig
+
+
+@dataclass(frozen=True)
+class PlannerOnlySlots:
+    """Only the planner slot is configured."""
+
+    planner: PlannerConfig
+
+
+@dataclass(frozen=True)
+class CombinedSlots:
+    """Both slots are configured; the planner augments the action endpoint."""
+
+    action: ActionConfig
+    planner: PlannerConfig
+
+
+# Typed view of which slots are configured. Carrying the configs inside the
+# variants lets ``main()`` match exhaustively without re-checking Optionals.
+ResolvedSlots = ActionOnlySlots | PlannerOnlySlots | CombinedSlots
 
 # The two slot names are finite; typing them lets ``EndpointSpec.name`` be
 # meaningful at the call site rather than an arbitrary string.
@@ -299,88 +326,118 @@ def _start_endpoint_transports(spec: EndpointSpec) -> None:
     ).start()
 
 
-def _resolve_mode(service_config: ServiceConfig) -> ServerMode:
-    """Derive the server mode from which slots are set.
+def _resolve_slots(service_config: ServiceConfig) -> ResolvedSlots:
+    """Derive the typed slot assembly from which slots are set.
 
     ``ServiceConfig``'s model validator already guarantees at least one of
     ``action`` / ``planner`` is present, so we only need to distinguish three
     cases here.
     """
-    action_on = service_config.action is not None
-    planner_on = service_config.planner is not None
-    if action_on and planner_on:
-        return "combined"
-    if action_on:
-        return "action_only"
-    return "planner_only"
+    if service_config.action is not None and service_config.planner is not None:
+        return CombinedSlots(action=service_config.action, planner=service_config.planner)
+    if service_config.action is not None:
+        return ActionOnlySlots(action=service_config.action)
+    if service_config.planner is not None:
+        return PlannerOnlySlots(planner=service_config.planner)
+    raise ValueError("ServiceConfig requires at least one of 'action' or 'planner'")
+
+
+def _mode_name(slots: ResolvedSlots) -> ServerMode:
+    match slots:
+        case ActionOnlySlots():
+            return "action_only"
+        case PlannerOnlySlots():
+            return "planner_only"
+        case CombinedSlots():
+            return "combined"
+
+
+def _make_action_endpoint_spec(
+    policy: _base_policy.BasePolicy,
+    train_config: _config.TrainConfig,
+    service_config: ServiceConfig,
+) -> EndpointSpec:
+    return EndpointSpec(
+        name="action",
+        policy=policy,
+        transport=service_config.action_transport,
+        metadata=_build_action_metadata(train_config),
+    )
+
+
+def _make_planner_endpoint_spec(
+    planner_generator: SubtaskGenerator,
+    action_train_config: _config.TrainConfig | None,
+    service_config: ServiceConfig,
+) -> EndpointSpec:
+    from hosting.subtask_policy import PlannerPolicy
+
+    return EndpointSpec(
+        name="planner",
+        policy=PlannerPolicy(planner_generator),
+        transport=service_config.planner_transport,
+        metadata=_build_planner_metadata(action_train_config),
+    )
 
 
 def main() -> None:
     _log_service_milestone("Loading service configuration")
     service_config = load_config()
-    mode = _resolve_mode(service_config)
+    slots = _resolve_slots(service_config)
+    mode = _mode_name(slots)
     _log_service_milestone(f"Service configuration loaded (mode={mode})")
 
-    # Load planner first so the combined-mode action wrapper can reference
-    # the same SubtaskGenerator instance the planner endpoint serves.
-    planner_generator: SubtaskGenerator | None = None
     runtime_config: RuntimeConfig | None = None
-    if service_config.planner is not None:
-        runtime_config = RuntimeConfig(
-            generation_prompt_format=service_config.planner.generation_prompt_format
-        )
-        planner_generator = _load_planner_slot(service_config.planner, runtime_config)
-
-    # Load action policy (PyTorch or JAX, auto-detected).
-    action_policy: _base_policy.BasePolicy | None = None
-    action_train_config: _config.TrainConfig | None = None
-    if service_config.action is not None:
-        action_policy, action_train_config = load_action_policy(service_config.action)
-
-    # Assemble one EndpointSpec per active slot.
     endpoint_specs: list[EndpointSpec] = []
 
-    if action_policy is not None and action_train_config is not None:
-        if planner_generator is not None:
-            assert service_config.planner is not None
+    match slots:
+        case ActionOnlySlots(action=action_config):
+            action_policy, action_train_config = load_action_policy(action_config)
+            endpoint_specs.append(
+                _make_action_endpoint_spec(action_policy, action_train_config, service_config)
+            )
+
+        case PlannerOnlySlots(planner=planner_config):
+            runtime_config = RuntimeConfig(
+                generation_prompt_format=planner_config.generation_prompt_format
+            )
+            planner_generator = _load_planner_slot(planner_config, runtime_config)
+            endpoint_specs.append(
+                _make_planner_endpoint_spec(planner_generator, None, service_config)
+            )
+
+        case CombinedSlots(action=action_config, planner=planner_config):
+            # Load the planner first so the action wrapper references the
+            # same SubtaskGenerator instance the planner endpoint serves.
+            runtime_config = RuntimeConfig(
+                generation_prompt_format=planner_config.generation_prompt_format
+            )
+            planner_generator = _load_planner_slot(planner_config, runtime_config)
+            action_policy, action_train_config = load_action_policy(action_config)
+
             from hosting.subtask_policy import SubtaskAugmentedPolicy
 
-            action_endpoint_policy: _base_policy.BasePolicy = SubtaskAugmentedPolicy(
+            augmented_action_policy = SubtaskAugmentedPolicy(
                 inner_policy=action_policy,
                 subtask_generator=planner_generator,
-                prompt_template=service_config.planner.action_prompt_template,
+                prompt_template=planner_config.action_prompt_template,
             )
             _log_service_milestone(
                 "Action endpoint wrapped with subtask augmentation (combined mode)"
             )
-        else:
-            action_endpoint_policy = action_policy
-
-        endpoint_specs.append(
-            EndpointSpec(
-                name="action",
-                policy=action_endpoint_policy,
-                transport=service_config.action_transport,
-                metadata=_build_action_metadata(action_train_config),
+            endpoint_specs.append(
+                _make_action_endpoint_spec(
+                    augmented_action_policy, action_train_config, service_config
+                )
             )
-        )
-
-    if planner_generator is not None:
-        from hosting.subtask_policy import PlannerPolicy
-
-        endpoint_specs.append(
-            EndpointSpec(
-                name="planner",
-                policy=PlannerPolicy(planner_generator),
-                transport=service_config.planner_transport,
-                metadata=_build_planner_metadata(action_train_config),
+            endpoint_specs.append(
+                _make_planner_endpoint_spec(planner_generator, action_train_config, service_config)
             )
-        )
 
     # Admin HTTP endpoint is only relevant when the planner is loaded.
     if runtime_config is not None:
         start_admin_server(runtime_config)
-        _log_service_milestone("Admin HTTP server started on port 8001")
+        _log_service_milestone(f"Admin HTTP server started on port {DEFAULT_ADMIN_PORT}")
 
     # WebSocket + unix socket listeners per active slot.
     for spec in endpoint_specs:

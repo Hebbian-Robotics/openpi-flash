@@ -135,6 +135,15 @@ def unpack_local_frame(frame: bytes) -> dict[str, Any]:
 
         (data_len,) = struct.unpack_from(">Q", frame_memoryview, offset)
         offset += 8
+        # Cross-check the declared data length against the shape/dtype before
+        # trusting it — a mismatch would silently mis-align every subsequent
+        # array in the frame. The Rust decoder enforces the same invariant.
+        expected_data_len = int(np.prod(shape)) * dtype.itemsize
+        if data_len != expected_data_len:
+            raise ValueError(
+                f"Array data length {data_len} does not match shape {shape} "
+                f"dtype {dtype} (expected {expected_data_len} bytes)"
+            )
         array = np.frombuffer(frame, dtype=dtype, count=int(np.prod(shape)), offset=offset).reshape(
             shape
         )

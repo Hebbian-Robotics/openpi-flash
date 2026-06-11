@@ -171,9 +171,11 @@ _LIBERO_IMAGE_SPECS: list[ImageSpec] = [
 
 
 def make_image_specs(train_config: Any) -> list[ImageSpec]:
-    """Return the per-field image preprocessing specs for this embodiment,
-    or an empty list for embodiments we don't recognize (client just no-ops
-    on preprocessing in that case).
+    """Return the per-field image preprocessing specs for this embodiment.
+
+    Raises ``ValueError`` (via ``get_warmup_observation_spec``) for
+    embodiments without a registered spec — same as warmup itself, so an
+    unrecognized config fails at startup rather than at handshake time.
     """
     warmup_observation_spec = get_warmup_observation_spec(train_config)
     match warmup_observation_spec:

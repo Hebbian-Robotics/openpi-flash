@@ -26,7 +26,7 @@ import pathlib
 from typing import Self, TypeVar
 
 from openpi.training import config as _openpi_config
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 _T = TypeVar("_T", bound=BaseModel)
@@ -137,8 +137,8 @@ class PlannerConfig(BaseModel):
 class SlotTransportConfig(BaseModel):
     """Transport listeners for one slot: TCP websocket + QUIC UDP + unix socket."""
 
-    websocket_port: int
-    quic_port: int
+    websocket_port: int = Field(ge=1, le=65535)
+    quic_port: int = Field(ge=1, le=65535)
     unix_socket_path: str
 
 

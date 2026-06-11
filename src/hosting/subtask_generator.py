@@ -22,6 +22,8 @@ import functools
 import string
 import threading
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import flax.nnx as nnx
@@ -277,9 +279,15 @@ def _prefix_forward_impl(
     return initial_logits, embed_table, prefix_mask, last_position, kv_cache  # ty: ignore[invalid-return-type]
 
 
+_PrefixForwardFn = Callable[
+    [_model.Observation], tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, Any]
+]
+_FullGenerateFn = Callable[[_model.Observation], tuple[jnp.ndarray, jnp.ndarray]]
+
+
 def _make_jit_prefix_forward(
     model: Pi0,
-) -> Any:
+) -> _PrefixForwardFn:
     """Create a JIT-compiled prefix forward function using the module_jit pattern.
 
     Follows the same approach as openpi's nnx_utils.module_jit: split the model
@@ -375,7 +383,7 @@ def _make_jit_full_generate(
     model: Pi0,
     max_tokens: int,
     valid_vocab_mask: jnp.ndarray,
-) -> Any:
+) -> _FullGenerateFn:
     """JIT-compile the full generate path (prefix + AR decode) using module_jit pattern.
 
     The entire generation (SigLIP encoding, 18 transformer layers for prefix,
@@ -530,6 +538,26 @@ def _map_camera_names(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _JitDecodePath:
+    """Prefix + unrolled AR decode compiled as a single XLA graph."""
+
+    full_generate: _FullGenerateFn
+
+
+@dataclass(frozen=True)
+class _EagerDecodePath:
+    """JIT-compiled prefix forward + eager Python decode loop."""
+
+    prefix_forward: _PrefixForwardFn
+
+
+# The two decode strategies are mutually exclusive; modeling them as one
+# union field (instead of a bool plus two nullable callables) makes the
+# "wrong path compiled" state unrepresentable after load().
+_DecodePath = _JitDecodePath | _EagerDecodePath
+
+
 class SubtaskGenerator:
     """JIT-compiled JAX subtask text generator for pi0.5.
 
@@ -561,8 +589,7 @@ class SubtaskGenerator:
         self._model: Pi0 | None = None
         self._tokenizer: SubtaskTokenizer | None = None
         self._valid_vocab_mask: jnp.ndarray | None = None
-        self._jit_prefix_forward: Any = None
-        self._jit_full_generate: Any = None
+        self._decode_path: _DecodePath | None = None
         # Serializes generate() across the action and planner endpoints in
         # combined mode. The two transport threads share this one instance.
         self._generate_lock = threading.Lock()
@@ -622,13 +649,15 @@ class SubtaskGenerator:
                 f"(prefix + {self._max_tokens}-step unrolled decode)...",
                 flush=True,
             )
-            self._jit_full_generate = _make_jit_full_generate(
-                model, self._max_tokens, self._valid_vocab_mask
+            self._decode_path = _JitDecodePath(
+                full_generate=_make_jit_full_generate(
+                    model, self._max_tokens, self._valid_vocab_mask
+                )
             )
             print("[subtask] Full generate JIT ready", flush=True)
         else:
             print("[subtask] Preparing JIT-compiled prefix forward (eager decode)...", flush=True)
-            self._jit_prefix_forward = _make_jit_prefix_forward(model)
+            self._decode_path = _EagerDecodePath(prefix_forward=_make_jit_prefix_forward(model))
             print("[subtask] Prefix forward JIT ready", flush=True)
 
     def is_loaded(self) -> bool:
@@ -649,49 +678,53 @@ class SubtaskGenerator:
         Returns:
             Generated subtask text (e.g., "pick up cup").
         """
-        if self._model is None or self._tokenizer is None:
+        model = self._model
+        tokenizer = self._tokenizer
+        decode_path = self._decode_path
+        if model is None or tokenizer is None or decode_path is None:
             raise RuntimeError("SubtaskGenerator not loaded. Call load() first.")
 
         with self._generate_lock:
             # Sync prompt format from runtime config (updated via admin endpoint)
             if self._runtime_config is not None:
-                self._tokenizer.prompt_format = self._runtime_config.generation_prompt_format
+                tokenizer.prompt_format = self._runtime_config.generation_prompt_format
 
             # Map client camera names to JAX model names
             jax_images: dict[str, np.ndarray] = {}
             if client_images:
                 jax_images = _map_camera_names(client_images, self._embodiment_name)
 
-            observation = _build_subtask_observation(task_prompt, jax_images, self._tokenizer)
+            observation = _build_subtask_observation(task_prompt, jax_images, tokenizer)
 
-            if self._use_jit_decode and self._jit_full_generate is not None:
-                # JIT path: single compiled graph for prefix + decode
-                token_buffer, _done = self._jit_full_generate(observation)
-                generated_token_ids = [
-                    int(t) for t in token_buffer if int(t) not in (0, EOS_TOKEN_ID)
-                ]
-            else:
-                # Eager path: JIT prefix + eager decode loop
-                initial_logits, embed_table, prefix_mask, last_position, kv_cache = (
-                    self._jit_prefix_forward(observation)
-                )
-                generated_token_ids = _autoregressive_decode(
-                    self._model,
-                    initial_logits,
-                    embed_table,
-                    prefix_mask,
-                    last_position,
-                    kv_cache,
-                    self._max_tokens,
-                    valid_vocab_mask=self._valid_vocab_mask,
-                )
-                # Strip EOS token if present
-                if EOS_TOKEN_ID in generated_token_ids:
-                    generated_token_ids = generated_token_ids[
-                        : generated_token_ids.index(EOS_TOKEN_ID)
+            match decode_path:
+                case _JitDecodePath(full_generate=full_generate):
+                    # JIT path: single compiled graph for prefix + decode
+                    token_buffer, _done = full_generate(observation)
+                    generated_token_ids = [
+                        int(t) for t in token_buffer if int(t) not in (0, EOS_TOKEN_ID)
                     ]
+                case _EagerDecodePath(prefix_forward=prefix_forward):
+                    # Eager path: JIT prefix + eager decode loop
+                    initial_logits, embed_table, prefix_mask, last_position, kv_cache = (
+                        prefix_forward(observation)
+                    )
+                    generated_token_ids = _autoregressive_decode(
+                        model,
+                        initial_logits,
+                        embed_table,
+                        prefix_mask,
+                        last_position,
+                        kv_cache,
+                        self._max_tokens,
+                        valid_vocab_mask=self._valid_vocab_mask,
+                    )
+                    # Strip EOS token if present
+                    if EOS_TOKEN_ID in generated_token_ids:
+                        generated_token_ids = generated_token_ids[
+                            : generated_token_ids.index(EOS_TOKEN_ID)
+                        ]
 
-            return self._tokenizer.detokenize(generated_token_ids)
+            return tokenizer.detokenize(generated_token_ids)
 
     def warmup(self) -> None:
         """Run one generation to trigger JIT compilation.
