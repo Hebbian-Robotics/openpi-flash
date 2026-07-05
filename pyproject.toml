@@ -10,18 +10,18 @@ dependencies = [
     "openpi-client",
     "huggingface-hub>=0.36.2,<1.0",
     "pydantic>=2.13.4",
-    "pydantic-settings>=2.14.1",
-    "fastapi>=0.136.3",
+    "pydantic-settings>=2.14.2",
+    "fastapi>=0.138.1",
     "httpx>=0.28.1",
-    "modal>=1.4.3",
-    "starlette>=1.2.1",
+    "modal>=1.5.1",
+    "starlette>=1.3.1",
     "uvicorn>=0.49.0",
     "gsutil>=5.37",
     "quic-portal>=0.1.13",
     "python-dotenv>=1.2.2",
-    "typer>=0.26.7",
+    "typer>=0.26.8",
     "google-genai>=1.55.0",
-    "openai>=2.41.0",
+    "openai>=2.44.0",
     "openpi-flash-transport",
     "tenacity>=9.1.4",
 ]
@@ -49,9 +49,9 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "openpi-flash-client",
-    "ruff>=0.15.15",       #
-    "ty>=0.0.43",
-    "pytest>=9.0.3",
+    "ruff>=0.15.20",
+    "ty>=0.0.55",
+    "pytest>=9.1.1",
 ]
 
 [tool.hatch.build.targets.wheel]

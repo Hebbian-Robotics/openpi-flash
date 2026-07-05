@@ -42,6 +42,11 @@ run_step     "ruff-format"   "."             uv run ruff format
 run_step     "ty-check"      "."             uv run ty check
 run_step     "cargo-fmt"     "flash-transport"  cargo fmt
 run_step     "cargo-clippy"  "flash-transport"  cargo clippy --all-targets --all-features
+run_step     "cargo-test"    "flash-transport"  cargo test
+# Build the echo binaries before pytest; protocol-drift tests skip if they are
+# missing.
+run_step     "cargo-build"   "flash-transport"  cargo build
+run_step     "pytest"        "."             uv run pytest
 run_optional "lychee"        "."             lychee   lychee -v .
 run_optional "hadolint"      "."             hadolint hadolint Dockerfile
 run_optional "tofu-fmt"      "infra"         tofu     tofu fmt

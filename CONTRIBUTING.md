@@ -63,10 +63,13 @@ Run everything below in one shot with `./scripts/check.sh` (optional tools are s
 uv run ruff check --fix  
 uv run ruff format       
 uv run ty check          
+uv run pytest            # offline unit and protocol-drift tests
 
 # Rust transport layer
 cd flash-transport && cargo fmt
 cd flash-transport && cargo clippy --all-targets --all-features
+cd flash-transport && cargo test
+cd flash-transport && cargo build   # builds echo binaries used by pytest
 
 lychee -v .              # Markdown link checking
 hadolint Dockerfile      # Docker linting (brew install hadolint)

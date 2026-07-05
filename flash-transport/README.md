@@ -6,9 +6,12 @@ cross-cutting concerns that used to live on the hot path — QUIC transport,
 Arrow IPC codec, image preprocessing, action chunk caching, and server-side
 timing instrumentation.
 
-The crate ships one binary (`openpi-flash-transport`) that runs in two modes —
-`server` (deployed alongside the inference backend) and `client` (spawned by
-the caller). Both sides speak a small binary frame format over a local Unix
+The crate ships one binary (`openpi-flash-transport`) that runs in two modes:
+
+1. `server` (deployed alongside the inference backend)
+2. `client` (spawned by the caller).
+
+Both sides speak a small binary frame format over a local Unix
 socket to their respective Python shims, and Arrow IPC over QUIC to each
 other.
 
@@ -42,6 +45,22 @@ Python caller                                    Python inference backend
 │  - handshake         │                           │                      │
 └──────────────────────┘                           └──────────────────────┘
 ```
+
+Each boundary uses the smallest codec that fits:
+
+- `msgpack_numpy` stays at Python-facing surfaces because that is OpenPI's
+  native WebSocket and metadata format. Rust only decodes the metadata blob.
+- `LocalFrame` stays on the Unix socket because it is private to the Rust
+  binary and Python shim. The Python side writes `ndarray.tobytes()` plus a few
+  `struct.pack`s; Rust reads the same layout without adding `pyarrow` to callers.
+- Arrow IPC stays on the QUIC wire because it is a maintained cross-language
+  standard with aligned buffers for tensor-heavy traffic.
+
+`LocalFrame` is intentionally not schema'd. It is mirrored in `local_frame.py`
+and `local_format.rs`, and the cross-language tests keep those copies in
+lockstep. Arrow on the Unix socket would pull `pyarrow` into every caller;
+`msgpack_numpy` on QUIC would make Rust reimplement a Python convention and
+still copy arrays.
 
 ## Quickstart
 
@@ -138,9 +157,10 @@ and exercise the Python shim against the real binary.
 
 ## Non-goals
 
-- **PyO3 / in-process Rust.** The separate-process model is deliberate —
-  keeps the Python GIL away from the hot path and lets the transport layer
-  be built and deployed independently of the Python environment.
+- **PyO3 / in-process Rust.** The separate-process model is deliberate. It
+  keeps the Python GIL away from the hot path, lets either side restart
+  independently, and keeps the slow inference server warm while experimenting
+  with transport, preprocessing, or inference settings.
 - **Policy inference.** The transport layer handles networking and
   preprocessing only; the actual model runs in Python (JAX) behind the
   backend Unix socket.

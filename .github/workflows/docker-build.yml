@@ -29,6 +29,60 @@ jobs:
           dockerfile: hosting/Dockerfile
           config: hosting/.hadolint.yaml
 
+  # Fast checks that do not need the full server environment.
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: hosting
+
+      # Only the client package is needed for msgpack_numpy in metadata tests.
+      - uses: actions/checkout@v6
+        with:
+          repository: Hebbian-Robotics/openpi
+          path: openpi
+          sparse-checkout: packages/openpi-client
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hosting/flash-transport/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('hosting/flash-transport/Cargo.lock') }}
+
+      - name: Rust lints + tests
+        working-directory: hosting/flash-transport
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test
+          cargo build   # builds the echo binaries the Python drift tests exec
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Install just enough for tests; avoid syncing torch/jax/modal.
+      - name: Python lints + tests
+        working-directory: hosting
+        run: |
+          uv venv --python 3.11
+          uv pip install \
+            "numpy>=1.26.4,<2.0.0" \
+            "msgpack>=1.2.1" \
+            "pytest>=9.1.1" \
+            "ruff>=0.15.20" \
+            -e ../openpi/packages/openpi-client
+          uv pip install --no-deps -e packages/openpi-flash-transport -e .
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+          .venv/bin/pytest tests/
+
   # ---------------------------------------------------------------------------
   # Parallel: build transport binaries + Docker base image
   # ---------------------------------------------------------------------------
@@ -144,7 +198,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   combine:
-    needs: [build-transport-x86, build-transport-arm, build-base-image]
+    needs: [build-transport-x86, build-transport-arm, build-base-image, test]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
