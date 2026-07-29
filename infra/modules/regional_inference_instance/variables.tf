@@ -51,7 +51,7 @@ variable "ssh_key_name" {
 }
 
 variable "ssh_public_key" {
-  description = "Optional SSH public key material. When set, Terraform creates a managed key pair instead of using ssh_key_name."
+  description = "Optional SSH public key material. When set, OpenTofu creates a managed key pair instead of using ssh_key_name."
   type        = string
   default     = null
 }
@@ -202,7 +202,7 @@ variable "prepare_planner_checkpoint" {
 variable "planner_prep_hf_repo" {
   description = "Hugging Face repo ID that holds the planner checkpoint tar."
   type        = string
-  default     = "Hebbian-Robotics/pi05_subtask"
+  default     = "hebbianrobotics/pi05_subtask"
 }
 
 variable "planner_prep_tar_path_in_repo" {

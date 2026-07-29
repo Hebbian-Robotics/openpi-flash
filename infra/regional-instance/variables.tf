@@ -64,7 +64,7 @@ variable "ssh_key_name" {
 }
 
 variable "ssh_public_key" {
-  description = "Optional SSH public key material. When set, Terraform creates a managed key pair instead of using ssh_key_name."
+  description = "Optional SSH public key material. When set, OpenTofu creates a managed key pair instead of using ssh_key_name."
   type        = string
   default     = null
 }

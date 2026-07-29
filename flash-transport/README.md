@@ -76,8 +76,10 @@ alongside the Python backend):
 ```bash
 openpi-flash-transport server \
     --listen-port 5555 \
-    --backend-socket-path /tmp/openpi-backend.sock
+    --backend-socket-path /tmp/openpi-action.sock
 ```
+
+The hosted service uses `/tmp/openpi-action.sock` for the action slot and `/tmp/openpi-planner.sock` for the planner slot by default.
 
 Client side (on the caller's machine):
 
@@ -152,8 +154,7 @@ cargo clippy --all-targets --all-features
 cargo fmt --check
 ```
 
-Cross-language round-trip tests live in `hosting/tests/test_arrow_wire.py`
-and exercise the Python shim against the real binary.
+Cross-language round-trip tests live in `tests/test_arrow_wire.py` and `tests/test_metadata_python_emit.py`, and exercise the Python shim against the real binary.
 
 ## Non-goals
 
@@ -162,8 +163,8 @@ and exercise the Python shim against the real binary.
   independently, and keeps the slow inference server warm while experimenting
   with transport, preprocessing, or inference settings.
 - **Policy inference.** The transport layer handles networking and
-  preprocessing only; the actual model runs in Python (JAX) behind the
-  backend Unix socket.
+  preprocessing only; the actual model runs in Python (PyTorch or JAX,
+  depending on the configured slot) behind the backend Unix socket.
 - **msgpack_numpy compatibility.** The preprocessing and chunking paths
   require Arrow IPC on the wire. The msgpack_numpy fallback still works but
   does not benefit from transport-side resize or chunking.

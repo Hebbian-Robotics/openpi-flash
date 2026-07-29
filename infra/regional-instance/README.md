@@ -1,6 +1,6 @@
 # Regional Inference Instance
 
-Terraform root for deploying a single OpenPI inference EC2 instance in any AWS region.
+OpenTofu root for deploying a single OpenPI inference EC2 instance in any AWS region.
 
 This stack is intentionally separate from the shared [`../`](../README.md) infrastructure:
 
@@ -21,11 +21,11 @@ This stack is intentionally separate from the shared [`../`](../README.md) infra
 ## Usage
 
 ```bash
-SHARED_ECR_REPOSITORY_URL=$(terraform -chdir=../ output -raw ecr_repository_url)
+SHARED_ECR_REPOSITORY_URL=$(tofu -chdir=../ output -raw ecr_repository_url)
 
 cd infra/regional-instance
-terraform init
-terraform apply \
+tofu init
+tofu apply \
   -var aws_region=ap-northeast-2 \
   -var ecr_repository_url="$SHARED_ECR_REPOSITORY_URL" \
   -var 'ssh_public_key=ssh-ed25519 AAAA... user@host' \
@@ -43,4 +43,4 @@ When `subnet_id` is omitted, the module discovers the default VPC's first public
 - Cross-region ECR pulls are acceptable for testing and steady-state serving, but they increase cold-start time.
 - The default AMI is the latest Deep Learning AMI GPU PyTorch (Ubuntu 24.04), resolved via SSM parameter. This AMI ships with Docker, nvidia-container-toolkit, CUDA, and AWS CLI pre-installed. Override with `ami_id` or change the PyTorch version via `dlami_ssm_slug`.
 - This stack expects the shared IAM instance profile (`ec2-ecr-pull`) to already exist.
-- `ssh_key_name` and `ssh_public_key` are mutually exclusive. Use `ssh_key_name` to reference a pre-existing AWS key pair, or `ssh_public_key` to have Terraform create one.
+- `ssh_key_name` and `ssh_public_key` are mutually exclusive. Use `ssh_key_name` to reference a pre-existing AWS key pair, or `ssh_public_key` to have OpenTofu create one.

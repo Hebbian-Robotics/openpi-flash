@@ -1,6 +1,6 @@
 # AWS Infrastructure
 
-Terraform configs for the shared AWS infrastructure that supports openpi-flash. These resources are created once and shared across all EC2 inference instances.
+OpenTofu configs for the shared AWS infrastructure that supports openpi-flash. These resources are created once and shared across all EC2 inference instances.
 
 For region-specific EC2 deployments, use [`regional-instance/`](./regional-instance/). Keep the shared root and the regional EC2 root separate so you can deploy the same server shape into different regions without duplicating ECR or IAM resources.
 
@@ -22,7 +22,7 @@ EC2 instances, security groups, Elastic IPs, and ALBs are not managed by this sh
 
 ### Prerequisites
 
-Install [Terraform](https://developer.hashicorp.com/terraform/install) or [OpenTofu](https://opentofu.org/docs/intro/install/) (configs are compatible with both).
+Install [OpenTofu](https://opentofu.org/docs/intro/install/). The configs are Terraform-compatible HCL, but this repo uses the `tofu` CLI for consistency.
 
 ### First-time setup
 
@@ -30,30 +30,30 @@ Install [Terraform](https://developer.hashicorp.com/terraform/install) or [OpenT
 cd infra
 
 # Initialize providers
-terraform init
+tofu init
 
 # Review what will be created
-terraform plan
+tofu plan
 
 # Create the resources
-terraform apply
+tofu apply
 ```
 
 ### Importing existing resources
 
-If the resources already exist (created manually), import them into Terraform state:
+If the resources already exist (created manually), import them into OpenTofu state:
 
 ```bash
-terraform import aws_ecr_repository.inference openpi-flash
-terraform import aws_ecr_lifecycle_policy.inference openpi-flash
-terraform import aws_iam_openid_connect_provider.github_actions arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com
-terraform import aws_iam_role.github_actions_ecr_push github-actions-ecr-push
-terraform import aws_iam_role.ec2_inference ec2-ecr-pull
-terraform import aws_iam_role_policy_attachment.ec2_ecr_pull_read_only ec2-ecr-pull/arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
-terraform import aws_iam_instance_profile.ec2_inference ec2-ecr-pull
+tofu import aws_ecr_repository.inference openpi-flash
+tofu import aws_ecr_lifecycle_policy.inference openpi-flash
+tofu import aws_iam_openid_connect_provider.github_actions arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com
+tofu import aws_iam_role.github_actions_ecr_push github-actions-ecr-push
+tofu import aws_iam_role.ec2_inference ec2-ecr-pull
+tofu import aws_iam_role_policy_attachment.ec2_ecr_pull_read_only ec2-ecr-pull/arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+tofu import aws_iam_instance_profile.ec2_inference ec2-ecr-pull
 ```
 
-After importing, run `terraform plan` to verify no unexpected changes.
+After importing, run `tofu plan` to verify no unexpected changes.
 
 ### Customizing
 
@@ -68,10 +68,10 @@ github_repo            = "openpi-flash"
 
 ### Outputs
 
-After applying, Terraform prints values needed by CI and EC2 setup:
+After applying, OpenTofu prints values needed by CI and EC2 setup:
 
 ```bash
-terraform output
+tofu output
 # ecr_repository_url        = "<account-id>.dkr.ecr.us-west-2.amazonaws.com/openpi-flash"
 # github_actions_role_arn   = "arn:aws:iam::<account-id>:role/github-actions-ecr-push"
 # ec2_instance_profile_name = "ec2-ecr-pull"
@@ -88,11 +88,11 @@ AWS_ECR_REGISTRY=<account-id>.dkr.ecr.us-west-2.amazonaws.com
 AWS_ROLE_TO_ASSUME=arn:aws:iam::<account-id>:role/github-actions-ecr-push
 ```
 
-Set them from the Terraform outputs and your account ID:
+Set them from the OpenTofu outputs and your account ID:
 
 ```bash
-ECR_REPOSITORY_URL=$(terraform output -raw ecr_repository_url)
-GITHUB_ACTIONS_ROLE_ARN=$(terraform output -raw github_actions_role_arn)
+ECR_REPOSITORY_URL=$(tofu output -raw ecr_repository_url)
+GITHUB_ACTIONS_ROLE_ARN=$(tofu output -raw github_actions_role_arn)
 
 gh variable set AWS_ECR_REGISTRY \
   --body "${ECR_REPOSITORY_URL%/openpi-flash}" \

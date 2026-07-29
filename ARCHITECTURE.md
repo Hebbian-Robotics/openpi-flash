@@ -35,7 +35,7 @@ Planner (pi0.5 two-phase inference):
 
 - `subtask_generator.py` — JAX-only subtask decoder. JIT-compiles the PaliGemma prefix + autoregressive decode loop into a single XLA graph (the Python `for` loop is unrolled by the tracer so each iteration has concrete shapes). Restricts generation to printable ASCII tokens via a vocab mask. Holds an internal lock so shared use across endpoints in combined mode is serialized. Warm ≈ 1.1s per generation.
 - `subtask_policy.py` — Two `BasePolicy` wrappers: `SubtaskAugmentedPolicy` (combined mode; runs the planner first, splices the subtask into the prompt via `action_prompt_template`, then calls the inner action policy; honors `obs["mode"]` ∈ `default` / `subtask_only` / `action_only`), and `PlannerPolicy` (planner-only endpoint; returns `{"subtask": {"text", "ms"}}` with no `actions`).
-- `admin_server.py` — FastAPI admin HTTP endpoint on port 8001, started only when the planner slot is loaded. `GET /config` / `PATCH /config` let operators mutate `generation_prompt_format` at runtime without a restart; `SubtaskGenerator.generate()` re-reads the value on every call. Bound to `0.0.0.0` inside the container, but docker/terraform publishes it on `127.0.0.1` only.
+- `admin_server.py` — FastAPI admin HTTP endpoint on port 8001, started only when the planner slot is loaded. `GET /config` / `PATCH /config` let operators mutate `generation_prompt_format` at runtime without a restart; `SubtaskGenerator.generate()` re-reads the value on every call. Bound to `0.0.0.0` inside the container, but Docker/OpenTofu publishes it on `127.0.0.1` only.
 
 Transports:
 
@@ -74,12 +74,12 @@ Each active slot gets its own supervised `flash-transport` subprocess (one unix 
 
 Smoke tests invoked via `main.py test *`. Each test calls `wait_for_server()` (HTTP health check), connects via the appropriate transport, runs `benchmark.run_benchmark()`, and prints timing results. `helpers.py` has the shared `random_observation_aloha()` generator.
 
-### infra/ — Terraform
+### infra/ — OpenTofu/Terraform
 
 Two-tier structure:
 
 - `infra/` (root) — Shared, one-time resources: ECR repository, IAM roles, GitHub Actions OIDC. Apply once.
-- `infra/regional-instance/` — Per-region EC2 deployment. Uses Terraform workspaces (`openpi-uswest2`, `openpi-malaysia`, `openpi-seoul`). Calls the reusable module at `infra/modules/regional_inference_instance/`.
+- `infra/regional-instance/` — Per-region EC2 deployment root. Configure it with variables such as `aws_region`, `deployment_name`, `subnet_id`, and the slot configs. Calls the reusable module at `infra/modules/regional_inference_instance/`.
 - `infra/modules/regional_inference_instance/` — The reusable module: EC2 instance, security group, optional Elastic IP, cloud-init bootstrap via `user_data.yaml.tftpl`.
 
 ## Transport paths
@@ -136,12 +136,12 @@ The Rust sidecar exists on **both** ends — client-side it's spawned by `FlashT
 - **Slots are independent on the wire, coupled in memory.** Each active slot gets its own websocket port, QUIC port, unix socket, and `flash-transport` supervisor — the two endpoints are independent at the transport layer. In combined mode they share the same `SubtaskGenerator` instance in memory (the planner's internal lock serializes JAX calls) so the action endpoint's prompt augmentation and the planner endpoint return identical subtasks for the same input.
 - **Mode is derived, not declared.** `_resolve_slots` in `serve.py` picks `action_only` / `planner_only` / `combined` from which slots are set in `ServiceConfig`. There is no separate mode flag; the pydantic model-validator rejects configs where both slots are empty.
 - **Rust owns the network, Python owns inference.** In Docker/EC2, openpi-flash-transport terminates QUIC and speaks a simple framed protocol over a Unix socket to Python. The same local protocol is also used by the client wrapper, which spawns a local openpi-flash-transport process and keeps the Python `BasePolicy` API intact.
-- **Infrastructure is separated by blast radius.** Shared resources (ECR, IAM) are in the Terraform root. Regional EC2 instances are in separate workspaces so you can destroy one region without affecting others.
+- **Infrastructure is separated by blast radius.** Shared resources (ECR, IAM) are in the shared infrastructure root. Regional EC2 instances are deployed from a separate root, so you can change or destroy one region without affecting shared CI/ECR/IAM resources.
 
 ## Cross-cutting concerns
 
-- **torch.compile modes** are threaded through from env var (`OPENPI_PYTORCH_COMPILE_MODE`) to Terraform user data to Docker env to `compile_mode.py` to the openpi config dataclass. The action-slot warmup pass in `serve.py` triggers compilation before the server starts accepting connections.
+- **torch.compile modes** are threaded through from env var (`OPENPI_PYTORCH_COMPILE_MODE`) to OpenTofu user data to Docker env to `compile_mode.py` to the openpi config dataclass. The action-slot warmup pass in `serve.py` triggers compilation before the server starts accepting connections.
 - **JAX planner warmup.** When the planner slot is loaded, `SubtaskGenerator.warmup()` runs before endpoints come up so the first client call doesn't block on JIT compilation. Warm path is ~1.1s per generation with the default JIT-unrolled decode; in combined mode this adds to every action `infer()` unless the client opts out with `obs["mode"] = "action_only"`.
 - **Runtime configuration surface.** The admin HTTP endpoint (port 8001, only started with the planner slot) is the single supported way to mutate server state without a restart. Today it exposes `generation_prompt_format`; any future runtime-tunable knob should go through the same `RuntimeConfig` / `RuntimeConfigUpdate` types so invariants are shared with `PlannerConfig`.
-- **Health checks** — Each slot's WebSocket server exposes `/healthz` on its own TCP port. All test scripts and the Terraform cloud-init poll this before attempting inference. The admin endpoint additionally exposes `GET /health` on port 8001.
+- **Health checks** — Each slot's WebSocket server exposes `/healthz` on its own TCP port. All test scripts and the OpenTofu cloud-init poll this before attempting inference. The admin endpoint additionally exposes `GET /health` on port 8001.
 - **Checkpoint download** — openpi's `maybe_download()` handles `gs://` and local paths. The hosting layer also prepares Hugging Face checkpoints with `huggingface-hub` for Docker/EC2 action-slot deployments.

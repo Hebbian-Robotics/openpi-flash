@@ -1,6 +1,6 @@
 # AWS Manual Setup
 
-Step-by-step CLI instructions to set up the AWS infrastructure without Terraform. For the Terraform approach, see [`infra/`](../infra/).
+Step-by-step CLI instructions to set up the AWS infrastructure without OpenTofu. For the infrastructure-as-code approach, see [`infra/`](../infra/).
 
 ## Shared infrastructure (one-time)
 
@@ -130,7 +130,7 @@ aws iam add-role-to-instance-profile \
 
 ## Per-instance setup
 
-If you want a reusable, region-agnostic Terraform path instead of manual CLI steps, use [`infra/regional-instance/`](../infra/regional-instance/). The manual steps below are still useful for debugging or one-off experiments.
+If you want a reusable, region-agnostic OpenTofu path instead of manual CLI steps, use [`infra/regional-instance/`](../infra/regional-instance/). The manual steps below are still useful for debugging or one-off experiments.
 
 These steps are repeated for each EC2 instance you launch.
 

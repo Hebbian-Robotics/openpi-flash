@@ -48,7 +48,14 @@ The server has two optional component slots — `action` (PyTorch or JAX action 
 - `planner_only` — serves subtask text only; no PyTorch action model is loaded.
 - `combined` — both slots; the action endpoint auto-augments prompts with generated subtasks, and the planner endpoint is independently callable.
 
-Copy [`config.example.json`](config.example.json) (action-only) or [`config.example.planner.json`](config.example.planner.json) (combined) and edit it:
+Start from the example that matches the server shape you want, then edit the model and checkpoint paths:
+
+| Example | Mode | Notes |
+|---------|------|-------|
+| [`config.example.json`](config.example.json) | `action_only` | Default Docker/EC2 action server |
+| [`config.planner_only.example.json`](config.planner_only.example.json) | `planner_only` | Planner endpoint only; no action model |
+| [`config.example.planner.json`](config.example.planner.json) | `combined` | Action endpoint plus planner endpoint |
+| [`config.combined.example.json`](config.combined.example.json) | `combined` | Combined-mode variant with an `hf://` action checkpoint |
 
 ```bash
 cp config.example.json config.json
@@ -99,19 +106,19 @@ The planner is how we specialize a general VLA to a specific task distribution: 
 1. **Raw Orbax URI** (preferred for the pi0.5 base): `gs://openpi-assets/checkpoints/pi05_base/params`. `SubtaskGenerator.load()` downloads it on first boot via `maybe_download` and caches it under `OPENPI_DATA_HOME`. No extra step.
 2. **Local prepared directory** (required for fine-tuned checkpoints published as a single HF tar): `/cache/models/<name>`. The directory must contain `params/_METADATA` directly at the root. Prepare it with `main.py prepare-planner-checkpoint` (see below).
 
-The current production planner (`Hebbian-Robotics/pi05_subtask`) is published as a single `.tar` blob on Hugging Face. For a cold deployment, prepare it once into `/cache/models/pi05_subtask` and point the config at that path:
+The current production planner (`hebbianrobotics/pi05_subtask`) is published as a single `.tar` blob on Hugging Face. For a cold deployment, prepare it once into `/cache/models/pi05_subtask` and point the config at that path:
 
 ```bash
 # Inside the container (or any env with the openpi-flash deps):
 uv run python main.py prepare-planner-checkpoint \
-    --hf-repo Hebbian-Robotics/pi05_subtask \
+    --hf-repo hebbianrobotics/pi05_subtask \
     --tar-path-in-repo jax/pi05_subtask.tar \
     --output-dir /cache/models/pi05_subtask
 ```
 
 The command downloads the tar via `huggingface_hub`, extracts it, strips the wrapper `99/` directory, verifies `params/_METADATA` exists, and is safe to re-run (returns immediately when the output directory already looks complete; pass `--force-download` to rebuild).
 
-When provisioning through Terraform, set `prepare_planner_checkpoint = true` on the `regional_inference_instance` module to run this step automatically from cloud-init on first boot. The module surfaces `planner_prep_hf_repo`, `planner_prep_tar_path_in_repo`, and `planner_prep_output_dir` variables for picking a different fine-tune.
+When provisioning through OpenTofu, set `prepare_planner_checkpoint = true` on the `regional_inference_instance` module to run this step automatically from cloud-init on first boot. The module surfaces `planner_prep_hf_repo`, `planner_prep_tar_path_in_repo`, and `planner_prep_output_dir` variables for picking a different fine-tune.
 
 ### Example combined-mode config
 
@@ -255,6 +262,8 @@ Or with Docker Compose:
 ```bash
 docker compose --profile openpi up --build
 ```
+
+The checked-in Compose file publishes the action slot ports (`8000` and UDP `5555`). If your `config.json` enables the planner slot, add `8002`, UDP `5556`, and loopback-bound `8001` to `compose.yml`, or use the `docker run` form above.
 
 The Docker image builds and runs `openpi-flash-transport` by default for the direct EC2/AWS QUIC path. The Python process still owns policy loading and inference; the transport binary only terminates QUIC and forwards requests over a local Unix socket.
 
@@ -451,8 +460,11 @@ action = client.infer(observation)
 ## Health check
 
 ```bash
-# EC2/Docker
+# EC2/Docker action endpoint
 curl http://localhost:8000/healthz
+
+# EC2/Docker planner endpoint, when the planner slot is loaded
+curl http://localhost:8002/healthz
 
 # Modal
 curl "https://$MODAL_HOSTNAME/healthz"
@@ -462,9 +474,9 @@ curl "https://$MODAL_HOSTNAME/healthz"
 
 ### AWS infrastructure setup
 
-The shared AWS resources (ECR and IAM roles) can be set up with Terraform or manually:
+The shared AWS resources (ECR and IAM roles) can be set up with OpenTofu or manually:
 
-- **Terraform/OpenTofu (recommended):** See [`infra/`](infra/) — run `terraform apply` to create everything
+- **OpenTofu (recommended):** See [`infra/`](infra/) — run `tofu apply` to create everything
 - **Manual CLI:** See [`docs/aws-manual-setup.md`](docs/aws-manual-setup.md) for step-by-step `aws` commands
 
 ### Docker checkpoint preparation
@@ -486,7 +498,7 @@ docker run --rm \
   python main.py prepare-checkpoint
 ```
 
-`docker compose --profile openpi up --build` and the Terraform EC2 bootstrap run this preparation step automatically.
+`docker compose --profile openpi up --build` and the OpenTofu EC2 bootstrap run this preparation step automatically.
 
 ### Launching an EC2 instance
 
